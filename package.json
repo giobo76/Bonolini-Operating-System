@@ -1,0 +1,23 @@
+{
+  "name": "bonolini-os",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Bonolini Operating System — shared platform for Bonolini Transfer and the future AI Automation Agency",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @bos/transfer-web dev",
+    "dev:admin": "pnpm --filter @bos/transfer-admin dev",
+    "build": "pnpm -r --if-present run build",
+    "lint": "pnpm -r --if-present run lint",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test",
+    "db:generate": "pnpm --filter @bos/db run generate",
+    "db:migrate": "pnpm --filter @bos/db run migrate"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

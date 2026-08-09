@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm --filter @bos/transfer-web --filter @bos/transfer-admin build
+
+# NOTE: deploy is intentionally not wired up yet — needs real Vercel project
+# secrets configured in the repo first. Add a deploy job once those exist.
+# `build` needs no secrets: both apps build successfully with zero env vars
+# set (getDb() is lazy, no Supabase client is constructed at module/build
+# time anywhere in the current codebase) — verified locally before adding
+# this step. If a future change makes the build require an env var, that
+# dependency should be treated as a bug to fix, not papered over with dummy
+# CI secrets, since it would mean the same failure hits a real deploy.
