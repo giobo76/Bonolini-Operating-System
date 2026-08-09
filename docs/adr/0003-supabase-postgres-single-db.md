@@ -20,3 +20,7 @@ Supabase also provides Auth (used directly by `packages/auth`) and Storage, so a
 ## Consequence
 
 Migrations are the source of truth for schema (`packages/db/migrations`), and RLS policies are treated as part of the schema, not an afterthought — see `packages/db/migrations/0000_init.sql`.
+
+### Security posture note
+
+The current runtime connection in `packages/db/src/client.ts` uses the Postgres role that is configured for the app and therefore does not enforce RLS as a runtime boundary on its own. Tenant isolation remains an application-layer contract today, and the project treats RLS as defense-in-depth rather than as the only enforcement mechanism. This decision is intentionally documented here so the current model is not mistaken for a fully RLS-enforced database setup.

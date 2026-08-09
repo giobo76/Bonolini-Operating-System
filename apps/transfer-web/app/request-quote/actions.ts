@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import { leadSubmissionSchema, createServerCaller } from "@bos/core";
+import { submitLeadRateLimiter } from "./rate-limit";
 
 export async function submitLeadAction(formData: FormData) {
   const parsed = leadSubmissionSchema.safeParse({
@@ -22,6 +23,12 @@ export async function submitLeadAction(formData: FormData) {
   if (!parsed.success) {
     const message = parsed.error.issues.map((issue) => issue.message).join(" ");
     redirect(`/request-quote?error=${encodeURIComponent(message)}`);
+  }
+
+  const rateLimitKey = formData.get("email")?.toString() || formData.get("phone")?.toString() || "unknown";
+  const rateLimitResult = submitLeadRateLimiter(rateLimitKey);
+  if (!rateLimitResult.ok) {
+    redirect(`/request-quote?error=${encodeURIComponent("Too many requests. Please try again shortly.")}`);
   }
 
   try {

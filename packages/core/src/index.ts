@@ -2,6 +2,7 @@ export { appRouter, type AppRouter } from "./router";
 export { createContext, type Context } from "./trpc";
 export { createServerCaller } from "./caller";
 export { log, captureException } from "./observability";
+export { createRateLimiter } from "./rate-limit";
 export * from "./clients";
 export * from "./marketing";
 export * from "./quotes";

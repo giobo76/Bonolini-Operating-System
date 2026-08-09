@@ -6,10 +6,11 @@ import { log } from "@bos/core";
 // Read-only scopes only. tagmanager.edit.containers (needed for the future
 // GTM auto-fix capability) is deliberately not requested here — least
 // privilege: request it when the capability that uses it actually exists.
-// Google Ads' own scope isn't truly read-only at the OAuth layer — see
-// packages/core/src/marketing/README.md.
+// The Ads scope is likewise withheld until Google Ads integration is
+// actually built (nothing today calls the Ads API — run-check.ts skips
+// google_ads_account resources) — see docs/PRODUCTION_ROADMAP.md#25-oauth-scope-cleanup
+// and packages/core/src/marketing/README.md.
 const SCOPES = [
-  "https://www.googleapis.com/auth/adwords",
   "https://www.googleapis.com/auth/analytics.readonly",
   "https://www.googleapis.com/auth/tagmanager.readonly",
   "https://www.googleapis.com/auth/webmasters.readonly",

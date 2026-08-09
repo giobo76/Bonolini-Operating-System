@@ -39,7 +39,7 @@ This matrix is the source of truth for both the RLS policies (`packages/db`) and
 
 ## Enforcement layering
 
-Consistent with the [security strategy](../../CLAUDE.md) established at the start of this project: **Row Level Security is the source of truth**, app-layer checks are defense in depth, not a substitute. A `dispatcher`-scoped tRPC procedure that forgets a `requireRole()` check should still fail safely because the database itself refuses the query — not rely on every procedure remembering to check.
+Consistent with the [security strategy](../../CLAUDE.md) established at the start of this project, tenant isolation and authorization are enforced in layers. Today, the application layer (`staffProcedure`/`adminProcedure` in `packages/core/src/trpc.ts`) is the primary enforcement boundary for role checks, while database-level RLS remains a defense-in-depth mechanism rather than the sole enforcement point. This distinction is intentionally documented so future procedures do not incorrectly assume that RLS alone is the security boundary.
 
 ## Corporate account users
 

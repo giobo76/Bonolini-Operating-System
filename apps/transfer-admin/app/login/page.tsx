@@ -3,6 +3,7 @@
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createBrowserClient } from "@bos/auth/client";
+import { loginRateLimiter } from "./rate-limit";
 
 const LINK_ERROR_MESSAGES: Record<string, string> = {
   invalid_or_expired_link:
@@ -29,6 +30,14 @@ export default function LoginPage() {
     event.preventDefault();
     setError(null);
     setSubmitting(true);
+
+    const rateLimitKey = email.trim().toLowerCase();
+    const rateLimitResult = loginRateLimiter(rateLimitKey);
+    if (!rateLimitResult.ok) {
+      setError("Too many login attempts. Please wait a few minutes and try again.");
+      setSubmitting(false);
+      return;
+    }
 
     const supabase = createBrowserClient();
     const { error: signInError } = await supabase.auth.signInWithPassword({
