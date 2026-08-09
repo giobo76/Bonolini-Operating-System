@@ -131,6 +131,25 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/ai:
+    dependencies:
+      '@bos/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@bos/config':
+        specifier: workspace:*
+        version: link:../config
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   packages/auth:
     dependencies:
       '@supabase/ssr':

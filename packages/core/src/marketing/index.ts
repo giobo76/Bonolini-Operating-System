@@ -12,6 +12,7 @@ export type { CheckRunType } from "./run-check";
 export { runWeeklyReport } from "./weekly-report";
 export { marketingInngestFunctions } from "./inngest-functions";
 export { computeHealthScore } from "./health-score";
+export { analyzeWeeklyMarketingPerformance } from "./analytics";
 export type { HealthScoreBreakdown, HealthScoreResult, OpportunityValueItem } from "./health-score";
 export {
   getFunnelSummary,
