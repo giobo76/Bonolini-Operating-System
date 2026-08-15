@@ -51,6 +51,9 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
+      '@next/env':
+        specifier: 15.5.23
+        version: 15.5.23
       '@types/node':
         specifier: ^22.10.2
         version: 22.20.1
@@ -132,10 +135,6 @@ importers:
         version: 5.9.3
 
   packages/ai:
-    dependencies:
-      '@bos/core':
-        specifier: workspace:*
-        version: link:../core
     devDependencies:
       '@bos/config':
         specifier: workspace:*
@@ -190,6 +189,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.32.1
         version: 0.32.1
+      '@bos/ai':
+        specifier: workspace:*
+        version: link:../ai
       '@bos/auth':
         specifier: workspace:*
         version: link:../auth

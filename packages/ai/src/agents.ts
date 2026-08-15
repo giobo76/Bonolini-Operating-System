@@ -2,7 +2,6 @@ import type { AgentDefinition } from "./agent";
 import { aiCategories } from "./categories";
 import type { AgentCapability } from "./tasks";
 import type { PermissionGrant } from "./permissions";
-import { googleMarketingAnalystAgent } from "./google-marketing-analyst";
 
 const platformCapabilities: AgentCapability[] = ["analysis", "planning"];
 
@@ -58,6 +57,11 @@ export const marketingAgent: AgentDefinition = {
   },
 };
 
+// Google Marketing Analyst is not included here: unlike the stub agents
+// below, it requires a real implementation injected by its caller (see
+// createGoogleMarketingAnalystAgent's doc comment) and is registered
+// explicitly by packages/core/src/marketing/ai-analyst.ts instead of being
+// auto-registered with a fake/no-op handler.
 export * from "./google-marketing-analyst";
 
 export const nccAgent: AgentDefinition = {
@@ -135,7 +139,6 @@ export const coreAgents: AgentDefinition[] = [
   nccAgent,
   financeAgent,
   contentAgent,
-  googleMarketingAnalystAgent,
 ];
 
 export function registerCoreAgents(orchestrator: import("./orchestrator").AgentOrchestrator) {

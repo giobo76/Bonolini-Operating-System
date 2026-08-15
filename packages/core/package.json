@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@bos/ai": "workspace:*",
     "@bos/auth": "workspace:*",
     "@bos/db": "workspace:*",
     "@bos/jobs": "workspace:*",

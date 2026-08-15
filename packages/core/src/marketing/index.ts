@@ -9,10 +9,15 @@ export {
 } from "./service";
 export { runCheck } from "./run-check";
 export type { CheckRunType } from "./run-check";
+export {
+  handleLeadIntentRequest,
+  handleLeadIntentPreflight,
+  ALLOWED_ORIGIN as leadIntentAllowedOrigin,
+} from "./lead-intent-handler";
+export type { LeadIntentRequestInput, LeadIntentResult } from "./lead-intent-handler";
 export { runWeeklyReport } from "./weekly-report";
 export { marketingInngestFunctions } from "./inngest-functions";
 export { computeHealthScore } from "./health-score";
-export { analyzeWeeklyMarketingPerformance } from "./analytics";
 export type { HealthScoreBreakdown, HealthScoreResult, OpportunityValueItem } from "./health-score";
 export {
   getFunnelSummary,

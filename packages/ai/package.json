@@ -13,9 +13,7 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests"
   },
-  "dependencies": {
-    "@bos/core": "workspace:*"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@bos/config": "workspace:*",
     "@types/node": "^22.10.2",

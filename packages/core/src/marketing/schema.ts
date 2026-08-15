@@ -98,3 +98,49 @@ export const listFindingsSchema = z.object({
 export type CreateFindingInput = z.infer<typeof createFindingSchema>;
 export type ListFindingsInput = z.infer<typeof listFindingsSchema>;
 export type FinancialImpact = z.infer<typeof financialImpactSchema>;
+
+// ── Marketing leads (anonymous intent capture) ───────────────────────────
+// recordLeadIntentSchema is deliberately narrow, same spirit as
+// leadSubmissionSchema in packages/core/src/clients/schema.ts: a public,
+// unauthenticated caller (the lead-intent endpoint, not built yet) can only
+// ever record attribution metadata for a click — never a name, phone,
+// email, clientId, or tenantId. Length caps only (no z.url()) because
+// landingPage/referrer come from a real browser's window.location.href/
+// document.referrer on an external site — strict URL parsing would reject
+// legitimate edge cases (e.g. an empty referrer on direct traffic).
+
+export const marketingLeadChannelSchema = z.enum(["whatsapp", "phone", "email", "form"]);
+export const marketingLeadStatusSchema = z.enum(["new", "contacted", "converted", "discarded"]);
+
+// .strict() (added in Phase 3, for the public HTTP endpoint): a plain
+// z.object() silently strips unrecognized keys instead of rejecting them —
+// wrong here, since the endpoint must actively reject a payload carrying
+// tenantId/clientId/fullName/phone/email/notes/etc, not quietly ignore it.
+export const recordLeadIntentSchema = z
+  .object({
+    channel: marketingLeadChannelSchema,
+    landingPage: z.string().trim().max(2048).optional(),
+    referrer: z.string().trim().max(2048).optional(),
+    utmSource: z.string().trim().max(255).optional(),
+    utmMedium: z.string().trim().max(255).optional(),
+    utmCampaign: z.string().trim().max(255).optional(),
+    utmTerm: z.string().trim().max(255).optional(),
+    utmContent: z.string().trim().max(255).optional(),
+    gclid: z.string().trim().max(255).optional(),
+    visitorId: z.string().trim().max(128).optional(),
+  })
+  .strict();
+
+export const listUnlinkedLeadsSchema = z.object({
+  channel: marketingLeadChannelSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+export const linkLeadToClientSchema = z.object({
+  marketingLeadId: z.string().uuid(),
+  clientId: z.string().uuid(),
+});
+
+export type RecordLeadIntentInput = z.infer<typeof recordLeadIntentSchema>;
+export type ListUnlinkedLeadsInput = z.infer<typeof listUnlinkedLeadsSchema>;
+export type LinkLeadToClientInput = z.infer<typeof linkLeadToClientSchema>;

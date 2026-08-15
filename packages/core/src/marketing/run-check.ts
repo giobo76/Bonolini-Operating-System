@@ -11,7 +11,8 @@ import * as ga4Checks from "./checks/ga4-checks";
 import * as gtmChecks from "./checks/gtm-checks";
 import * as searchConsoleChecks from "./checks/search-console-checks";
 import * as attributionChecks from "./checks/attribution-checks";
-import { runStrategistSynthesis } from "./strategist";
+import * as googleAdsChecks from "./checks/google-ads-checks";
+import { runGoogleMarketingAnalyst } from "./ai-analyst";
 import { sendCriticalAlertEmail } from "./alerts";
 import { createFinding, recordHealthScoreSnapshot } from "./service";
 import type { FindingDraft } from "./rule-types";
@@ -71,10 +72,9 @@ export async function runCheck(
           drafts.push(...(await gtmChecks.runChecks(tenantId, resource.externalId)));
         } else if (resource.resourceType === "search_console_site") {
           drafts.push(...(await searchConsoleChecks.runChecks(tenantId, resource.externalId)));
+        } else if (resource.resourceType === "google_ads_account") {
+          drafts.push(...(await googleAdsChecks.runChecks(tenantId, resource.externalId)));
         }
-        // google_ads_account: intentionally not called yet — the Google
-        // Ads API integration isn't built (needs a developer token). See
-        // packages/core/src/marketing/README.md.
       } catch (error) {
         drafts.push(apiErrorDraft(resource.resourceType, resource.externalId, error));
       }
@@ -85,11 +85,14 @@ export async function runCheck(
     drafts.push(...(await websiteChecks.runChecks()));
     drafts.push(...(await attributionChecks.runChecks(tenantId)));
 
-    // Claude synthesis only on daily_audit/on_demand — quick_check stays
+    // AI Analyst synthesis only on daily_audit/on_demand — quick_check stays
     // fast and cheap, per the original cadence design (reserve the LLM
-    // call for judgment, not every 4-hour rule pass).
+    // call for judgment, not every 4-hour rule pass). Goes through @bos/ai
+    // (see ai-analyst.ts) instead of calling strategist.ts directly, so the
+    // Google Marketing Analyst agent is the single strategic-synthesis
+    // layer sitting above every deterministic check, not a second pipeline.
     if (runType === "daily_audit" || runType === "on_demand") {
-      drafts.push(...(await runStrategistSynthesis(drafts)));
+      drafts.push(...(await runGoogleMarketingAnalyst(tenantId, drafts, triggeredBy ?? "system")));
     }
 
     const openFindings = await db

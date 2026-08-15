@@ -71,22 +71,43 @@ export async function getGoogleAdsAccessToken(tenantId: string) {
   return getAccessToken(auth);
 }
 
-function normalizeGoogleAdsCustomerId(externalId: string) {
-  return externalId.replace(/^customers\//, "").trim();
+// Exported for unit testing — Google Ads API requires a digits-only
+// customer ID (both in the URL path and in the login-customer-id header),
+// but resource IDs and the MCC env var are commonly written/copied with
+// dashes (Google's own dashboard displays them that way).
+export function normalizeGoogleAdsCustomerId(externalId: string) {
+  return externalId.replace(/^customers\//, "").replace(/-/g, "").trim();
 }
 
 export async function queryGoogleAds(tenantId: string, customerId: string, query: string) {
   const normalizedCustomerId = normalizeGoogleAdsCustomerId(customerId);
   const accessToken = await getGoogleAdsAccessToken(tenantId);
-  const url = `https://googleads.googleapis.com/v14/customers/${encodeURIComponent(normalizedCustomerId)}/googleAds:search`;
+  // Use the configured developer token (required by the Ads API) and
+  // optional login-customer-id for MCC contexts. The developer token must
+  // be supplied via env var `GOOGLE_ADS_DEVELOPER_TOKEN`.
+  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+  if (!developerToken) {
+    throw new Error("GOOGLE_ADS_DEVELOPER_TOKEN is not set — set it in your environment before calling the Google Ads API");
+  }
+
+  const loginCustomerId = process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID;
+
+  const url = `https://googleads.googleapis.com/v25/customers/${encodeURIComponent(normalizedCustomerId)}/googleAds:search`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    "developer-token": developerToken,
+  };
+
+  if (loginCustomerId && loginCustomerId.trim()) {
+    headers["login-customer-id"] = normalizeGoogleAdsCustomerId(loginCustomerId);
+  }
 
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query, pageSize: 1000 }),
+    headers,
+    body: JSON.stringify({ query }),
   });
 
   if (!response.ok) {
@@ -133,7 +154,7 @@ export async function fetchGoogleAdsWeeklyPerformance(tenantId: string, customer
   const now = new Date();
   const endDate = now.toISOString().slice(0, 10);
   const startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const query = `SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversion_value, metrics.average_cpc, metrics.ctr FROM customer WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY segments.date`;
+  const query = `SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value, metrics.average_cpc, metrics.ctr FROM customer WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY segments.date`;
 
   const body = await queryGoogleAds(tenantId, customerId, query);
   const rows = Array.isArray(body.results)
@@ -147,7 +168,7 @@ export async function fetchGoogleAdsWeeklyPerformance(tenantId: string, customer
           clicks: parseNumber(metrics?.clicks),
           costMicros: parseNumber(metrics?.cost_micros),
           conversions: parseNumber(metrics?.conversions),
-          conversionValue: parseNumber(metrics?.conversion_value),
+          conversionValue: parseNumber(metrics?.conversions_value),
           averageCpcMicros: parseNumber(metrics?.average_cpc),
           ctr: parseNumber(metrics?.ctr),
         };

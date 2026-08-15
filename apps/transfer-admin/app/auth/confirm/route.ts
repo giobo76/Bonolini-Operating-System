@@ -9,12 +9,27 @@ import { createServerSupabaseClient } from "@bos/auth";
 // setup notes.
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
+  const code = searchParams.get("code");
   const tokenHash = searchParams.get("token_hash");
   const type = searchParams.get("type") as EmailOtpType | null;
   const next = searchParams.get("next") ?? "/";
 
-  if (tokenHash && type) {
-    const supabase = await createServerSupabaseClient();
+  const supabase = await createServerSupabaseClient();
+
+  // PKCE flow (default for @supabase/ssr): Supabase's standard
+  // {{ .ConfirmationURL }} email template redirects here with `code` as a
+  // query param after verifying the OTP server-side — this is the path a
+  // stock (non-custom) email template actually produces.
+  if (code) {
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    if (!error) {
+      return NextResponse.redirect(new URL(next, request.url));
+    }
+  } else if (tokenHash && type) {
+    // Fallback: a custom email template using {{ .TokenHash }} directly,
+    // bypassing Supabase's hosted verify hop. Not in use today (the
+    // project's plan doesn't allow custom email templates), kept so this
+    // route needs no further changes if that ever becomes available.
     const { error } = await supabase.auth.verifyOtp({
       type,
       token_hash: tokenHash,

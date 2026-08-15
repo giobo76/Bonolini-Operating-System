@@ -2,13 +2,21 @@ import type { AgentDefinition } from "./agent";
 import { aiCategories } from "./categories";
 import type { AgentCapability } from "./tasks";
 import type { PermissionGrant } from "./permissions";
-import { analyzeWeeklyMarketingPerformance } from "@bos/core";
 
-export interface GoogleMarketingAnalystPayload {
-  ga4PropertyId: string;
-  searchConsoleSite: string;
-  googleAdsCustomerId: string;
-}
+// Dependency-injected on purpose: this package must not import @bos/core
+// (packages/core already depends on @bos/ai to invoke this agent — importing
+// @bos/core back from here would create a circular package dependency). The
+// caller (packages/core/src/marketing/ai-analyst.ts) supplies the actual
+// finding-synthesis implementation; this file only defines the agent's
+// shape, metadata, and payload contract.
+//
+// Findings are passed as loosely-typed records rather than a shared
+// FindingDraft type, again to avoid @bos/ai depending on @bos/core's/
+// @bos/db's domain types. The caller is responsible for casting to/from its
+// own concrete finding type at the boundary.
+export type GoogleMarketingAnalystSynthesize = (
+  findings: Array<Record<string, unknown>>,
+) => Promise<Array<Record<string, unknown>>>;
 
 const platformCapabilities: AgentCapability[] = ["analysis", "planning"];
 const defaultPermissionGrant: PermissionGrant[] = [
@@ -17,39 +25,32 @@ const defaultPermissionGrant: PermissionGrant[] = [
   { permission: "task:execute" },
 ];
 
-export const googleMarketingAnalystAgent: AgentDefinition = {
-  metadata: {
-    id: "google_marketing_analyst.agent",
-    name: "Google Marketing Analyst",
-    description:
-      "Analyzes GA4, Search Console, and Google Ads weekly performance to detect anomalies and generate recommendations.",
-    category: aiCategories.MARKETING,
-    capabilities: ["marketing", ...platformCapabilities],
-    permissions: defaultPermissionGrant,
-    version: "0.1.0",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  handler: async ({ tenantId, payload }) => {
-    const data = payload as Record<string, unknown>;
-    const ga4PropertyId = typeof data.ga4PropertyId === "string" ? data.ga4PropertyId.trim() : "";
-    const searchConsoleSite = typeof data.searchConsoleSite === "string" ? data.searchConsoleSite.trim() : "";
-    const googleAdsCustomerId = typeof data.googleAdsCustomerId === "string" ? data.googleAdsCustomerId.trim() : "";
+export function createGoogleMarketingAnalystAgent(
+  synthesize: GoogleMarketingAnalystSynthesize,
+): AgentDefinition {
+  return {
+    metadata: {
+      id: "google_marketing_analyst.agent",
+      name: "Google Marketing Analyst",
+      description:
+        "Reviews the marketing findings already collected this run (GA4, GTM, Search Console, Google Ads, website, attribution) and adds strategic findings a senior consultant would notice — patterns, prioritization, and root causes needing judgment.",
+      category: aiCategories.MARKETING,
+      capabilities: ["marketing", ...platformCapabilities],
+      permissions: defaultPermissionGrant,
+      version: "0.2.0",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    handler: async ({ payload }) => {
+      const data = payload as Record<string, unknown>;
+      const findings = Array.isArray(data.findings) ? (data.findings as Array<Record<string, unknown>>) : [];
 
-    if (!ga4PropertyId || !searchConsoleSite || !googleAdsCustomerId) {
-      throw new Error("ga4PropertyId, searchConsoleSite, and googleAdsCustomerId are required payload fields.");
-    }
+      const result = await synthesize(findings);
 
-    const result = await analyzeWeeklyMarketingPerformance(
-      tenantId,
-      ga4PropertyId,
-      searchConsoleSite,
-      googleAdsCustomerId,
-    );
-
-    return {
-      result: result as unknown as Record<string, unknown>,
-      logs: ["google marketing analyst agent invoked"],
-    };
-  },
-};
+      return {
+        result: { findings: result },
+        logs: [`google marketing analyst agent invoked with ${findings.length} input finding(s)`],
+      };
+    },
+  };
+}

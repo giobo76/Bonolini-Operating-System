@@ -1,6 +1,7 @@
 import { pgTable, uuid, text, timestamp, pgEnum, boolean, smallint, jsonb } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
 import { profiles } from "./profiles";
+import { clients } from "./clients";
 
 export const marketingConnectionStatusEnum = pgEnum("marketing_connection_status", [
   "active",
@@ -208,3 +209,53 @@ export type CheckRun = typeof checkRuns.$inferSelect;
 export type Finding = typeof findings.$inferSelect;
 export type MarketingHealthScore = typeof marketingHealthScores.$inferSelect;
 export type Report = typeof reports.$inferSelect;
+
+// ── Marketing leads (anonymous intent capture) ───────────────────────────
+// bonolinitransfer.com's real conversion funnel is WhatsApp/phone/email
+// click-to-contact, not a web form (see the funnel design audit) — a click
+// carries no name/phone/email, so it can't be a `clients` row (full_name/
+// phone are NOT NULL there, and placeholder data is explicitly ruled out).
+// Kept separate from `clients` per ADR 0002: this is a marketing-domain
+// fact (top-of-funnel intent), not a customer record. `clientId` is set
+// only when a staff member manually links this intent to a real client
+// (linkLeadToClient) — never during public creation, and never by
+// automatic name/phone matching (neither is known at click time).
+
+export const marketingLeadChannelEnum = pgEnum("marketing_lead_channel", [
+  "whatsapp",
+  "phone",
+  "email",
+  "form",
+]);
+
+export const marketingLeadStatusEnum = pgEnum("marketing_lead_status", [
+  "new",
+  "contacted",
+  "converted",
+  "discarded",
+]);
+
+export const marketingLeads = pgTable("marketing_leads", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  channel: marketingLeadChannelEnum("channel").notNull(),
+  status: marketingLeadStatusEnum("status").notNull().default("new"),
+  clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
+  landingPage: text("landing_page"),
+  referrer: text("referrer"),
+  utmSource: text("utm_source"),
+  utmMedium: text("utm_medium"),
+  utmCampaign: text("utm_campaign"),
+  utmTerm: text("utm_term"),
+  utmContent: text("utm_content"),
+  gclid: text("gclid"),
+  // First-party, browser-generated id (not a cross-site cookie) — groups
+  // multiple intents from the same visitor before conversion.
+  visitorId: text("visitor_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type MarketingLead = typeof marketingLeads.$inferSelect;
+export type NewMarketingLead = typeof marketingLeads.$inferInsert;
