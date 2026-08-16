@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import {
   getDb,
   checkRuns,
@@ -40,6 +40,119 @@ function apiErrorDraft(resourceType: string, externalId: string, error: unknown)
     expectedBenefit: "Restores monitoring coverage for this data source.",
     evidence: { resourceType, externalId, error: String(error) },
   };
+}
+
+// ── Findings lifecycle: coverage matrix + auto-resolution ──────────────
+// Built from an explicit, verified read of every checks/*.ts module (see the
+// coverage-matrix analysis this implements) — do not add a prefix here
+// without re-verifying it against the actual check that produces it.
+
+// Every dedupeKey prefix a *deterministic* check can produce. quick_check,
+// daily_audit, and on_demand all run the exact same deterministic checks
+// (see the resource loop + website/attribution calls below) — the only
+// run_type-dependent difference in the whole engine is the AI Analyst.
+const DETERMINISTIC_PREFIXES = [
+  "ga4_event_stopped:",
+  "ga4_traffic_drop:",
+  "gtm_no_live_version:",
+  "gtm_unpublished:",
+  "gsc_click_drop:",
+  "gsc_indexing:",
+  "google_ads:",
+  "landing_page_error:",
+  "landing_page_slow:",
+  "landing_page_unreachable:",
+  "attribution_untagged_ratio:",
+] as const;
+
+const COVERAGE_BY_RUN_TYPE: Record<CheckRunType, readonly string[]> = {
+  quick_check: DETERMINISTIC_PREFIXES,
+  daily_audit: [...DETERMINISTIC_PREFIXES, "claude:"],
+  on_demand: [...DETERMINISTIC_PREFIXES, "claude:"],
+};
+
+// Absolute exclusions from auto-resolution, regardless of run_type coverage:
+// - claude:* — dedupeKey is built from the AI Analyst's free-text title
+//   (strategist.ts), which is not stable across invocations; "not
+//   re-detected" carries no reliable meaning here.
+// - gsc_indexing:* — a per-URL inspection failure is swallowed by its own
+//   try/catch (search-console-checks.ts) with no signal left behind;
+//   "not re-detected" is indistinguishable from "inspection silently failed".
+// - gtm_no_live_version:* — the underlying API call is wrapped in
+//   `.catch(() => null)` (gtm-checks.ts), so a real API error and a genuine
+//   "no live version" are indistinguishable from this finding's absence.
+// - api_error:* — this dedupeKey type IS the failure signal for the other
+//   four; auto-resolving an error report on its own absence would be circular.
+const NEVER_AUTO_RESOLVE_PREFIXES = ["claude:", "gsc_indexing:", "gtm_no_live_version:", "api_error:"] as const;
+
+// Resource-tied dedupeKey prefixes eligible for auto-resolution, mapped to
+// the marketingLinkedResources.resourceType that must still be active, and
+// the evidence field (already stored on the finding by its originating
+// check — see ga4-checks.ts/gtm-checks.ts/search-console-checks.ts/
+// google-ads-checks.ts) holding that resource's externalId. Reading the id
+// back from evidence, rather than parsing it out of the dedupeKey string, is
+// deliberate: siteUrl (search_console_site) can itself contain ":" (its own
+// "https://" scheme), which would break a generic dedupeKey-splitting
+// approach. gtm_no_live_version and gsc_indexing are absent here — both are
+// already excluded above, so they never need a resource lookup.
+const RESOURCE_LOOKUP_BY_PREFIX: Record<string, { resourceType: string; evidenceField: string }> = {
+  "ga4_event_stopped:": { resourceType: "ga4_property", evidenceField: "propertyId" },
+  "ga4_traffic_drop:": { resourceType: "ga4_property", evidenceField: "propertyId" },
+  "gtm_unpublished:": { resourceType: "gtm_container", evidenceField: "publicContainerId" },
+  "gsc_click_drop:": { resourceType: "search_console_site", evidenceField: "siteUrl" },
+  "google_ads:": { resourceType: "google_ads_account", evidenceField: "customerId" },
+};
+
+const AUTO_RESOLVE_AFTER_MISSES = 2;
+const REOPEN_WINDOW_DAYS = 30;
+
+export function isNeverAutoResolved(dedupeKey: string): boolean {
+  return NEVER_AUTO_RESOLVE_PREFIXES.some((prefix) => dedupeKey.startsWith(prefix));
+}
+
+export function isCoveredByRunType(dedupeKey: string, runType: CheckRunType): boolean {
+  return COVERAGE_BY_RUN_TYPE[runType].some((prefix) => dedupeKey.startsWith(prefix));
+}
+
+function findResourceLookup(dedupeKey: string): { resourceType: string; evidenceField: string } | null {
+  const prefix = Object.keys(RESOURCE_LOOKUP_BY_PREFIX).find((candidate) => dedupeKey.startsWith(candidate));
+  return prefix ? RESOURCE_LOOKUP_BY_PREFIX[prefix]! : null;
+}
+
+// Decides whether an open finding that was NOT re-detected in this run can
+// be trusted as a genuine "not found" signal — i.e. whether it's safe to
+// count as one of the AUTO_RESOLVE_AFTER_MISSES misses. Pure and exported
+// specifically to be tested directly, without mocking the database, mirroring
+// ga4-checks.ts's severityForBaseline/confidenceForBaseline.
+export function isEligibleForMissTracking(params: {
+  dedupeKey: string;
+  runType: CheckRunType;
+  evidence: Record<string, unknown> | null;
+  draftsThisRun: FindingDraft[];
+  activeResources: Array<{ resourceType: string; externalId: string }>;
+}): boolean {
+  const { dedupeKey, runType, evidence, draftsThisRun, activeResources } = params;
+
+  if (isNeverAutoResolved(dedupeKey)) return false;
+  if (!isCoveredByRunType(dedupeKey, runType)) return false;
+
+  const lookup = findResourceLookup(dedupeKey);
+  if (!lookup) return true; // website-checks / attribution-checks: no linked resource to gate on
+
+  const externalId = evidence ? (evidence[lookup.evidenceField] as string | undefined) : undefined;
+  if (!externalId) return false; // can't identify the resource — fail closed rather than guess
+
+  const isActive = activeResources.some(
+    (resource) => resource.resourceType === lookup.resourceType && resource.externalId === externalId,
+  );
+  if (!isActive) return false; // administratively deactivated resource — not the same as "problem fixed"
+
+  const hasApiError = draftsThisRun.some(
+    (draft) => draft.dedupeKey === `api_error:${lookup.resourceType}:${externalId}`,
+  );
+  if (hasApiError) return false; // the check didn't actually run successfully this pass
+
+  return true;
 }
 
 // The single entry point both the Inngest scheduled functions and the
@@ -107,6 +220,29 @@ export async function runCheck(
       ]),
     );
 
+    // Reopen candidates: findings resolved (by the auto-resolution logic
+    // below, or manually) within the last REOPEN_WINDOW_DAYS. Queried once
+    // up front, same shape as openByKey, so the per-draft loop stays O(1)
+    // per draft instead of querying inside the loop.
+    const reopenWindowStart = new Date(Date.now() - REOPEN_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const recentlyResolvedFindings = await db
+      .select()
+      .from(findingsTable)
+      .where(
+        and(
+          eq(findingsTable.tenantId, tenantId),
+          eq(findingsTable.status, "resolved"),
+          gte(findingsTable.resolvedAt, reopenWindowStart),
+        ),
+      );
+
+    const resolvedByKey = new Map(
+      recentlyResolvedFindings.map((f) => [
+        `${f.category}:${(f.evidence as Record<string, unknown> | null)?.dedupeKey ?? ""}`,
+        f,
+      ]),
+    );
+
     let criticalCount = 0;
     const criticalDrafts: FindingDraft[] = [];
 
@@ -123,7 +259,9 @@ export async function runCheck(
         // rather than staying pinned to whatever the rule produced when it
         // was first created. check_run_id deliberately stays untouched: it
         // still identifies the run that originally created the finding, not
-        // the run that last confirmed it.
+        // the run that last confirmed it. missedCount resets to 0 — being
+        // re-detected after a miss (or several) means it's still an active,
+        // ongoing issue, not a candidate for auto-resolution anymore.
         await db
           .update(findingsTable)
           .set({
@@ -132,21 +270,89 @@ export async function runCheck(
             severity: draft.severity,
             observation: draft.observation,
             evidence: { ...(draft.evidence ?? {}), dedupeKey: draft.dedupeKey },
+            missedCount: 0,
             updatedAt: new Date(),
           })
           .where(eq(findingsTable.id, existing.id));
       } else {
+        const reopenCandidate = resolvedByKey.get(key);
         const { dedupeKey, evidence, ...rest } = draft;
-        await createFinding(tenantId, {
-          ...rest,
-          checkRunId: run.id,
-          evidence: { ...(evidence ?? {}), dedupeKey },
-        });
+
+        if (reopenCandidate) {
+          // Same underlying issue resurfaced within the reopen window — reuse
+          // the original row instead of creating a new one, so
+          // first_detected_at and check_run_id keep reflecting when this
+          // recurring issue was *first* seen, not just this latest bout.
+          // Removed from resolvedByKey so a second draft this same run with
+          // the same category:dedupeKey (shouldn't happen — each check's
+          // dedupeKeys are unique per iteration — but kept defensive) can't
+          // reopen the same row twice.
+          resolvedByKey.delete(key);
+          await db
+            .update(findingsTable)
+            .set({
+              status: "open",
+              resolvedAt: null,
+              missedCount: 0,
+              lastSeenAt: new Date(),
+              confidenceScore: draft.confidenceScore,
+              severity: draft.severity,
+              observation: draft.observation,
+              evidence: { ...(evidence ?? {}), dedupeKey },
+              updatedAt: new Date(),
+            })
+            .where(eq(findingsTable.id, reopenCandidate.id));
+        } else {
+          await createFinding(tenantId, {
+            ...rest,
+            checkRunId: run.id,
+            evidence: { ...(evidence ?? {}), dedupeKey },
+          });
+        }
       }
 
       if (draft.severity === "critical") {
         criticalCount += 1;
         criticalDrafts.push(draft);
+      }
+    }
+
+    // Auto-resolution: open findings whose dedupeKey didn't appear among
+    // this run's drafts at all (re-detected findings were already handled
+    // above and never reach here). Only a finding this run's coverage can
+    // actually vouch for — see isEligibleForMissTracking — gets its
+    // missedCount incremented; everything else is left exactly as it was.
+    const touchedKeys = new Set(drafts.map((draft) => `${draft.category}:${draft.dedupeKey}`));
+
+    for (const finding of openFindings) {
+      const evidence = finding.evidence as Record<string, unknown> | null;
+      const key = `${finding.category}:${evidence?.dedupeKey ?? ""}`;
+      if (touchedKeys.has(key)) continue;
+
+      const dedupeKey = evidence?.dedupeKey as string | undefined;
+      if (!dedupeKey) continue;
+
+      const eligible = isEligibleForMissTracking({
+        dedupeKey,
+        runType,
+        evidence,
+        draftsThisRun: drafts,
+        activeResources: resources,
+      });
+      if (!eligible) continue;
+
+      const missedCount = finding.missedCount + 1;
+
+      if (missedCount >= AUTO_RESOLVE_AFTER_MISSES) {
+        await db
+          .update(findingsTable)
+          .set({ status: "resolved", resolvedAt: new Date(), missedCount, updatedAt: new Date() })
+          .where(eq(findingsTable.id, finding.id));
+      } else {
+        await db
+          .update(findingsTable)
+          .set({ missedCount, updatedAt: new Date() })
+          .where(eq(findingsTable.id, finding.id));
       }
     }
 

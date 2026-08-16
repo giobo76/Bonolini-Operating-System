@@ -169,6 +169,13 @@ export const findings = pgTable("findings", {
   firstDetectedAt: timestamp("first_detected_at", { withTimezone: true }).notNull().defaultNow(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  // Consecutive covered-and-completed check runs in which this open
+  // finding's dedupeKey went undetected — see run-check.ts's auto-resolution
+  // logic. Reset to 0 whenever the finding is (re)detected; reaching 2
+  // auto-resolves it. Never incremented for a run that didn't actually cover
+  // this finding's check, that errored on the underlying resource, or whose
+  // resource is no longer active — see isEligibleForMissTracking.
+  missedCount: smallint("missed_count").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
