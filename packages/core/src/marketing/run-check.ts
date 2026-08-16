@@ -115,9 +115,25 @@ export async function runCheck(
       const existing = openByKey.get(key);
 
       if (existing) {
+        // Re-confirming an open finding refreshes its severity/confidence/
+        // observation/evidence from the current run's draft, not just
+        // last_seen_at — a rule's classification logic can change over time
+        // (e.g. the GA4 traffic-drop severity/confidence tiers), and a
+        // stale finding should catch up to it next time it's re-detected,
+        // rather than staying pinned to whatever the rule produced when it
+        // was first created. check_run_id deliberately stays untouched: it
+        // still identifies the run that originally created the finding, not
+        // the run that last confirmed it.
         await db
           .update(findingsTable)
-          .set({ lastSeenAt: new Date(), confidenceScore: draft.confidenceScore, updatedAt: new Date() })
+          .set({
+            lastSeenAt: new Date(),
+            confidenceScore: draft.confidenceScore,
+            severity: draft.severity,
+            observation: draft.observation,
+            evidence: { ...(draft.evidence ?? {}), dedupeKey: draft.dedupeKey },
+            updatedAt: new Date(),
+          })
           .where(eq(findingsTable.id, existing.id));
       } else {
         const { dedupeKey, evidence, ...rest } = draft;

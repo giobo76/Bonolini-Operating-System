@@ -7,6 +7,23 @@ function dateNDaysAgo(n: number): string {
   return d.toISOString().split("T")[0]!;
 }
 
+// Search Console data for the most recent ~3 days is typically incomplete
+// (Google's own documented processing lag), so both windows below start
+// GSC_LAG_DAYS back from today — same lag the original code used. The two
+// windows must be the same duration and contiguous, though: comparing a
+// window of one length against a window of another silently inflates
+// whatever percentage change gets computed (see the equivalent GA4 fix in
+// ga4-checks.ts). Deriving both ranges from WINDOW_DAYS keeps them equal by
+// construction if either constant changes later.
+const GSC_LAG_DAYS = 3;
+const WINDOW_DAYS = 7;
+
+const RECENT_RANGE = { startDate: dateNDaysAgo(GSC_LAG_DAYS + WINDOW_DAYS - 1), endDate: dateNDaysAgo(GSC_LAG_DAYS) };
+const PREVIOUS_RANGE = {
+  startDate: dateNDaysAgo(GSC_LAG_DAYS + WINDOW_DAYS * 2 - 1),
+  endDate: dateNDaysAgo(GSC_LAG_DAYS + WINDOW_DAYS),
+};
+
 function getMonitoredUrls(fallback: string): string[] {
   const raw = process.env.MARKETING_MONITORED_URLS;
   if (!raw) return [fallback];
@@ -24,38 +41,53 @@ export async function runChecks(tenantId: string, siteUrl: string): Promise<Find
   const [recent, previous] = await Promise.all([
     searchconsole.searchanalytics.query({
       siteUrl,
-      requestBody: { startDate: dateNDaysAgo(10), endDate: dateNDaysAgo(3), dimensions: [] },
+      requestBody: { ...RECENT_RANGE, dimensions: [] },
     }),
     searchconsole.searchanalytics.query({
       siteUrl,
-      requestBody: { startDate: dateNDaysAgo(20), endDate: dateNDaysAgo(11), dimensions: [] },
+      requestBody: { ...PREVIOUS_RANGE, dimensions: [] },
     }),
   ]);
 
   const recentClicks = recent.data.rows?.[0]?.clicks ?? 0;
   const previousClicks = previous.data.rows?.[0]?.clicks ?? 0;
 
-  if (previousClicks >= 10 && recentClicks <= previousClicks * 0.5) {
-    drafts.push({
-      dedupeKey: `gsc_click_drop:${siteUrl}`,
-      category: "organic_traffic",
-      nature: "technical_issue",
-      severity: "medium",
-      confidenceScore: 65,
-      title: "Organic search clicks dropped",
-      observation: `Search Console clicks dropped from ${previousClicks} to ${recentClicks} over comparable ~week-long windows.`,
-      rootCause: "Could be an indexing issue, a ranking drop, or a seasonal pattern.",
-      businessImpact: "Fewer organic visitors means fewer free (non-paid) leads.",
-      financialImpact: null,
-      recommendedActions: [
-        "Check the indexing findings below",
-        "Review recent site changes that might affect SEO",
-        "Check Search Console's Performance report for the affected queries/pages",
-      ],
-      requiresApproval: false,
-      expectedBenefit: "Restoring organic visibility recovers free lead volume.",
-      evidence: { siteUrl, recentClicks, previousClicks },
-    });
+  if (previousClicks >= 10) {
+    const recentDailyAvg = recentClicks / WINDOW_DAYS;
+    const previousDailyAvg = previousClicks / WINDOW_DAYS;
+    const changePct = (recentDailyAvg - previousDailyAvg) / previousDailyAvg;
+
+    if (changePct <= -0.5) {
+      drafts.push({
+        dedupeKey: `gsc_click_drop:${siteUrl}`,
+        category: "organic_traffic",
+        nature: "technical_issue",
+        severity: "medium",
+        confidenceScore: 65,
+        title: "Organic search clicks dropped",
+        observation: `Search Console clicks dropped ${Math.round(Math.abs(changePct) * 100)}% (${previousDailyAvg.toFixed(1)}/day → ${recentDailyAvg.toFixed(1)}/day) over two comparable ${WINDOW_DAYS}-day windows (${previousClicks} → ${recentClicks} total clicks).`,
+        rootCause: "Could be an indexing issue, a ranking drop, or a seasonal pattern.",
+        businessImpact: "Fewer organic visitors means fewer free (non-paid) leads.",
+        financialImpact: null,
+        recommendedActions: [
+          "Check the indexing findings below",
+          "Review recent site changes that might affect SEO",
+          "Check Search Console's Performance report for the affected queries/pages",
+        ],
+        requiresApproval: false,
+        expectedBenefit: "Restoring organic visibility recovers free lead volume.",
+        evidence: {
+          siteUrl,
+          recentClicks,
+          previousClicks,
+          recentWindowDays: WINDOW_DAYS,
+          previousWindowDays: WINDOW_DAYS,
+          recentDailyAvg,
+          previousDailyAvg,
+          changePct,
+        },
+      });
+    }
   }
 
   // URL Inspection API has tight quotas (2,000/day, 600/min per site) — a

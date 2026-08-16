@@ -10,8 +10,46 @@ import type { FindingDraft } from "../rule-types";
 // wired up. Extend this list as transfer-web gains more instrumented events.
 const EXPECTED_EVENTS = ["page_view", "generate_lead"];
 
+// Both the "event stopped firing" and "traffic drop" checks below compare a
+// recent period against a prior one. The two periods MUST be the same
+// duration and contiguous (no gap, no overlap) — comparing sums across
+// windows of different lengths silently inflates whatever percentage change
+// gets computed (a 4-day window vs. a 7-day window makes a normal
+// week-to-week fluctuation look like a much bigger drop than it is). Deriving
+// both ranges from WINDOW_DAYS, instead of hand-writing "3daysAgo"/
+// "10daysAgo" literals, keeps them equal by construction if this ever changes.
+const WINDOW_DAYS = 7;
+
+function daysAgo(n: number): string {
+  return n === 0 ? "today" : `${n}daysAgo`;
+}
+
+const RECENT_RANGE = { startDate: daysAgo(WINDOW_DAYS - 1), endDate: daysAgo(0) };
+const PREVIOUS_RANGE = { startDate: daysAgo(WINDOW_DAYS * 2 - 1), endDate: daysAgo(WINDOW_DAYS) };
+
 const MIN_BASELINE_SESSIONS = 20;
 const TRAFFIC_DROP_THRESHOLD = -0.5;
+
+// Severity/confidence scale with the size of the baseline sample, not just
+// the raw percentage change — a 50%+ drop on a handful of sessions is much
+// less reliable a signal than the same percentage on a large sample, and
+// treating both as equally "high" overstates the smaller one. See
+// docs discussion in the MIE validation session: the -0.5 threshold alone
+// previously produced a "high" finding off a 44-session baseline.
+const HIGH_SEVERITY_MIN_SESSIONS = 100;
+
+export function severityForBaseline(previousSessionCount: number): "medium" | "high" {
+  return previousSessionCount >= HIGH_SEVERITY_MIN_SESSIONS ? "high" : "medium";
+}
+
+// Tiered rather than a formula: the three bands are an explicit editorial
+// judgment call (see severityForBaseline's comment), not a statistically
+// derived function, so a lookup table is more honest than a fitted curve.
+export function confidenceForBaseline(previousSessionCount: number): number {
+  if (previousSessionCount >= 100) return 80;
+  if (previousSessionCount >= 50) return 70;
+  return 55; // previousSessionCount is >= MIN_BASELINE_SESSIONS (20) here — see call site
+}
 
 function normalizeProperty(propertyId: string): string {
   return propertyId.startsWith("properties/") ? propertyId : `properties/${propertyId}`;
@@ -26,7 +64,7 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
     analyticsData.properties.runReport({
       property,
       requestBody: {
-        dateRanges: [{ startDate: "3daysAgo", endDate: "today" }],
+        dateRanges: [RECENT_RANGE],
         dimensions: [{ name: "eventName" }],
         metrics: [{ name: "eventCount" }],
       },
@@ -34,7 +72,7 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
     analyticsData.properties.runReport({
       property,
       requestBody: {
-        dateRanges: [{ startDate: "10daysAgo", endDate: "4daysAgo" }],
+        dateRanges: [PREVIOUS_RANGE],
         dimensions: [{ name: "eventName" }],
         metrics: [{ name: "eventCount" }],
       },
@@ -67,7 +105,7 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
         severity: "critical",
         confidenceScore: 85,
         title: `GA4 event "${eventName}" stopped firing`,
-        observation: `"${eventName}" fired ${previousCount} times in the prior comparable period but 0 times in the last 3 days.`,
+        observation: `"${eventName}" fired ${previousCount} times in the prior comparable ${WINDOW_DAYS}-day period but 0 times in the last ${WINDOW_DAYS} days.`,
         rootCause:
           "Likely a GTM tag/trigger change, a site code change that removed the tracking call, or a GA4 configuration change.",
         businessImpact: isConversionEvent
@@ -97,14 +135,11 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
   const [recentSessions, previousSessions] = await Promise.all([
     analyticsData.properties.runReport({
       property,
-      requestBody: { dateRanges: [{ startDate: "3daysAgo", endDate: "today" }], metrics: [{ name: "sessions" }] },
+      requestBody: { dateRanges: [RECENT_RANGE], metrics: [{ name: "sessions" }] },
     }),
     analyticsData.properties.runReport({
       property,
-      requestBody: {
-        dateRanges: [{ startDate: "10daysAgo", endDate: "4daysAgo" }],
-        metrics: [{ name: "sessions" }],
-      },
+      requestBody: { dateRanges: [PREVIOUS_RANGE], metrics: [{ name: "sessions" }] },
     }),
   ]);
 
@@ -112,16 +147,24 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
   const previousSessionCount = Number(previousSessions.data.rows?.[0]?.metricValues?.[0]?.value ?? 0);
 
   if (previousSessionCount >= MIN_BASELINE_SESSIONS) {
-    const change = (recentSessionCount - previousSessionCount) / previousSessionCount;
+    // Both windows are WINDOW_DAYS long by construction (see RECENT_RANGE/
+    // PREVIOUS_RANGE above), so dividing by the same constant would produce
+    // the identical ratio as comparing raw sums — the daily-average step is
+    // kept explicit anyway so the comparison stays correct even if the two
+    // ranges' lengths are ever changed independently in the future.
+    const recentDailyAvg = recentSessionCount / WINDOW_DAYS;
+    const previousDailyAvg = previousSessionCount / WINDOW_DAYS;
+    const change = (recentDailyAvg - previousDailyAvg) / previousDailyAvg;
+
     if (change <= TRAFFIC_DROP_THRESHOLD) {
       drafts.push({
         dedupeKey: `ga4_traffic_drop:${propertyId}`,
         category: "organic_traffic",
         nature: "technical_issue",
-        severity: "high",
-        confidenceScore: 70,
+        severity: severityForBaseline(previousSessionCount),
+        confidenceScore: confidenceForBaseline(previousSessionCount),
         title: "Significant traffic drop",
-        observation: `Sessions dropped ${Math.round(Math.abs(change) * 100)}% (${previousSessionCount} → ${recentSessionCount}) vs. the prior comparable period.`,
+        observation: `Sessions dropped ${Math.round(Math.abs(change) * 100)}% (${previousDailyAvg.toFixed(1)}/day → ${recentDailyAvg.toFixed(1)}/day) over two comparable ${WINDOW_DAYS}-day periods (${previousSessionCount} → ${recentSessionCount} total sessions).`,
         rootCause:
           "Could be a tracking issue (GA4/GTM broken), a paused/limited campaign, a site outage, or a genuine demand drop — check the other findings from this run first.",
         businessImpact: "Fewer visitors means fewer leads and bookings, regardless of cause.",
@@ -133,7 +176,16 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
         ],
         requiresApproval: false,
         expectedBenefit: "Identifying the cause allows restoring traffic to normal levels.",
-        evidence: { propertyId, recentSessionCount, previousSessionCount, changePct: change },
+        evidence: {
+          propertyId,
+          recentSessionCount,
+          previousSessionCount,
+          recentWindowDays: WINDOW_DAYS,
+          previousWindowDays: WINDOW_DAYS,
+          recentDailyAvg,
+          previousDailyAvg,
+          changePct: change,
+        },
       });
     }
   }
