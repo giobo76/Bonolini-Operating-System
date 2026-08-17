@@ -166,10 +166,20 @@ export async function fetchGoogleAdsWeeklyPerformance(tenantId: string, customer
           date: typeof segments?.date === "string" ? segments.date : "",
           impressions: parseNumber(metrics?.impressions),
           clicks: parseNumber(metrics?.clicks),
-          costMicros: parseNumber(metrics?.cost_micros),
+          // The GAQL SELECT clause (below) uses the query field paths
+          // (snake_case: cost_micros, conversions_value, average_cpc), but
+          // the Google Ads REST API serializes its JSON *response* in
+          // camelCase (costMicros, conversionsValue, averageCpc) — confirmed
+          // against a real response payload. Reading the snake_case names
+          // here always read undefined, silently turning real spend/
+          // conversion-value/CPC data into 0 via parseNumber. Multi-word
+          // fields only — impressions/clicks/conversions/ctr are single
+          // words and read the same under either convention, which is why
+          // this went unnoticed.
+          costMicros: parseNumber(metrics?.costMicros),
           conversions: parseNumber(metrics?.conversions),
-          conversionValue: parseNumber(metrics?.conversions_value),
-          averageCpcMicros: parseNumber(metrics?.average_cpc),
+          conversionValue: parseNumber(metrics?.conversionsValue),
+          averageCpcMicros: parseNumber(metrics?.averageCpc),
           ctr: parseNumber(metrics?.ctr),
         };
       })
