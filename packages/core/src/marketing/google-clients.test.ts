@@ -80,6 +80,45 @@ describe("queryGoogleAds request body", () => {
       process.env.GOOGLE_ADS_DEVELOPER_TOKEN = originalDeveloperToken;
     }
   });
+
+  it("uses the normalized (dashless) customer id in the request URL path, even when given a dashed id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await queryGoogleAds("tenant-1", "678-018-7978", "SELECT customer.id FROM customer");
+
+      const [url] = fetchMock.mock.calls[0]!;
+      expect(url).toContain("/customers/6780187978/");
+      expect(url).not.toContain("678-018-7978");
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_ADS_DEVELOPER_TOKEN = originalDeveloperToken;
+    }
+  });
+
+  // Regression: an API error must be thrown, never swallowed into a
+  // successful-looking empty response — the caller (google-ads-checks.ts,
+  // via run-check.ts) relies on this to surface a broken connection as an
+  // api_error finding instead of silently reporting "no issues found".
+  it("throws, rather than swallowing, when the API responds with a non-ok status", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () =>
+        '{"error":{"code":400,"message":"Request contains an invalid argument.","status":"INVALID_ARGUMENT"}}',
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await expect(queryGoogleAds("tenant-1", "6780187978", "SELECT customer.id FROM customer")).rejects.toThrow(
+        "Google Ads query failed (400)",
+      );
+    } finally {
+      global.fetch = originalFetch;
+      process.env.GOOGLE_ADS_DEVELOPER_TOKEN = originalDeveloperToken;
+    }
+  });
 });
 
 describe("fetchGoogleAdsWeeklyPerformance GAQL", () => {

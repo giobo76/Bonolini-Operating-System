@@ -98,4 +98,21 @@ describe("google-ads-checks", () => {
 
     expect(drafts).toHaveLength(0);
   });
+
+  // Regression: this check has no try/catch of its own around
+  // fetchGoogleAdsWeeklyPerformance — that's deliberate. An API error must
+  // propagate up to run-check.ts's per-resource catch, which turns it into
+  // an api_error finding. Swallowing it here (e.g. returning [] or a
+  // zero-performance draft) would silently hide a broken Google Ads
+  // connection instead of surfacing it — see the 13/08 INVALID_CUSTOMER_ID /
+  // PAGE_SIZE_NOT_SUPPORTED / UNRECOGNIZED_FIELD incidents this guards against.
+  it("propagates a Google Ads API error instead of swallowing it into an empty or zero-performance result", async () => {
+    fetchGoogleAdsWeeklyPerformance.mockRejectedValue(
+      new Error(
+        'Google Ads query failed (400): {"error":{"code":400,"message":"Request contains an invalid argument."}}',
+      ),
+    );
+
+    await expect(runChecks("tenant-1", "678-018-7978")).rejects.toThrow("Google Ads query failed (400)");
+  });
 });
