@@ -19,12 +19,18 @@ import { createServerClient, type CookieMethodsServer } from "@supabase/ssr";
 // tracking script; its own origin allowlisting + rate limiting (see
 // packages/core/src/marketing/lead-intent-handler.ts) is the real
 // authorization boundary for it, not this exemption by itself.
+//
+// /api/whatsapp/webhook is the same kind of exemption for a different
+// caller: Meta's WhatsApp Cloud API, which authenticates via
+// X-Hub-Signature-256 (see packages/core/src/whatsapp/webhook-handler.ts),
+// never via a Supabase session cookie.
 const PUBLIC_PATHS = [
   "/forgot-password",
   "/reset-password",
   "/auth/confirm",
   "/api/inngest",
   "/api/marketing/lead-intent",
+  "/api/whatsapp/webhook",
 ];
 
 export async function middleware(request: NextRequest) {
