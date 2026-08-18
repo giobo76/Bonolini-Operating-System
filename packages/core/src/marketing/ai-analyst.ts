@@ -40,6 +40,77 @@ async function synthesizeAdapter(
   return synthesized as unknown as Array<Record<string, unknown>>;
 }
 
+// ── Finding-quality gate ─────────────────────────────────────────────
+// Claude receives only {category, severity, title, observation} of this
+// run's deterministic drafts (see strategist.ts) — never raw metrics, never
+// the persisted findings table. Left unchecked, this produces two failure
+// modes observed in Production on 2026-08-18: (1) Claude restates a signal
+// a deterministic check already covers (e.g. another "organic_traffic"
+// finding paraphrasing the same GA4 traffic-drop numbers), and (2) Claude
+// proposes a finding in a category no deterministic check actually fired
+// for this run (e.g. "budget_waste" when Google Ads produced zero drafts,
+// or "search_console_indexing" when the GSC check found nothing) — pure
+// speculation with no grounding data behind it.
+//
+// The gate below is deliberately not an LLM call: it's a second Claude
+// invocation to judge Claude's own output that would just move the
+// unreliability one level up. It's plain prefix matching against this run's
+// *own* deterministic drafts — the same category/dedupeKey vocabulary the
+// rest of the engine already uses, no embeddings or similarity scoring.
+
+// organic_traffic is the one category where the deterministic check is
+// already the authoritative source for this exact signal — a Claude finding
+// in the same category, while this signal is active, is by construction a
+// restatement of it, not new information. Presence blocks creation.
+const AI_BLOCK_IF_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readonly string[]>> = {
+  organic_traffic: ["ga4_traffic_drop:", "gsc_click_drop:"],
+};
+
+// These categories are where Claude is allowed to add interpretation, but
+// only riding on a real deterministic signal from this same run — never
+// invented from nothing. Absence blocks creation.
+const AI_REQUIRE_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readonly string[]>> = {
+  search_console_indexing: ["gsc_indexing:", "gsc_click_drop:"],
+  budget_waste: ["google_ads:"],
+  account_health: ["google_ads:", "api_error:"],
+  conversion_tracking: ["ga4_event_stopped:", "google_ads:"],
+};
+
+// Claude findings are a strategic-commentary layer on top of deterministic
+// detection, not a primary source — capped below "critical"/"high" so a
+// speculative-by-nature finding can never carry the same weight in the
+// Health Score as an actual deterministic detection.
+const AI_MAX_SEVERITY: FindingDraft["severity"] = "medium";
+const SEVERITY_RANK: Record<FindingDraft["severity"], number> = { critical: 3, high: 2, medium: 1, low: 0 };
+
+function hasMatchingDraft(drafts: FindingDraft[], prefixes: readonly string[]): boolean {
+  return drafts.some((draft) => prefixes.some((prefix) => draft.dedupeKey.startsWith(prefix)));
+}
+
+// Exported for direct testing, same rationale as the other pure decision
+// functions in this package (e.g. ga4-checks.ts's severityForBaseline).
+export function filterAiFindingDrafts(
+  candidates: FindingDraft[],
+  deterministicDraftsThisRun: FindingDraft[],
+): FindingDraft[] {
+  return candidates.flatMap((candidate) => {
+    const blockPrefixes = AI_BLOCK_IF_SIGNAL_PRESENT[candidate.category];
+    if (blockPrefixes && hasMatchingDraft(deterministicDraftsThisRun, blockPrefixes)) {
+      return [];
+    }
+
+    const requiredPrefixes = AI_REQUIRE_SIGNAL_PRESENT[candidate.category];
+    if (requiredPrefixes && !hasMatchingDraft(deterministicDraftsThisRun, requiredPrefixes)) {
+      return [];
+    }
+
+    const severity =
+      SEVERITY_RANK[candidate.severity] > SEVERITY_RANK[AI_MAX_SEVERITY] ? AI_MAX_SEVERITY : candidate.severity;
+
+    return [{ ...candidate, severity }];
+  });
+}
+
 // Registered once per process, not per call — AgentRegistry.register()
 // throws if the same agent id is registered twice.
 let orchestrator: AgentOrchestrator | null = null;
@@ -79,11 +150,13 @@ export async function runGoogleMarketingAnalyst(
 
     const rawFindings = Array.isArray(output.result.findings) ? output.result.findings : [];
 
-    return rawFindings.flatMap((entry) => {
+    const candidates = rawFindings.flatMap((entry) => {
       const result = findingLikeSchema.safeParse(entry);
       if (!result.success) return [];
       return [result.data as unknown as FindingDraft];
     });
+
+    return filterAiFindingDrafts(candidates, findings);
   } catch (error) {
     console.error(
       "Google Marketing Analyst agent invocation failed — skipping strategic synthesis for this run",
