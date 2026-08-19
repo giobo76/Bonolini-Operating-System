@@ -81,7 +81,7 @@ async function findOrCreateClientByPhone(
       ${profileName ?? normalizedPhone},
       ${normalizedPhone},
       false,
-      ${receivedAt}
+      ${receivedAt.toISOString()}
     )
     on conflict (tenant_id, (regexp_replace(phone, '[^0-9]', '', 'g'))) where deleted_at is null
     do nothing
