@@ -2,6 +2,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { log, captureException } from "../observability";
 import { whatsappWebhookPayloadSchema, extractMessages } from "./schema";
 import { processInboundMessage } from "./service";
+import type { ParsedWhatsappMessage } from "./schema";
+import { processTransferRequestForMessageAndPrice } from "../transfer-requests";
+import type { TransferRequestExtractedFields } from "../transfer-requests";
 
 // The transport-framework-agnostic core of GET/POST
 // /api/whatsapp/webhook (apps/transfer-admin/app/api/whatsapp/webhook/
@@ -49,6 +52,27 @@ export function handleWhatsappVerification(
 
   log("whatsapp.webhook.verification_rejected", {});
   return { status: 403, body: "forbidden" };
+}
+
+// ── Bridge to transfer-requests ──────────────────────────────────────────
+// Direct field subset of ParsedWhatsappMessage -> TransferRequestExtractedFields
+// (same shape proven in transfer-requests/whatsapp-pricing-simulation.integration.test.ts) —
+// no parsing, merge, missing-information, customerType, or pricing logic
+// here, all of that stays inside transfer-requests' own module per ADR 0002.
+function toTransferRequestExtractedFields(parsed: ParsedWhatsappMessage): TransferRequestExtractedFields {
+  return {
+    intent: parsed.intent,
+    pickup: parsed.pickup,
+    destination: parsed.destination,
+    date: parsed.date,
+    time: parsed.time,
+    passengers: parsed.passengers,
+    luggage: parsed.luggage,
+    flight: parsed.flight,
+    train: parsed.train,
+    hotel: parsed.hotel,
+    language: parsed.language,
+  };
 }
 
 // ── POST: inbound message delivery ───────────────────────────────────────
@@ -102,6 +126,30 @@ export async function handleWhatsappWebhookRequest(
     try {
       const result = await processInboundMessage(message);
       log("whatsapp.webhook.message_processed", { status: result.status });
+
+      // Only a message that resolved to a client with parsed data can drive
+      // a transfer request — a non-text message (parsed === null) has
+      // nothing to extract. Inline, synchronous call for this first real
+      // connection (no Inngest event yet — see transfer-requests/README.md's
+      // "Integration is a separate, deliberate next step"). Safe to run on
+      // both "processed" and "duplicate" (a Meta retry): processTransferRequestForMessage
+      // is idempotent per whatsapp_messages.id (see its own doc comment).
+      if (result.clientId && result.parsed) {
+        try {
+          const priced = await processTransferRequestForMessageAndPrice({
+            tenantId: result.tenantId,
+            clientId: result.clientId,
+            whatsappMessageId: result.messageId,
+            extracted: toTransferRequestExtractedFields(result.parsed),
+          });
+          log("whatsapp.webhook.transfer_request_processed", {
+            status: priced.status,
+            pricingStatus: priced.pricingStatus,
+          });
+        } catch (error) {
+          captureException(error, "whatsapp.webhook.transfer_request_failed");
+        }
+      }
     } catch (error) {
       captureException(error, "whatsapp.webhook.message_failed");
     }

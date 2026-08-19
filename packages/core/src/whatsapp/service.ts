@@ -128,6 +128,10 @@ async function applyParsedDataToClient(client: Client, parsed: ParsedWhatsappMes
 
 export interface ProcessInboundMessageResult {
   status: "processed" | "duplicate";
+  // Exposed so a caller (e.g. webhook-handler.ts, bridging to
+  // transfer-requests) can act on this message without re-deriving the
+  // tenant itself — this module already resolved it via getDefaultTenantId.
+  tenantId: string;
   messageId: string;
   clientId: string | null;
   parsed: ParsedWhatsappMessage | null;
@@ -171,6 +175,7 @@ export async function processInboundMessage(
       .where(and(eq(whatsappMessages.tenantId, tenantId), eq(whatsappMessages.whatsappMessageId, message.waMessageId)));
     return {
       status: "duplicate",
+      tenantId,
       messageId: existing?.id ?? "",
       clientId: existing?.clientId ?? null,
       parsed: (existing?.parsed as ParsedWhatsappMessage | null) ?? null,
@@ -206,5 +211,5 @@ export async function processInboundMessage(
 
   await applyParsedDataToClient(client, parsed);
 
-  return { status: "processed", messageId: row.id, clientId: client.id, parsed };
+  return { status: "processed", tenantId, messageId: row.id, clientId: client.id, parsed };
 }

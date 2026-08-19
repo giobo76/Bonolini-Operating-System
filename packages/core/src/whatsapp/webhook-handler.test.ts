@@ -4,6 +4,15 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 const processInboundMessage = vi.fn();
 vi.mock("./service", () => ({ processInboundMessage: (...args: unknown[]) => processInboundMessage(...args) }));
 
+// Mocked the same way as ./service above — these tests exercise the
+// webhook transport/orchestration layer, not the transfer-requests module
+// itself (already covered by its own unit tests and by
+// transfer-requests/whatsapp-pricing-simulation.integration.test.ts).
+const processTransferRequestForMessageAndPrice = vi.fn();
+vi.mock("../transfer-requests", () => ({
+  processTransferRequestForMessageAndPrice: (...args: unknown[]) => processTransferRequestForMessageAndPrice(...args),
+}));
+
 const { verifyMetaSignature, handleWhatsappVerification, handleWhatsappWebhookRequest } = await import(
   "./webhook-handler"
 );
@@ -76,7 +85,15 @@ describe("handleWhatsappVerification (GET)", () => {
 describe("handleWhatsappWebhookRequest (POST)", () => {
   beforeEach(() => {
     processInboundMessage.mockReset();
-    processInboundMessage.mockResolvedValue({ status: "processed", messageId: "msg-1", clientId: "client-1", parsed: {} });
+    processInboundMessage.mockResolvedValue({
+      status: "processed",
+      tenantId: "tenant-1",
+      messageId: "msg-1",
+      clientId: "client-1",
+      parsed: {},
+    });
+    processTransferRequestForMessageAndPrice.mockReset();
+    processTransferRequestForMessageAndPrice.mockResolvedValue({ status: "collecting_info", pricingStatus: "not_priced" });
   });
 
   it("5: processes the payload and returns 200 when the signature is valid", async () => {
@@ -170,6 +187,67 @@ describe("handleWhatsappWebhookRequest (POST)", () => {
     expect(processInboundMessage).toHaveBeenCalledTimes(2);
   });
 
+  it("bridges a processed message into processTransferRequestForMessageAndPrice with the mapped fields", async () => {
+    processInboundMessage.mockResolvedValue({
+      status: "processed",
+      tenantId: "tenant-1",
+      messageId: "msg-1",
+      clientId: "client-1",
+      parsed: { pickup: "Sondrio", destination: "Malpensa", date: "2026-09-05", time: "14:00", passengers: 4, language: "en", intent: "transfer_request" },
+    });
+
+    const result = await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    expect(processTransferRequestForMessageAndPrice).toHaveBeenCalledTimes(1);
+    expect(processTransferRequestForMessageAndPrice).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      whatsappMessageId: "msg-1",
+      extracted: {
+        intent: "transfer_request",
+        pickup: "Sondrio",
+        destination: "Malpensa",
+        date: "2026-09-05",
+        time: "14:00",
+        passengers: 4,
+        luggage: undefined,
+        flight: undefined,
+        train: undefined,
+        hotel: undefined,
+        language: "en",
+      },
+    });
+  });
+
+  it("does not bridge to transfer-requests when there is no client or no parsed data", async () => {
+    processInboundMessage.mockResolvedValue({ status: "processed", tenantId: "tenant-1", messageId: "msg-1", clientId: null, parsed: null });
+
+    await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(processTransferRequestForMessageAndPrice).not.toHaveBeenCalled();
+  });
+
+  it("does not fail the whole batch when processTransferRequestForMessageAndPrice throws", async () => {
+    processTransferRequestForMessageAndPrice.mockRejectedValue(new Error("pricing down"));
+
+    const result = await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+  });
+
   it("does not fail the whole batch when processInboundMessage throws for one message", async () => {
     processInboundMessage.mockRejectedValue(new Error("db down"));
 
@@ -189,7 +267,15 @@ describe("14: no secrets ever reach the log output", () => {
 
   beforeEach(() => {
     processInboundMessage.mockReset();
-    processInboundMessage.mockResolvedValue({ status: "processed", messageId: "msg-1", clientId: "client-1", parsed: {} });
+    processInboundMessage.mockResolvedValue({
+      status: "processed",
+      tenantId: "tenant-1",
+      messageId: "msg-1",
+      clientId: "client-1",
+      parsed: {},
+    });
+    processTransferRequestForMessageAndPrice.mockReset();
+    processTransferRequestForMessageAndPrice.mockResolvedValue({ status: "collecting_info", pricingStatus: "not_priced" });
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
   });

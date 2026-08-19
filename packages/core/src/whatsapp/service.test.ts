@@ -181,7 +181,7 @@ describe("processInboundMessage", () => {
 
     const result = await processInboundMessage(inboundMessage());
 
-    expect(result).toEqual({ status: "duplicate", messageId: "msg-existing", clientId: "client-existing", parsed: { pickup: "Milan" } });
+    expect(result).toEqual({ status: "duplicate", tenantId: "tenant-1", messageId: "msg-existing", clientId: "client-existing", parsed: { pickup: "Milan" } });
     expect(fakeState.whatsappMessages).toHaveLength(1);
     expect(fakeState.insertedClients).toHaveLength(0);
   });

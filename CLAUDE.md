@@ -88,6 +88,22 @@ Full detail in [docs/engineering/](docs/engineering/) (folder conventions, codin
 - No comments explaining *what* code does — only *why*, when non-obvious (see repo-wide style; this is a general engineering preference, not BOS-specific).
 - New domain tables live in `packages/db/src/schema/<module>.ts`, one file per `packages/core` module, re-exported from `packages/db/src/schema/index.ts`.
 
+## Content generation & editorial workflow
+
+Applies whenever generating or editing editorial/marketing content for Bonolini Transfer — SEO pages, landing pages, blog posts, social media, service descriptions, commercial emails, or any other content aimed at customers or prospects.
+
+**Never invent**: facts, experiences, reviews, numbers, dates, names, tools, outcomes, or mechanisms not backed by real sources already in the repo or supplied by the founder. If information needed to write the content correctly is missing, search the repository/docs first; if it's still missing, flag the gap instead of filling it.
+
+**Required pipeline**: real sources/information → draft → `avoid-ai-writing` (rewrite mode) → review → its built-in second-pass audit → final content. Pick the context profile that fits the channel (`blog`, `technical-blog`, `linkedin`, `docs`, `casual`, or another the skill offers) rather than defaulting blindly to one.
+
+**The skill is an editorial check, not a humanizer**: never use it to introduce grammatical or spelling errors, unnatural fragments, fake personal experience, fake spontaneity, artificial contrarianism, theatrics, or invented information. The result should read as written naturally by a knowledgeable person — never as "AI text with errors added to look human."
+
+**SEO keywords are constraints, not suggestions**: deliberate, supplied SEO keywords must never be removed, replaced, or altered just because the skill flags them as a possible AI-ism. If a required keyword conflicts with a stylistic rewrite, keep the keyword and adjust the surrounding text instead.
+
+**Never alter for style**: prices, services, locations, routes, vehicle specs, commercial terms, technical data, verified facts, or required SEO keywords.
+
+**Voice profile**: not yet defined for this brand. Don't invent an official tone of voice — until the founder defines one, keep the register consistent with the content, the channel, and the real material available.
+
 ## Roadmap
 
 | Phase | Status | Goal |
