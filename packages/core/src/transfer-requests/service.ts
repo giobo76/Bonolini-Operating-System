@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, transferRequests, whatsappMessages, assertOne, type TransferRequest } from "@bos/db";
-import { calculatePrice, determineCustomerType, type CustomerType } from "../pricing";
+import { calculatePrice, determineCustomerType, isComoTiranoRoute, type CustomerType } from "../pricing";
+import { calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip } from "../maps-distance";
 import { getClient } from "../clients";
 import type { TransferRequestExtractedFields } from "./schema";
 
@@ -359,22 +360,67 @@ export async function runPricingForTransferRequest(
     throw new Error(`runPricingForTransferRequest: transfer_request ${id} is ready_for_pricing but missing required fields`);
   }
 
-  // distanceKm/requestedServiceType/channel/possibleNightOrHolidaySurcharge
-  // have no source on transfer_requests today (no Maps integration, no
-  // serviceType/channel columns) — always the conservative default, which
-  // the pricing engine already handles as manual_required where it matters
-  // (e.g. any km-based route defers with reason "distance_not_provided"
-  // until a real distance is available). Not a workaround: this is the
-  // honest, current state of what this connection can compute.
-  const pricingResult = calculatePrice({
+  const pickup = existing.pickup;
+  const destination = existing.destination;
+  const passengers = existing.passengers;
+
+  // requestedServiceType/channel/possibleNightOrHolidaySurcharge have no
+  // source on transfer_requests today (no serviceType/channel columns) —
+  // always the conservative default, which the pricing engine already
+  // handles as manual_required where it matters. Not a workaround: this is
+  // the honest, current state of what this connection can signal.
+  const basePricingInput = {
     customerType,
-    pickup: existing.pickup,
-    destination: existing.destination,
-    passengers: existing.passengers,
-    requestedServiceType: "point_to_point",
-    channel: "direct",
+    pickup,
+    destination,
+    passengers,
+    requestedServiceType: "point_to_point" as const,
+    channel: "direct" as const,
     possibleNightOrHolidaySurcharge: false,
-  });
+  };
+
+  // First pass, no distance: calculatePrice() is the only authority on
+  // whether a distance is even needed at all (fixed fares and the
+  // Como-Tirano foreign fixed fare never need one) — this connection never
+  // re-implements that routing/fare-matching decision itself. Only when
+  // the engine's own answer is "the sole blocker is a missing distance" do
+  // we go fetch one from maps-distance, then ask the engine again with it.
+  let pricingResult = calculatePrice(basePricingInput);
+  let distanceLookup: Record<string, unknown> = { attempted: false };
+
+  if (pricingResult.manualRequiredReason === "distance_not_provided") {
+    // isComoTiranoRoute is the same pure keyword check calculatePrice()
+    // itself uses internally (exported from pricing specifically for this
+    // — see pricing/index.ts) — picking the matching maps-distance waypoint
+    // convention here never duplicates that logic, only reads its answer.
+    const routeResult = isComoTiranoRoute(pickup, destination)
+      ? await calculateComoTiranoRoundTrip()
+      : await calculateGenericRouteRoundTrip(pickup, destination);
+
+    if (routeResult.status === "ok" && routeResult.distanceKm !== null) {
+      distanceLookup = {
+        attempted: true,
+        status: "ok",
+        provider: routeResult.provider,
+        distanceKm: routeResult.distanceKm,
+        durationMinutes: routeResult.durationMinutes,
+      };
+      pricingResult = calculatePrice({ ...basePricingInput, distanceKm: routeResult.distanceKm });
+    } else {
+      // Maps couldn't produce a real distance: pricingResult stays exactly
+      // the first-pass manual_required result above — no price is ever
+      // invented. distanceLookup below records the structured reason why,
+      // for the admin, without touching the pricing engine's own typed
+      // manualRequiredReason ("distance_not_provided" already covers the
+      // commercial-facing "why": no distance was available).
+      distanceLookup = {
+        attempted: true,
+        status: "error",
+        errorCode: routeResult.error?.code ?? null,
+        errorMessage: routeResult.error?.message ?? null,
+      };
+    }
+  }
 
   const nextStatus = pricingResult.pricingStatus === "manual_required" ? existing.status : "pending_admin_approval";
 
@@ -393,6 +439,7 @@ export async function runPricingForTransferRequest(
         tollAmountCents: pricingResult.tollAmountCents,
         adjustments: pricingResult.adjustments,
         hospitalWaiting: pricingResult.hospitalWaiting,
+        distanceLookup,
       },
       updatedAt: new Date(),
     })

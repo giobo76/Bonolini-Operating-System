@@ -31,7 +31,7 @@ Every constant here is recovered verbatim from `CChiefGrowthAI/ai/booking_bot/pr
 - **Pickup incompatible with a fixed fare** (not Sondrio, not a known fixed-fare keyword itself) → `manual_required` (`fixed_fare_origin_requires_verification`), fixed fare **not** applied. CChiefGrowthAI's own weaker behavior (apply the fare anyway, just add a warning note) is **not** carried over.
 - **Hospital waiting is a separate field** (`hospitalWaiting`), never summed into `finalAmountCents` — the transfer price and the waiting-time rule are independent. Fixes a real gap found in CChiefGrowthAI's own code: there, the hospital note only ever fired inside the fixed-fare branch, never on a km-calculated destination (e.g. "Ospedale di Sondalo", CChiefGrowthAI's own test example in `pricing_engine.py`'s `__main__` block). Here, hospital detection runs once, independent of which pricing branch computes the base fare.
 - **Hospital waiting for foreign customers**: `hospitalWaitingStatus: "manual_required"` — never defaults to the italian 40€/h rate.
-- **Distance is never calculated here** — `distanceKm` is an input, supplied by the caller according to the route's own convention (round-trip total for generic point-to-point, sum of the 3 legs Sondrio→Como→Tirano→Sondrio for Como-Tirano italian). No Google Maps integration exists in this module or anywhere else in the BOS yet.
+- **Distance is never calculated here** — `distanceKm` is an input, supplied by the caller according to the route's own convention (round-trip total for generic point-to-point, sum of the 3 legs Sondrio→Como→Tirano→Sondrio for Como-Tirano italian). This module still never calls Google Maps or any distance API itself; that lives in [`packages/core/src/maps-distance`](../maps-distance/README.md), which `transfer-requests` calls when — and only when — `calculatePrice()` itself reports `manualRequiredReason: "distance_not_provided"`. `isComoTiranoRoute` is exported specifically so that caller can pick the right waypoint convention without duplicating this module's own route-matching keywords.
 
 ## Intake signals added in this implementation — not in the original spec, added to make deferral testable
 
@@ -45,6 +45,6 @@ Every constant here is recovered verbatim from `CChiefGrowthAI/ai/booking_bot/pr
 - Viator pass-through (no technical mechanism yet exists to receive the external price)
 - Hospital waiting rate for foreign customers
 
-## Not wired into anything yet
+## Wiring
 
-Not called from `transfer-requests`, not called from any webhook, no persistence into `transfer_requests.pricingStatus`/`calculatedAmountCents`/`pricingBreakdown`. This module is a complete, tested, standalone unit — integration is a separate, explicitly-approved next step.
+Called from `transfer-requests::runPricingForTransferRequest`, which persists the result onto `transfer_requests.pricingStatus`/`calculatedAmountCents`/`pricingBreakdown`, itself triggered automatically by the live WhatsApp webhook via `processTransferRequestForMessageAndPrice`. See [`transfer-requests/README.md`](../transfer-requests/README.md#pricing-connection).

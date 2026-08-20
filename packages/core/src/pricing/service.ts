@@ -50,7 +50,14 @@ function kmRate(customerType: CustomerType, distanceKm: number): number {
   return distanceKm <= 100 ? 1.0 : 0.85;
 }
 
-function isComoTiranoRoute(pickup: string, destination: string): boolean {
+// Exported (only this one internal helper, deliberately) so the
+// transfer-requests <-> maps-distance connection can ask "does this route
+// need the Como-Tirano waypoint convention or the generic one?" without
+// re-implementing this exact keyword check a second time. calculatePrice()
+// itself remains the only place that decides whether a price/distance is
+// actually needed — this just answers "which route is it", a fact, not a
+// pricing decision.
+export function isComoTiranoRoute(pickup: string, destination: string): boolean {
   const combined = `${pickup} ${destination}`.toLowerCase();
   return combined.includes("como") && combined.includes("tirano");
 }

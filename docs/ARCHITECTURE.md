@@ -144,7 +144,9 @@ Actually referenced in code:
 Declared in `.env.example` but not referenced anywhere in source (either unused today or consumed implicitly by an SDK):
 - `SUPABASE_SERVICE_ROLE_KEY` — not referenced in any file found.
 - `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` — consumed implicitly by the `inngest` SDK, not read directly.
-- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `GOOGLE_MAPS_API_KEY` — commented out, reserved for Phase 1 features (billing, notifications, maps) that have no code yet.
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` — commented out, reserved for Phase 1 features (billing, notifications) that have no code yet.
+
+`GOOGLE_MAPS_API_KEY` is no longer in that category — it's read by `packages/core/src/maps-distance` (see that module's README), called from `transfer-requests` when a route needs a real distance.
 
 ## 11. External services
 

@@ -1,6 +1,7 @@
 import { Param, StringChunk } from "drizzle-orm";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { TransferRequestExtractedFields } from "./schema";
+import type { RouteDistanceResult } from "../maps-distance";
 
 // @bos/db is fully mocked, same convention as
 // packages/core/src/whatsapp/service.test.ts and
@@ -191,6 +192,30 @@ vi.mock("@bos/db", () => {
   };
 });
 
+// ../maps-distance is mocked so these tests never make a real HTTP call —
+// same convention as ../whatsapp/parser being mocked in the integration
+// simulation test. Default: both convenience wrappers resolve to a
+// structured error (as if GOOGLE_MAPS_API_KEY were unset), so every
+// existing "manual_required, distance_not_provided" assertion below stays
+// true unchanged; individual tests override with mockResolvedValueOnce to
+// exercise the calculated_km unlock path.
+const defaultMapsError: RouteDistanceResult = {
+  status: "error",
+  provider: "google_routes_api",
+  distanceKm: null,
+  durationMinutes: null,
+  legs: [],
+  error: { code: "api_key_missing", message: "GOOGLE_MAPS_API_KEY is not configured." },
+};
+const calculateGenericRouteRoundTrip = vi.fn(
+  async (_pickup: string, _destination: string): Promise<RouteDistanceResult> => defaultMapsError,
+);
+const calculateComoTiranoRoundTrip = vi.fn(async (): Promise<RouteDistanceResult> => defaultMapsError);
+vi.mock("../maps-distance", () => ({
+  calculateGenericRouteRoundTrip: (pickup: string, destination: string) => calculateGenericRouteRoundTrip(pickup, destination),
+  calculateComoTiranoRoundTrip: () => calculateComoTiranoRoundTrip(),
+}));
+
 const {
   processTransferRequestForMessage,
   processTransferRequestForMessageAndPrice,
@@ -220,6 +245,8 @@ beforeEach(() => {
   fakeState.messages = [];
   fakeState.clients = [];
   fakeState.nextRequestId = 1;
+  calculateGenericRouteRoundTrip.mockClear();
+  calculateComoTiranoRoundTrip.mockClear();
 });
 
 describe("computeMissingInformation", () => {
@@ -487,23 +514,53 @@ describe("runPricingForTransferRequest", () => {
     });
   }
 
-  it("1/2: a generic km route (italian or foreign) always defers through this connection today — no distance source exists yet", async () => {
-    // Honest limitation, not a bug: runPricingForTransferRequest never
-    // supplies distanceKm (no Maps integration exists anywhere in the BOS
-    // yet — see README.md). A generic point-to-point request can only ever
-    // resolve to manual_required through this connection until a distance
-    // source is wired in. This test proves that's what actually happens,
-    // rather than silently asserting a computed price that isn't real.
+  it("1/2: a generic km route (italian or foreign) defers when maps-distance can't produce a real distance", async () => {
+    // maps-distance is mocked to fail by default in this file (see the
+    // vi.mock above) — proves the connection still never invents a price
+    // when the distance lookup itself fails, and records why in
+    // distanceLookup instead of silently dropping the reason.
     seedReadyRequest({ destination: "Livigno" });
     const italian = await runPricingForTransferRequest("tenant-1", "request-1", "italian");
     expect(italian.pricingStatus).toBe("manual_required");
-    expect(italian.pricingBreakdown).toMatchObject({ manualRequiredReason: "distance_not_provided" });
+    expect(italian.pricingBreakdown).toMatchObject({
+      manualRequiredReason: "distance_not_provided",
+      distanceLookup: { attempted: true, status: "error", errorCode: "api_key_missing" },
+    });
+    expect(calculateGenericRouteRoundTrip).toHaveBeenCalledWith("Sondrio", "Livigno");
 
     fakeState.requests = [];
     seedReadyRequest({ destination: "Livigno" });
     const foreign = await runPricingForTransferRequest("tenant-1", "request-1", "foreign");
     expect(foreign.pricingStatus).toBe("manual_required");
     expect(foreign.pricingBreakdown).toMatchObject({ manualRequiredReason: "distance_not_provided" });
+  });
+
+  it("1b: a generic km route unlocks calculated_km once maps-distance returns a real distance", async () => {
+    calculateGenericRouteRoundTrip.mockResolvedValueOnce({
+      status: "ok",
+      provider: "google_routes_api",
+      distanceKm: 60,
+      durationMinutes: 80,
+      legs: [
+        { origin: "Sondrio", destination: "Livigno", distanceKm: 30, durationMinutes: 40 },
+        { origin: "Livigno", destination: "Sondrio", distanceKm: 30, durationMinutes: 40 },
+      ],
+      error: null,
+    });
+    seedReadyRequest({ destination: "Livigno" });
+
+    const result = await runPricingForTransferRequest("tenant-1", "request-1", "italian");
+
+    expect(calculateGenericRouteRoundTrip).toHaveBeenCalledWith("Sondrio", "Livigno");
+    expect(result.status).toBe("pending_admin_approval");
+    expect(result.pricingStatus).toBe("calculated_km");
+    // distanceKm 60, italian rate 1.00/km (<=100km): base 6000c + toll (60*0.08*100=480c) = 6480c, above the 5000c minimum.
+    expect(result.calculatedAmountCents).toBe(6480);
+    expect(result.pricingBreakdown).toMatchObject({
+      matchedRule: "generic_km",
+      distanceKmUsed: 60,
+      distanceLookup: { attempted: true, status: "ok", provider: "google_routes_api", distanceKm: 60, durationMinutes: 80 },
+    });
   });
 
   it("3/4: an airport fixed fare (Malpensa) advances status to pending_admin_approval and persists every pricing field", async () => {
@@ -519,7 +576,12 @@ describe("runPricingForTransferRequest", () => {
       matchedRule: "fixed_airport_malpensa",
       customerType: "italian",
       serviceType: "point_to_point",
+      distanceLookup: { attempted: false },
     });
+    // A fixed fare needs no distance — the connection never calls
+    // maps-distance when calculatePrice() itself didn't ask for one.
+    expect(calculateGenericRouteRoundTrip).not.toHaveBeenCalled();
+    expect(calculateComoTiranoRoundTrip).not.toHaveBeenCalled();
   });
 
   it("5: Como-Tirano foreign produces a real computed price through the connection — no distance needed for the fixed fare", async () => {
@@ -533,7 +595,7 @@ describe("runPricingForTransferRequest", () => {
     expect(result.pricingBreakdown).toMatchObject({ matchedRule: "como_tirano_fixed_foreign" });
   });
 
-  it("6: Como-Tirano italian defers through this connection — needs the 3-leg distance, not available yet", async () => {
+  it("6: Como-Tirano italian defers when maps-distance can't produce the 3-leg distance", async () => {
     seedReadyRequest({ pickup: "Como", destination: "Tirano" });
 
     const result = await runPricingForTransferRequest("tenant-1", "request-1", "italian");
@@ -541,6 +603,34 @@ describe("runPricingForTransferRequest", () => {
     expect(result.status).toBe("ready_for_pricing");
     expect(result.pricingStatus).toBe("manual_required");
     expect(result.pricingBreakdown).toMatchObject({ manualRequiredReason: "distance_not_provided" });
+    // Como-Tirano is routed through the fixed 3-leg convention, not the
+    // generic pickup/destination one.
+    expect(calculateComoTiranoRoundTrip).toHaveBeenCalledTimes(1);
+    expect(calculateGenericRouteRoundTrip).not.toHaveBeenCalled();
+  });
+
+  it("6b: Como-Tirano italian unlocks calculated_km once maps-distance returns the 3-leg distance", async () => {
+    calculateComoTiranoRoundTrip.mockResolvedValueOnce({
+      status: "ok",
+      provider: "google_routes_api",
+      distanceKm: 85.5,
+      durationMinutes: 115,
+      legs: [
+        { origin: "Sondrio", destination: "Como", distanceKm: 30, durationMinutes: 40 },
+        { origin: "Como", destination: "Tirano", distanceKm: 25.5, durationMinutes: 35 },
+        { origin: "Tirano", destination: "Sondrio", distanceKm: 30, durationMinutes: 40 },
+      ],
+      error: null,
+    });
+    seedReadyRequest({ pickup: "Como", destination: "Tirano" });
+
+    const result = await runPricingForTransferRequest("tenant-1", "request-1", "italian");
+
+    expect(result.status).toBe("pending_admin_approval");
+    expect(result.pricingStatus).toBe("calculated_km");
+    // distanceKm 85.5, italian rate 1.00/km: base 8550c + toll (85.5*0.08*100=684c) = 9234c.
+    expect(result.calculatedAmountCents).toBe(9234);
+    expect(result.pricingBreakdown).toMatchObject({ matchedRule: "como_tirano_km_italian", distanceKmUsed: 85.5 });
   });
 
   it("8: more than 8 passengers on an airport fare defers — reachable through the connection since it needs no distance", async () => {

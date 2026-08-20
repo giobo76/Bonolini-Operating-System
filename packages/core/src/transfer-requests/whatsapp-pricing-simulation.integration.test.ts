@@ -1,5 +1,5 @@
 import { Param, StringChunk } from "drizzle-orm";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 // ── Controlled end-to-end simulation ─────────────────────────────────────
 // Exercises the REAL production functions across four modules —
@@ -7,17 +7,22 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 // (the automatic trigger: processTransferRequestForMessage, clients.getClient,
 // pricing.determineCustomerType, and transfer-requests.runPricingForTransferRequest,
 // all composed — not reimplemented here), and pricing.calculatePrice. Only
-// the two I/O boundaries are faked: @bos/db (no real database exists for
-// this repo yet — see docs/PRODUCTION_ROADMAP.md Milestone 3) and the
+// the I/O boundaries are faked: @bos/db (no real database exists for
+// this repo yet — see docs/PRODUCTION_ROADMAP.md Milestone 3), the
 // Claude-based parser (replaced with a fixed, clearly-marked TEST
 // extraction so the simulation is deterministic and doesn't depend on live
-// LLM output or an ANTHROPIC_API_KEY).
+// LLM output or an ANTHROPIC_API_KEY), and — for the third scenario only —
+// the Google Routes HTTP call itself (global fetch stubbed, same boundary
+// maps-distance/service.test.ts already uses; maps-distance's own module
+// code runs for real, never re-mocked at the module boundary here).
 //
-// Goal: prove the module CONNECTION works end-to-end with data that would
-// exercise the full happy path (a fixed airport fare, so no Google Maps
-// integration is needed — Malpensa -> Sondrio never requires distanceKm).
-// This is not a substitute for the individual unit test suites already
-// covering each module's own logic in isolation.
+// Goal: prove the module CONNECTION works end-to-end. Scenario 2 exercises
+// the full happy path with a fixed airport fare (no Google Maps needed —
+// Malpensa -> Sondrio never requires distanceKm). Scenario 3 exercises the
+// other real branch: a generic km route that genuinely needs a Google Maps
+// round-trip lookup before a price exists. This is not a substitute for
+// the individual unit test suites already covering each module's own logic
+// in isolation.
 //
 // NOT wired into the real webhook, Meta, or Supabase production — this
 // file is a permanent, repository-committed integration test (vitest),
@@ -228,9 +233,38 @@ vi.mock("../whatsapp/parser", () => ({
   parseWhatsappMessage: (...args: unknown[]) => mockParseWhatsappMessage(...args),
 }));
 
+// maps-distance's REAL module code runs for every scenario (never
+// reimplemented or canned here) — only wrapped in vi.fn() so a test can
+// assert which wrapper was actually invoked. Scenario 1 (Malpensa ->
+// Sondrio) still resolves to manual_required/distance_not_provided exactly
+// as before: GOOGLE_MAPS_API_KEY stays unset for that test, so the real
+// calculateRoute() returns its own "api_key_missing" error before ever
+// touching fetch — same outcome, now proven through real code instead of a
+// canned fake. Scenario 2 (fixed fare) never calls maps-distance at all.
+// Scenario 3 sets GOOGLE_MAPS_API_KEY and stubs global fetch (same
+// boundary as maps-distance/service.test.ts) to exercise the real HTTP
+// call path. fetchMock/GOOGLE_MAPS_API_KEY are reset in the file-level
+// afterEach so this never leaks between tests.
+vi.mock("../maps-distance", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../maps-distance")>();
+  return {
+    ...actual,
+    calculateGenericRouteRoundTrip: vi.fn(actual.calculateGenericRouteRoundTrip),
+    calculateComoTiranoRoundTrip: vi.fn(actual.calculateComoTiranoRoundTrip),
+  };
+});
+
+const fetchMock = vi.fn();
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete process.env.GOOGLE_MAPS_API_KEY;
+});
+
 const { processInboundMessage } = await import("../whatsapp/service");
 const { processTransferRequestForMessageAndPrice, getTransferRequest } = await import("./service");
 const { determineCustomerType } = await import("../pricing");
+const { calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip } = await import("../maps-distance");
 
 beforeEach(() => {
   fakeState.clients = [];
@@ -238,6 +272,8 @@ beforeEach(() => {
   fakeState.transferRequests = [];
   fakeState.nextClientId = 1;
   fakeState.nextRequestId = 1;
+  vi.mocked(calculateGenericRouteRoundTrip).mockClear();
+  vi.mocked(calculateComoTiranoRoundTrip).mockClear();
 });
 
 describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", () => {
@@ -394,5 +430,145 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
     const reread = await getTransferRequest(fakeState.tenant.id, priced.id);
     expect(reread?.status).toBe("pending_admin_approval");
     expect(reread?.calculatedAmountCents).toBe(25000);
+  });
+
+  it("[generic km route, real maps-distance code path, mocked only at the fetch/HTTP boundary] Sondrio -> Livigno, foreign, 4 pax: distance_not_provided -> real Google Routes lookup -> calculated_km -> pending_admin_approval", async () => {
+    const TEST_PHONE_LIVIGNO = "+999000000002"; // does not start with "39" -> foreign, by construction
+
+    // Scoped to this test only (cleared by the file-level afterEach) — the
+    // real maps-distance/service.ts code checks this env var and calls
+    // fetch itself; nothing here re-implements that request/response
+    // handling, already proven in maps-distance/service.test.ts.
+    process.env.GOOGLE_MAPS_API_KEY = "test-key-do-not-use";
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          routes: [
+            {
+              legs: [
+                { distanceMeters: 68400, duration: "4740s" }, // Sondrio -> Livigno: 68.4km / 79min
+                { distanceMeters: 68400, duration: "4740s" }, // Livigno -> Sondrio: 68.4km / 79min
+              ],
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    mockParseWhatsappMessage.mockResolvedValueOnce({
+      pickup: "Sondrio",
+      destination: "Livigno",
+      date: "2026-09-25",
+      time: "14:30",
+      passengers: 4,
+      language: "en",
+      intent: "transfer_request",
+    });
+
+    const inbound = await processInboundMessage({
+      waMessageId: "wamid.TEST-SIMULATION-0003",
+      fromPhone: TEST_PHONE_LIVIGNO,
+      type: "text",
+      rawText: "[TEST SIMULATION] transfer Sondrio -> Livigno, 4 persone, 25 settembre alle 14:30",
+      profileName: null,
+      receivedAt: new Date("2026-08-20T09:00:00Z"),
+    });
+    expect(inbound.status).toBe("processed");
+    expect(inbound.clientId).not.toBeNull();
+
+    const parsed = inbound.parsed!;
+    const priced = await processTransferRequestForMessageAndPrice({
+      tenantId: fakeState.tenant.id,
+      clientId: inbound.clientId!,
+      whatsappMessageId: inbound.messageId,
+      extracted: {
+        intent: parsed.intent,
+        pickup: parsed.pickup,
+        destination: parsed.destination,
+        date: parsed.date,
+        time: parsed.time,
+        passengers: parsed.passengers,
+        language: parsed.language,
+      },
+    });
+
+    // Item 2: the correct Maps function was called — Sondrio/Livigno is
+    // not the Como-Tirano route, so this must be the generic round-trip
+    // wrapper, never the Como-Tirano one.
+    expect(calculateGenericRouteRoundTrip).toHaveBeenCalledWith("Sondrio", "Livigno");
+    expect(calculateComoTiranoRoundTrip).not.toHaveBeenCalled();
+
+    // Item 1 (indirect) + real HTTP call proof: the engine only ever
+    // reaches maps-distance at all when its own first calculatePrice()
+    // returned manualRequiredReason "distance_not_provided" (the gate
+    // condition in transfer-requests/service.ts) — the fact this real
+    // fetch call happened is itself proof that gate fired. Exactly one
+    // real (mocked-at-the-boundary) HTTP call, with the real request shape
+    // calculateRoute() builds.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, requestInit] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://routes.googleapis.com/directions/v2:computeRoutes");
+    const requestBody = JSON.parse((requestInit as RequestInit).body as string);
+    expect(requestBody).toMatchObject({
+      origin: { address: "Sondrio, Italia" },
+      destination: { address: "Sondrio, Italia" },
+      intermediates: [{ address: "Livigno, Italia" }],
+      travelMode: "DRIVE",
+    });
+
+    // customerType resolved automatically from the client's phone.
+    expect(determineCustomerType(TEST_PHONE_LIVIGNO)).toBe("foreign");
+    expect((priced.pricingBreakdown as Record<string, unknown>).customerType).toBe("foreign");
+
+    // Item 8: distanceLookup records the real (mocked-at-HTTP) successful outcome.
+    expect((priced.pricingBreakdown as Record<string, unknown>).distanceLookup).toMatchObject({
+      attempted: true,
+      status: "ok",
+      provider: "google_routes_api",
+      distanceKm: 136.8,
+      durationMinutes: 158,
+    });
+
+    // Item 3/4: the distance the mock returned was really passed into the
+    // second calculatePrice() call — matchedRule + distanceKmUsed only
+    // ever come from buildKmResult(), which only ever runs on the second
+    // pass with a real distanceKm (see pricing/service.ts).
+    expect(priced.pricingStatus).toBe("calculated_km");
+    expect((priced.pricingBreakdown as Record<string, unknown>).matchedRule).toBe("generic_km");
+    expect((priced.pricingBreakdown as Record<string, unknown>).distanceKmUsed).toBe(136.8);
+
+    // Item 5/6: toll at 0.08 EUR/km is included as its own field, and the
+    // 50 EUR minimum is correctly NOT applied here (136.8km round trip is
+    // well above it) — the minimum actually triggering on a short distance
+    // is already exhaustively proven in pricing/service.test.ts test 5;
+    // this only confirms the same logic is wired through end-to-end and
+    // correctly recognizes it doesn't apply here. Foreign, >100km total ->
+    // 1.20 EUR/km (kmRate in pricing/service.ts).
+    expect((priced.pricingBreakdown as Record<string, unknown>).ratePerKmApplied).toBe(1.2);
+    expect((priced.pricingBreakdown as Record<string, unknown>).tollEstimateCents).toBe(1094); // round(136.8 * 0.08 * 100)
+    expect((priced.pricingBreakdown as Record<string, unknown>).minimumFareApplied).toBe(false);
+
+    // Item 7: persisted onto the transfer_request row.
+    expect(priced.calculatedAmountCents).toBe(17510); // base 16416c (136.8 * 1.20 * 100) + toll 1094c
+    expect(priced.currency).toBe("EUR");
+
+    // Item 9: final status.
+    expect(priced.status).toBe("pending_admin_approval");
+
+    // Item 10: no transfer-request data corrupted across the two pricing
+    // passes — still exactly what was extracted from the message.
+    expect(priced.pickup).toBe("Sondrio");
+    expect(priced.destination).toBe("Livigno");
+    expect(priced.passengers).toBe(4);
+    expect(priced.requestedDate).toBe("2026-09-25");
+    expect(priced.requestedTime).toBe("14:30");
+
+    // Re-read independently, proving persistence actually happened.
+    const reread = await getTransferRequest(fakeState.tenant.id, priced.id);
+    expect(reread?.status).toBe("pending_admin_approval");
+    expect(reread?.pricingStatus).toBe("calculated_km");
+    expect(reread?.calculatedAmountCents).toBe(17510);
   });
 });
