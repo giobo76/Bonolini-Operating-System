@@ -15,7 +15,6 @@ import * as googleAdsChecks from "./checks/google-ads-checks";
 import { runGoogleMarketingAnalyst } from "./ai-analyst";
 import { sendCriticalAlertEmail } from "./alerts";
 import { createFinding, recordHealthScoreSnapshot } from "./service";
-import { log } from "../observability";
 import type { FindingDraft } from "./rule-types";
 
 export type CheckRunType = "quick_check" | "daily_audit" | "on_demand";
@@ -176,19 +175,6 @@ export async function runCheck(
       .from(marketingLinkedResources)
       .where(and(eq(marketingLinkedResources.tenantId, tenantId), eq(marketingLinkedResources.active, true)));
 
-    // TEMPORARY DIAGNOSTIC LOGGING — [MIE_DIAG] prefix, remove once the
-    // Production invalid_grant/api_error investigation is closed. Logging
-    // only, no behavior change; see run-check.test.ts for confirmation the
-    // functional test suite is unaffected.
-    log("[MIE_DIAG] resources_loaded", {
-      tenantId,
-      runId: run.id,
-      runType,
-      resourceCount: resources.length,
-      resourceTypes: resources.map((r) => r.resourceType),
-      externalIds: resources.map((r) => r.externalId),
-    });
-
     const drafts: FindingDraft[] = [];
 
     // dedupeKeys of the api_error findings this run can vouch for as fixed
@@ -199,69 +185,23 @@ export async function runCheck(
     const recoveredApiErrorDedupeKeys = new Set<string>();
 
     for (const resource of resources) {
-      log("[MIE_DIAG] resource_check_start", {
-        runId: run.id,
-        resourceType: resource.resourceType,
-        externalId: resource.externalId,
-      });
       try {
         if (resource.resourceType === "ga4_property") {
-          const result = await ga4Checks.runChecks(tenantId, resource.externalId);
-          drafts.push(...result);
-          log("[MIE_DIAG] resource_check_success", {
-            runId: run.id,
-            resourceType: resource.resourceType,
-            externalId: resource.externalId,
-            draftsReturned: result.length,
-          });
+          drafts.push(...(await ga4Checks.runChecks(tenantId, resource.externalId)));
         } else if (resource.resourceType === "gtm_container") {
-          const result = await gtmChecks.runChecks(tenantId, resource.externalId);
-          drafts.push(...result);
-          log("[MIE_DIAG] resource_check_success", {
-            runId: run.id,
-            resourceType: resource.resourceType,
-            externalId: resource.externalId,
-            draftsReturned: result.length,
-          });
+          drafts.push(...(await gtmChecks.runChecks(tenantId, resource.externalId)));
         } else if (resource.resourceType === "search_console_site") {
-          const result = await searchConsoleChecks.runChecks(tenantId, resource.externalId);
-          drafts.push(...result);
-          log("[MIE_DIAG] resource_check_success", {
-            runId: run.id,
-            resourceType: resource.resourceType,
-            externalId: resource.externalId,
-            draftsReturned: result.length,
-          });
+          drafts.push(...(await searchConsoleChecks.runChecks(tenantId, resource.externalId)));
         } else if (resource.resourceType === "google_ads_account") {
-          const result = await googleAdsChecks.runChecks(tenantId, resource.externalId);
-          drafts.push(...result);
-          log("[MIE_DIAG] resource_check_success", {
-            runId: run.id,
-            resourceType: resource.resourceType,
-            externalId: resource.externalId,
-            draftsReturned: result.length,
-          });
+          drafts.push(...(await googleAdsChecks.runChecks(tenantId, resource.externalId)));
         } else {
           continue;
         }
         recoveredApiErrorDedupeKeys.add(`api_error:${resource.resourceType}:${resource.externalId}`);
       } catch (error) {
-        log("[MIE_DIAG] resource_check_error", {
-          runId: run.id,
-          resourceType: resource.resourceType,
-          externalId: resource.externalId,
-          errorType: error instanceof Error ? error.name : typeof error,
-          errorMessage: error instanceof Error ? error.message : String(error),
-        });
         drafts.push(apiErrorDraft(resource.resourceType, resource.externalId, error));
       }
     }
-
-    log("[MIE_DIAG] recovered_keys", {
-      runId: run.id,
-      count: recoveredApiErrorDedupeKeys.size,
-      keys: Array.from(recoveredApiErrorDedupeKeys),
-    });
 
     // Not tied to a specific linked resource — checks transfer-web's own
     // key pages directly.
@@ -283,18 +223,6 @@ export async function runCheck(
       .from(findingsTable)
       .where(and(eq(findingsTable.tenantId, tenantId), eq(findingsTable.status, "open")));
 
-    const diagApiErrorOpenFindings = openFindings.filter((f) =>
-      ((f.evidence as Record<string, unknown> | null)?.dedupeKey as string | undefined)?.startsWith("api_error:"),
-    );
-    log("[MIE_DIAG] open_findings_loaded", {
-      runId: run.id,
-      count: openFindings.length,
-      apiErrorCount: diagApiErrorOpenFindings.length,
-      apiErrorKeys: diagApiErrorOpenFindings.map(
-        (f) => (f.evidence as Record<string, unknown>).dedupeKey,
-      ),
-    });
-
     const openByKey = new Map(
       openFindings.map((f) => [
         `${f.category}:${(f.evidence as Record<string, unknown> | null)?.dedupeKey ?? ""}`,
@@ -315,25 +243,12 @@ export async function runCheck(
     // so only that resource's own api_error finding is resolved — never
     // another resource's, and never another finding type's.
     for (const dedupeKey of recoveredApiErrorDedupeKeys) {
-      const lookupKey = `account_health:${dedupeKey}`;
-      const existingApiError = openByKey.get(lookupKey);
-      log("[MIE_DIAG] resolve_candidate", {
-        runId: run.id,
-        dedupeKey,
-        lookupKey,
-        found: Boolean(existingApiError),
-        findingId: existingApiError?.id ?? null,
-      });
+      const existingApiError = openByKey.get(`account_health:${dedupeKey}`);
       if (existingApiError) {
         await db
           .update(findingsTable)
           .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
           .where(eq(findingsTable.id, existingApiError.id));
-        log("[MIE_DIAG] api_error_resolved", {
-          runId: run.id,
-          dedupeKey,
-          findingId: existingApiError.id,
-        });
       }
     }
 
