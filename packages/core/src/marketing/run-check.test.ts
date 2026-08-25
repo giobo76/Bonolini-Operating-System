@@ -435,6 +435,176 @@ describe("findings lifecycle — miss tracking / auto-resolution / reopening", (
   });
 });
 
+describe("findings lifecycle — api_error auto-resolution on recovery", () => {
+  // Regression for a real production incident: a dead Google OAuth
+  // connection produced api_error findings for GA4/GTM/Search Console/Ads;
+  // reconnecting fixed the connection, but the old api_error findings
+  // stayed "open" forever because api_error is deliberately excluded from
+  // the generic miss-based auto-resolve loop (see NEVER_AUTO_RESOLVE_PREFIXES
+  // above). These tests cover the separate, resource-scoped resolution path
+  // added specifically for api_error.
+  beforeEach(() => {
+    fakeState.linkedResources = [];
+    fakeState.openFindings = [];
+    fakeState.resolvedFindings = [];
+    fakeState.findingsQueryCount = 0;
+    fakeState.updateCalls = [];
+    vi.clearAllMocks();
+  });
+
+  function apiErrorFinding(resourceType: string, externalId: string, overrides: Record<string, unknown> = {}) {
+    return {
+      id: `err-${resourceType}`,
+      category: "account_health",
+      missedCount: 0,
+      evidence: { dedupeKey: `api_error:${resourceType}:${externalId}`, resourceType, externalId },
+      ...overrides,
+    };
+  }
+
+  it("GA4: an old api_error is resolved when the GA4 check succeeds again", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolvedUpdates = fakeState.updateCalls.filter(
+      (c) => c.table === findingsTable && c.values.status === "resolved",
+    );
+    expect(resolvedUpdates).toHaveLength(1);
+    expect(resolvedUpdates[0]!.values.resolvedAt).toBeInstanceOf(Date);
+  });
+
+  it("GA4: an old api_error stays open (not resolved) when the GA4 check fails again", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockRejectedValueOnce(new Error("invalid_grant"));
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolvedUpdates = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolvedUpdates).toHaveLength(0);
+
+    // Still re-confirmed (lastSeenAt/observation refreshed) via the normal
+    // existing-finding path, same as before this change.
+    const refreshUpdates = fakeState.updateCalls.filter(
+      (c) => c.table === findingsTable && !("status" in c.values),
+    );
+    expect(refreshUpdates).toHaveLength(1);
+    expect(refreshUpdates[0]!.values.lastSeenAt).toBeInstanceOf(Date);
+  });
+
+  it("GA4: an old api_error is NOT resolved merely because an unrelated GTM check succeeds", async () => {
+    fakeState.linkedResources = [{ resourceType: "gtm_container", externalId: "GTM-ABC123" }];
+    fakeState.openFindings = [apiErrorFinding("ga4_property", "524948086")];
+    gtmRunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(ga4RunChecks).not.toHaveBeenCalled();
+    const resolvedUpdates = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolvedUpdates).toHaveLength(0);
+  });
+
+  it("GTM: an old api_error is resolved when the GTM check succeeds again", async () => {
+    fakeState.linkedResources = [{ resourceType: "gtm_container", externalId: "GTM-ABC123" }];
+    fakeState.openFindings = [apiErrorFinding("gtm_container", "GTM-ABC123")];
+    gtmRunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolvedUpdates = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolvedUpdates).toHaveLength(1);
+  });
+
+  it("Search Console: an old api_error is resolved when the Search Console check succeeds again", async () => {
+    fakeState.linkedResources = [
+      { resourceType: "search_console_site", externalId: "https://bonolinitransfer.com/" },
+    ];
+    fakeState.openFindings = [apiErrorFinding("search_console_site", "https://bonolinitransfer.com/")];
+    searchConsoleRunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolvedUpdates = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolvedUpdates).toHaveLength(1);
+  });
+
+  it("Google Ads: an old api_error is resolved when the Google Ads check succeeds again", async () => {
+    fakeState.linkedResources = [{ resourceType: "google_ads_account", externalId: "678-018-7978" }];
+    fakeState.openFindings = [apiErrorFinding("google_ads_account", "678-018-7978")];
+    googleAdsRunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolvedUpdates = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolvedUpdates).toHaveLength(1);
+  });
+
+  it("a brand-new api_error (no prior open finding) is still created normally", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [];
+    ga4RunChecks.mockRejectedValueOnce(new Error("invalid_grant"));
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(createFinding).toHaveBeenCalledTimes(1);
+    expect(createFinding).toHaveBeenCalledWith(
+      "tenant-1",
+      expect.objectContaining({
+        evidence: expect.objectContaining({ dedupeKey: "api_error:ga4_property:524948086" }),
+      }),
+    );
+  });
+
+  it("an identical recurring api_error is deduplicated/updated in place, never duplicated", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockRejectedValueOnce(new Error("invalid_grant"));
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(createFinding).not.toHaveBeenCalled();
+    const findingUpdates = fakeState.updateCalls.filter((c) => c.table === findingsTable);
+    expect(findingUpdates).toHaveLength(1);
+  });
+
+  it("resolving an api_error in the same run does not disturb an unrelated open finding's normal re-confirm path", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      apiErrorFinding("ga4_property", "524948086"),
+      openFinding({ id: "traffic-drop-1", missedCount: 1 }), // ga4_traffic_drop:524948086, category organic_traffic
+    ];
+    ga4RunChecks.mockResolvedValueOnce([
+      {
+        dedupeKey: "ga4_traffic_drop:524948086",
+        category: "organic_traffic",
+        nature: "technical_issue",
+        severity: "medium",
+        confidenceScore: 55,
+        title: "Significant traffic drop",
+        observation: "still dropping",
+        businessImpact: "...",
+        financialImpact: null,
+        recommendedActions: [],
+        requiresApproval: false,
+        evidence: { propertyId: "524948086" },
+      },
+    ]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolvedUpdates = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolvedUpdates).toHaveLength(1); // only the api_error
+
+    const reconfirmUpdate = fakeState.updateCalls.find(
+      (c) => c.table === findingsTable && c.values.missedCount === 0 && !("status" in c.values),
+    );
+    expect(reconfirmUpdate).toBeDefined(); // the traffic-drop finding re-confirmed exactly as before this change
+  });
+});
+
 describe("findings lifecycle — pure decision functions", () => {
   it("isNeverAutoResolved: true for claude:*, gsc_indexing:*, gtm_no_live_version:*, api_error:*", () => {
     expect(isNeverAutoResolved("claude:organic_traffic:Some note")).toBe(true);

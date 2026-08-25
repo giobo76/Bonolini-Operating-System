@@ -177,6 +177,13 @@ export async function runCheck(
 
     const drafts: FindingDraft[] = [];
 
+    // dedupeKeys of the api_error findings this run can vouch for as fixed
+    // — the check for that exact resourceType+externalId just completed
+    // without throwing. Built from the same template apiErrorDraft() uses,
+    // so a match here is guaranteed to identify the same finding, including
+    // for search_console_site externalIds that contain their own "://".
+    const recoveredApiErrorDedupeKeys = new Set<string>();
+
     for (const resource of resources) {
       try {
         if (resource.resourceType === "ga4_property") {
@@ -187,7 +194,10 @@ export async function runCheck(
           drafts.push(...(await searchConsoleChecks.runChecks(tenantId, resource.externalId)));
         } else if (resource.resourceType === "google_ads_account") {
           drafts.push(...(await googleAdsChecks.runChecks(tenantId, resource.externalId)));
+        } else {
+          continue;
         }
+        recoveredApiErrorDedupeKeys.add(`api_error:${resource.resourceType}:${resource.externalId}`);
       } catch (error) {
         drafts.push(apiErrorDraft(resource.resourceType, resource.externalId, error));
       }
@@ -219,6 +229,28 @@ export async function runCheck(
         f,
       ]),
     );
+
+    // Resolve api_error findings for resources whose check just succeeded
+    // again. Deliberately separate from the miss-based auto-resolve loop
+    // below, which excludes api_error entirely (see
+    // NEVER_AUTO_RESOLVE_PREFIXES) — that mechanism resolves a finding
+    // after N consecutive runs where it's simply absent from `drafts`,
+    // which is the wrong signal for api_error: absence there can also mean
+    // the resource was unlinked or this run_type doesn't reach it, neither
+    // of which means the underlying problem is fixed. Here the signal is
+    // unambiguous instead: THIS run's check for THIS exact resource just
+    // completed without throwing (see recoveredApiErrorDedupeKeys above),
+    // so only that resource's own api_error finding is resolved — never
+    // another resource's, and never another finding type's.
+    for (const dedupeKey of recoveredApiErrorDedupeKeys) {
+      const existingApiError = openByKey.get(`account_health:${dedupeKey}`);
+      if (existingApiError) {
+        await db
+          .update(findingsTable)
+          .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
+          .where(eq(findingsTable.id, existingApiError.id));
+      }
+    }
 
     // Reopen candidates: findings resolved (by the auto-resolution logic
     // below, or manually) within the last REOPEN_WINDOW_DAYS. Queried once
