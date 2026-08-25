@@ -9,19 +9,22 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 // daily_audit/on_demand, never quick_check, and (3) the findings lifecycle
 // (miss-tracking, auto-resolution, reopening) is wired to the right db calls.
 //
-// run-check.ts queries the `findings` table twice per run, in a fixed order:
-// first the currently-open findings, then the recently-resolved reopen
-// candidates. The mock below matches that call order rather than
-// introspecting the real drizzle query builder (which would need to parse
-// `and(eq(...), eq(...), gte(...))` objects) — call order is simpler and no
-// more fragile than the table-identity matching this mock already relied on
-// before this change.
+// run-check.ts queries the `findings` table three times per run, in a fixed
+// order: currently-open findings, then all account_health findings
+// (open+resolved, used to correlate claude:account_health:* commentary
+// against the real api_error findings' active windows), then the
+// recently-resolved reopen candidates. The mock below matches that call
+// order rather than introspecting the real drizzle query builder (which
+// would need to parse `and(eq(...), eq(...), gte(...))` objects) — call
+// order is simpler and no more fragile than the table-identity matching
+// this mock already relied on before this change.
 
 const { fakeState, checkRunsTable, findingsTable, linkedResourcesTable } = vi.hoisted(() => {
   return {
     fakeState: {
       linkedResources: [] as Array<{ resourceType: string; externalId: string }>,
       openFindings: [] as Array<Record<string, unknown>>,
+      accountHealthHistory: [] as Array<Record<string, unknown>>,
       resolvedFindings: [] as Array<Record<string, unknown>>,
       findingsQueryCount: 0,
       updateCalls: [] as Array<{ table: unknown; values: Record<string, unknown> }>,
@@ -48,7 +51,9 @@ vi.mock("@bos/db", () => {
           if (table === linkedResourcesTable) return fakeState.linkedResources;
           if (table === findingsTable) {
             fakeState.findingsQueryCount += 1;
-            return fakeState.findingsQueryCount === 1 ? fakeState.openFindings : fakeState.resolvedFindings;
+            if (fakeState.findingsQueryCount === 1) return fakeState.openFindings;
+            if (fakeState.findingsQueryCount === 2) return fakeState.accountHealthHistory;
+            return fakeState.resolvedFindings;
           }
           return [];
         },
@@ -117,6 +122,7 @@ describe("run-check.ts wiring", () => {
   beforeEach(() => {
     fakeState.linkedResources = [];
     fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
     fakeState.resolvedFindings = [];
     fakeState.findingsQueryCount = 0;
     fakeState.updateCalls = [];
@@ -161,6 +167,7 @@ describe("findings lifecycle — miss tracking / auto-resolution / reopening", (
   beforeEach(() => {
     fakeState.linkedResources = [];
     fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
     fakeState.resolvedFindings = [];
     fakeState.findingsQueryCount = 0;
     fakeState.updateCalls = [];
@@ -446,6 +453,7 @@ describe("findings lifecycle — api_error auto-resolution on recovery", () => {
   beforeEach(() => {
     fakeState.linkedResources = [];
     fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
     fakeState.resolvedFindings = [];
     fakeState.findingsQueryCount = 0;
     fakeState.updateCalls = [];
@@ -602,6 +610,232 @@ describe("findings lifecycle — api_error auto-resolution on recovery", () => {
       (c) => c.table === findingsTable && c.values.missedCount === 0 && !("status" in c.values),
     );
     expect(reconfirmUpdate).toBeDefined(); // the traffic-drop finding re-confirmed exactly as before this change
+  });
+});
+
+describe("findings lifecycle — OAuth-correlated stale AI account_health commentary", () => {
+  // Regression for a real production symptom: after the api_error fix above
+  // resolved the 4 deterministic findings, /marketing still showed the
+  // outage as active, because the AI Analyst (strategist.ts) had separately
+  // written its own free-text account_health findings ("Systemic OAuth
+  // token failure across all connected platforms...") on every daily_audit
+  // run the outage persisted — a fresh dedupeKey each time
+  // (`claude:${category}:${title}`), so none of them ever deduplicated
+  // against each other. Verified against real Production data: 6
+  // near-duplicate "Systemic OAuth..." findings plus 6 companion "No
+  // fallback monitoring..." findings, all still open.
+  //
+  // The naive fix ("resolve every open claude:account_health: finding once
+  // zero api_error findings remain") was rejected as too broad: an
+  // account_health Claude finding can also be triggered by a google_ads:
+  // performance signal (see AI_REQUIRE_SIGNAL_PRESENT in ai-analyst.ts),
+  // completely unrelated to an OAuth outage, and would be wrongly resolved.
+  // These tests exercise the narrower correlation instead: a
+  // claude:account_health: finding is only resolved if its firstDetectedAt
+  // falls inside a real api_error finding's active window
+  // ([firstDetectedAt, resolvedAt ?? now]) — a signal built entirely from
+  // timestamps already on every finding row, never from Claude's wording.
+  beforeEach(() => {
+    fakeState.linkedResources = [];
+    fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
+    fakeState.resolvedFindings = [];
+    fakeState.findingsQueryCount = 0;
+    fakeState.updateCalls = [];
+    vi.clearAllMocks();
+  });
+
+  function apiErrorFinding(resourceType: string, externalId: string, overrides: Record<string, unknown> = {}) {
+    return {
+      id: `err-${resourceType}`,
+      category: "account_health",
+      missedCount: 0,
+      firstDetectedAt: new Date("2026-08-21T06:00:43.000Z"),
+      resolvedAt: null,
+      evidence: { dedupeKey: `api_error:${resourceType}:${externalId}`, resourceType, externalId },
+      ...overrides,
+    };
+  }
+
+  function claudeAccountHealthFinding(id: string, title: string, firstDetectedAt: Date) {
+    return {
+      id,
+      category: "account_health",
+      missedCount: 0,
+      firstDetectedAt,
+      evidence: { dedupeKey: `claude:account_health:${title}` },
+    };
+  }
+
+  // 1. OAuth-derived stale finding resolved once the incident fully recovers
+  it("1: resolves an OAuth-derived claude:account_health finding once the incident is fully recovered", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      apiErrorFinding("ga4_property", "524948086"),
+      claudeAccountHealthFinding(
+        "claude-1",
+        "Systemic OAuth token failure across all connected platforms",
+        new Date("2026-08-21T06:00:44.000Z"),
+      ),
+    ];
+    fakeState.accountHealthHistory = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(2); // the api_error itself + the correlated Claude finding
+  });
+
+  // 2. every OAuth-derived duplicate resolved, not just the first
+  it("2: resolves every OAuth-derived duplicate claude:account_health finding in one pass", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      apiErrorFinding("ga4_property", "524948086"),
+      claudeAccountHealthFinding(
+        "claude-1",
+        "Systemic OAuth token failure across all connected platforms",
+        new Date("2026-08-21T06:00:44.000Z"),
+      ),
+      claudeAccountHealthFinding(
+        "claude-2",
+        "Systemic OAuth authentication failure across all connected platforms",
+        new Date("2026-08-22T06:00:34.000Z"),
+      ),
+      claudeAccountHealthFinding(
+        "claude-3",
+        "No fallback monitoring in place while primary integration is down",
+        new Date("2026-08-25T06:00:27.000Z"),
+      ),
+    ];
+    fakeState.accountHealthHistory = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(4); // the api_error + all 3 duplicate AI findings
+  });
+
+  // 3. a claude:account_health finding NOT correlated to any api_error window stays OPEN
+  it("3: leaves an uncorrelated claude:account_health finding OPEN (not written during any api_error window)", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      claudeAccountHealthFinding(
+        "claude-1",
+        "Consider a dedicated budget alert threshold for this account",
+        new Date("2026-07-01T00:00:00.000Z"), // long before the api_error window below
+      ),
+    ];
+    fakeState.accountHealthHistory = [
+      apiErrorFinding("ga4_property", "524948086", {
+        firstDetectedAt: new Date("2026-08-20T00:00:00.000Z"),
+        resolvedAt: new Date("2026-08-21T00:00:00.000Z"),
+      }),
+    ];
+    ga4RunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(0);
+  });
+
+  // 4. a deterministic account_health finding (e.g. google_ads:) is never touched — only claude:account_health: dedupeKeys are candidates
+  it("4: leaves a deterministic account_health finding (google_ads:) OPEN regardless of api_error state", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      {
+        id: "gads-1",
+        category: "account_health",
+        missedCount: 0,
+        firstDetectedAt: new Date("2026-08-21T06:00:44.000Z"),
+        evidence: { dedupeKey: "google_ads:zero_conversions:678-018-7978" },
+      },
+    ];
+    fakeState.accountHealthHistory = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(0);
+  });
+
+  // 5. still-open api_error elsewhere -> the correlated AI commentary stays OPEN too
+  it("5: leaves the correlated claude:account_health finding OPEN while another api_error is still open", async () => {
+    fakeState.linkedResources = [{ resourceType: "gtm_container", externalId: "GTM-ABC123" }];
+    fakeState.openFindings = [
+      apiErrorFinding("ga4_property", "524948086"), // GA4 not linked this run — stays open, untouched
+      claudeAccountHealthFinding(
+        "claude-1",
+        "Systemic OAuth token failure across all connected platforms",
+        new Date("2026-08-21T06:00:44.000Z"),
+      ),
+    ];
+    fakeState.accountHealthHistory = [apiErrorFinding("ga4_property", "524948086")];
+    gtmRunChecks.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(0); // GA4's api_error is still unresolved, so the AI finding must stay open too
+  });
+
+  // 6. recovery happening in a later run (the api_error itself was already resolved earlier) still resolves the old AI commentary
+  it("6: resolves an old OAuth-derived claude finding even when recovery is confirmed in a much later run", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      claudeAccountHealthFinding(
+        "claude-1",
+        "Systemic OAuth token failure across all connected platforms",
+        new Date("2026-08-21T06:00:44.000Z"),
+      ),
+    ];
+    fakeState.accountHealthHistory = [
+      // The api_error itself was already resolved in an earlier run — only the stale AI commentary is left.
+      apiErrorFinding("ga4_property", "524948086", {
+        firstDetectedAt: new Date("2026-08-21T06:00:43.000Z"),
+        resolvedAt: new Date("2026-08-25T11:35:00.000Z"),
+      }),
+    ];
+    ga4RunChecks.mockResolvedValueOnce([]); // this run is just a routine healthy check, days later
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(1);
+  });
+
+  // 7. findings of other categories are never touched by this logic
+  it("7: does not modify a finding of an unrelated category (its own normal lifecycle proceeds untouched)", async () => {
+    fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
+    fakeState.openFindings = [
+      claudeAccountHealthFinding(
+        "claude-1",
+        "Systemic OAuth token failure across all connected platforms",
+        new Date("2026-08-21T06:00:44.000Z"),
+      ),
+      {
+        id: "traffic-drop-1",
+        category: "organic_traffic",
+        missedCount: 0,
+        firstDetectedAt: new Date("2026-08-20T00:00:00.000Z"),
+        evidence: { dedupeKey: "ga4_traffic_drop:524948086", propertyId: "524948086" },
+      },
+    ];
+    fakeState.accountHealthHistory = [apiErrorFinding("ga4_property", "524948086")];
+    ga4RunChecks.mockResolvedValueOnce([]); // no traffic-drop re-detected this run
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(1); // only the claude finding
+
+    const missIncrement = fakeState.updateCalls.find(
+      (c) => c.table === findingsTable && c.values.missedCount === 1 && !("status" in c.values),
+    );
+    expect(missIncrement).toBeDefined(); // organic_traffic finding's own normal miss-tracking, unaffected
   });
 });
 

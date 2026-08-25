@@ -223,6 +223,16 @@ export async function runCheck(
       .from(findingsTable)
       .where(and(eq(findingsTable.tenantId, tenantId), eq(findingsTable.status, "open")));
 
+    // Every account_health finding regardless of status (open or resolved)
+    // — used below to correlate a claude:account_health:* finding's
+    // creation time against the real api_error findings' active windows.
+    // api_error findings always carry category "account_health" too (see
+    // apiErrorDraft), so this single query covers both.
+    const accountHealthHistory = await db
+      .select()
+      .from(findingsTable)
+      .where(and(eq(findingsTable.tenantId, tenantId), eq(findingsTable.category, "account_health")));
+
     const openByKey = new Map(
       openFindings.map((f) => [
         `${f.category}:${(f.evidence as Record<string, unknown> | null)?.dedupeKey ?? ""}`,
@@ -249,6 +259,57 @@ export async function runCheck(
           .update(findingsTable)
           .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
           .where(eq(findingsTable.id, existingApiError.id));
+      }
+    }
+
+    // The AI Analyst (strategist.ts) only ever creates an account_health
+    // finding when that run's deterministic drafts included an api_error OR
+    // a google_ads: signal (see AI_REQUIRE_SIGNAL_PRESENT in ai-analyst.ts) —
+    // it writes free-text prose every time ("Systemic OAuth token failure
+    // across all connected platforms..."), a fresh dedupeKey each run, and
+    // carries no evidence linking it back to which of the two signals
+    // triggered it (strategist.ts never attaches one). Neither the title/
+    // observation text (changes every run, not a stable key) nor "zero
+    // api_error findings remain open" alone (too broad — would also resolve
+    // a legitimate account_health finding that was actually about a
+    // google_ads: performance signal, not the OAuth outage) is a safe
+    // criterion on its own. The one structural signal available without
+    // inventing a schema field or touching the AI Analyst: whether a real
+    // api_error finding (open or already resolved) was active — i.e. its
+    // [firstDetectedAt, resolvedAt] window covers this Claude finding's own
+    // firstDetectedAt — at the moment this specific commentary was written.
+    // That correlates a claude:account_health finding to the OAuth incident
+    // using only timestamps already on every finding row, never Claude's
+    // wording. claude:* stays (correctly) excluded from the generic
+    // miss-based auto-resolve loop below for every other case.
+    const remainingOpenApiErrorCount = openFindings.filter((f) => {
+      const key = (f.evidence as Record<string, unknown> | null)?.dedupeKey as string | undefined;
+      return key?.startsWith("api_error:") && !recoveredApiErrorDedupeKeys.has(key);
+    }).length;
+
+    if (recoveredApiErrorDedupeKeys.size > 0 && remainingOpenApiErrorCount === 0) {
+      const apiErrorHistory = accountHealthHistory.filter((f) => {
+        const key = (f.evidence as Record<string, unknown> | null)?.dedupeKey as string | undefined;
+        return key?.startsWith("api_error:");
+      });
+
+      const oauthDerivedAiFindings = openFindings.filter((f) => {
+        const key = (f.evidence as Record<string, unknown> | null)?.dedupeKey as string | undefined;
+        if (f.category !== "account_health" || !key?.startsWith("claude:account_health:")) return false;
+
+        return apiErrorHistory.some((apiError) => {
+          const activeSince = apiError.firstDetectedAt.getTime();
+          const activeUntil = (apiError.resolvedAt ?? new Date()).getTime();
+          const claudeFindingCreatedAt = f.firstDetectedAt.getTime();
+          return activeSince <= claudeFindingCreatedAt && claudeFindingCreatedAt <= activeUntil;
+        });
+      });
+
+      for (const finding of oauthDerivedAiFindings) {
+        await db
+          .update(findingsTable)
+          .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
+          .where(eq(findingsTable.id, finding.id));
       }
     }
 
