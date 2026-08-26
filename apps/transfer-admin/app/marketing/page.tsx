@@ -2,7 +2,7 @@ import Link from "next/link";
 import { TRPCError } from "@trpc/server";
 import { createServerCaller, type FinancialImpact } from "@bos/core";
 import { PermissionDenied } from "./permission-denied";
-import { runCheckNowAction } from "./actions";
+import { runCheckNowAction, updateFindingStatusAction } from "./actions";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const;
 
@@ -405,6 +405,22 @@ function FindingCard({
           </div>
         ) : null}
       </dl>
+      <div className="mt-2 flex gap-2">
+        <form action={updateFindingStatusAction}>
+          <input type="hidden" name="id" value={finding.id} />
+          <input type="hidden" name="status" value="resolved" />
+          <button type="submit" className="rounded border px-2 py-1 text-xs">
+            Mark resolved
+          </button>
+        </form>
+        <form action={updateFindingStatusAction}>
+          <input type="hidden" name="id" value={finding.id} />
+          <input type="hidden" name="status" value="dismissed" />
+          <button type="submit" className="rounded border px-2 py-1 text-xs text-neutral-500 dark:text-neutral-400">
+            Dismiss
+          </button>
+        </form>
+      </div>
     </li>
   );
 }
