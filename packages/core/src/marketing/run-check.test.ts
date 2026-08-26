@@ -260,13 +260,18 @@ describe("findings lifecycle — miss tracking / auto-resolution / reopening", (
     expect(fakeState.updateCalls.filter((c) => c.table === findingsTable)).toHaveLength(0);
   });
 
-  // 6. run_type not covering the dedupeKey -> untouched
-  it("6: a claude:* finding is untouched by a quick_check run (not covered)", async () => {
+  // 6. run_type not covering the dedupeKey -> untouched. Uses the canonical
+  // claude:<category> shape deliberately — a legacy claude:<category>:<title>
+  // finding *would* be touched on quick_check too, by the separate,
+  // unconditional legacy-dedupeKey cleanup (see "claude: dedupeKey
+  // collapsed to category scope" below) — that's a different mechanism from
+  // the miss-tracking this test covers.
+  it("6: a canonical claude:* finding is untouched by a quick_check run (not covered by miss-tracking)", async () => {
     fakeState.linkedResources = [];
     fakeState.openFindings = [
       openFinding({
         category: "other",
-        evidence: { dedupeKey: "claude:other:Some strategic note" },
+        evidence: { dedupeKey: "claude:other" },
       }),
     ];
 
@@ -717,8 +722,15 @@ describe("findings lifecycle — OAuth-correlated stale AI account_health commen
     expect(resolved).toHaveLength(4); // the api_error + all 3 duplicate AI findings
   });
 
-  // 3. a claude:account_health finding NOT correlated to any api_error window stays OPEN
-  it("3: leaves an uncorrelated claude:account_health finding OPEN (not written during any api_error window)", async () => {
+  // 3. a claude:account_health finding NOT correlated to any api_error window
+  // is still resolved — by the separate, unconditional legacy-dedupeKey
+  // cleanup (see "claude: dedupeKey collapsed to category scope" below),
+  // not by this correlation logic. The OAuth-correlation gate itself is
+  // still real code, still exercised by tests 1/2/5/6 above/below where a
+  // finding is genuinely uncorrelated *and* not legacy-shaped — but any
+  // legacy-shaped claude:account_health:* finding, correlated or not, is
+  // now in scope for the broader cleanup.
+  it("3: an uncorrelated but legacy-shaped claude:account_health finding is still resolved, by the legacy cleanup rather than the correlation logic", async () => {
     fakeState.linkedResources = [{ resourceType: "ga4_property", externalId: "524948086" }];
     fakeState.openFindings = [
       claudeAccountHealthFinding(
@@ -738,7 +750,8 @@ describe("findings lifecycle — OAuth-correlated stale AI account_health commen
     await runCheck("tenant-1", "on_demand", "user-1");
 
     const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
-    expect(resolved).toHaveLength(0);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.values.resolvedAt).toBeInstanceOf(Date);
   });
 
   // 4. a deterministic account_health finding (e.g. google_ads:) is never touched — only claude:account_health: dedupeKeys are candidates
@@ -762,8 +775,14 @@ describe("findings lifecycle — OAuth-correlated stale AI account_health commen
     expect(resolved).toHaveLength(0);
   });
 
-  // 5. still-open api_error elsewhere -> the correlated AI commentary stays OPEN too
-  it("5: leaves the correlated claude:account_health finding OPEN while another api_error is still open", async () => {
+  // 5. still-open api_error elsewhere -> the correlation gate itself still
+  // blocks (no *second* resolve of the AI finding via correlation), but the
+  // unconditional legacy cleanup resolves the legacy-shaped AI finding
+  // anyway — it doesn't gate on other resources' api_error state. The real,
+  // still-broken GA4 resource keeps its own deterministic api_error finding
+  // open throughout (constraint: deterministic findings are never touched
+  // by any of this).
+  it("5: the legacy AI finding is resolved by the unconditional cleanup even while another resource's api_error is still open, which itself stays open", async () => {
     fakeState.linkedResources = [{ resourceType: "gtm_container", externalId: "GTM-ABC123" }];
     fakeState.openFindings = [
       apiErrorFinding("ga4_property", "524948086"), // GA4 not linked this run — stays open, untouched
@@ -779,7 +798,10 @@ describe("findings lifecycle — OAuth-correlated stale AI account_health commen
     await runCheck("tenant-1", "on_demand", "user-1");
 
     const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
-    expect(resolved).toHaveLength(0); // GA4's api_error is still unresolved, so the AI finding must stay open too
+    // Exactly one resolve — the legacy claude finding via the unconditional
+    // cleanup. If GA4's still-open api_error had also been resolved (a
+    // constraint-4 violation), this would be 2.
+    expect(resolved).toHaveLength(1);
   });
 
   // 6. recovery happening in a later run (the api_error itself was already resolved earlier) still resolves the old AI commentary
@@ -953,12 +975,14 @@ describe("findings lifecycle — claude: dedupeKey collapsed to category scope",
     expect(fakeState.updateCalls.filter((c) => c.table === findingsTable)).toHaveLength(0);
   });
 
-  it("F: a legacy title-embedded claude: finding (pre-fix data) is unaffected the run it's created, then self-heals via the same miss cycle", async () => {
+  it("F: a legacy title-embedded claude: finding (pre-fix data) is resolved immediately by the unconditional legacy cleanup, not by waiting out the miss cycle", async () => {
     // Simulates the historical pile already in Production: old rows whose
-    // dedupeKey still embeds a title. They're structurally indistinguishable
-    // from any other claude:* finding to the miss-tracking loop — this just
-    // confirms the prefix-only checks (isNeverAutoResolved/isCoveredByRunType)
-    // don't accidentally require the new bare-category exact shape.
+    // dedupeKey still embeds a title. See "findings lifecycle — legacy
+    // claude: dedupeKey cleanup" below for the dedicated test suite covering
+    // this cleanup path specifically — this one just confirms the
+    // miss-tracking prefix checks (isNeverAutoResolved/isCoveredByRunType)
+    // don't themselves require the bare-category exact shape either, as a
+    // second line of defense if the cleanup pass were ever removed.
     fakeState.openFindings = [
       {
         id: "legacy-1",
@@ -975,6 +999,135 @@ describe("findings lifecycle — claude: dedupeKey collapsed to category scope",
       (c) => c.table === findingsTable && c.values.status === "resolved",
     );
     expect(resolveUpdate).toBeDefined();
+  });
+});
+
+describe("findings lifecycle — legacy claude: dedupeKey cleanup", () => {
+  // Regression: after the category-scoped dedupeKey shipped, the historical
+  // pile of legacy claude:<category>:<title> rows (dozens, verified in
+  // Production) only cleared via the 2-miss auto-resolve cycle, which
+  // depends on daily_audit/on_demand (once a day at best) — too slow, and
+  // the dashboard stayed noisy. This cleanup resolves every open legacy-
+  // shaped claude: finding directly, on any run_type, regardless of
+  // whether a canonical sibling has been created yet. Runs unconditionally
+  // (no AI Analyst output needed), so it doesn't require mocking
+  // runGoogleMarketingAnalyst in any of these tests.
+  beforeEach(() => {
+    fakeState.linkedResources = [];
+    fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
+    fakeState.resolvedFindings = [];
+    fakeState.findingsQueryCount = 0;
+    fakeState.updateCalls = [];
+    vi.clearAllMocks();
+  });
+
+  it("1: legacy claude:<category>:<title> duplicates in the same category are all resolved, no new rows created", async () => {
+    fakeState.openFindings = [
+      {
+        id: "legacy-1",
+        category: "attribution",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:attribution:Assess phone/WhatsApp attribution" },
+      },
+      {
+        id: "legacy-2",
+        category: "attribution",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:attribution:Low absolute organic volume limits standalone channel viability" },
+      },
+    ];
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(2);
+    expect(createFinding).not.toHaveBeenCalled();
+  });
+
+  it("2: a canonical claude:<category> finding is never touched by the legacy cleanup", async () => {
+    fakeState.openFindings = [
+      { id: "canonical-1", category: "attribution", missedCount: 0, evidence: { dedupeKey: "claude:attribution" } },
+    ];
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(fakeState.updateCalls.filter((c) => c.table === findingsTable)).toHaveLength(0);
+  });
+
+  it("3: deterministic findings across every prefix are never touched by the legacy cleanup", async () => {
+    fakeState.openFindings = [
+      { id: "det-1", category: "account_health", missedCount: 0, evidence: { dedupeKey: "api_error:ga4_property:524948086" } },
+      { id: "det-2", category: "account_health", missedCount: 0, evidence: { dedupeKey: "google_ads:zero_conversions:678-018-7978" } },
+      { id: "det-3", category: "organic_traffic", missedCount: 0, evidence: { dedupeKey: "ga4_traffic_drop:524948086" } },
+      { id: "det-4", category: "organic_traffic", missedCount: 0, evidence: { dedupeKey: "gsc_click_drop:https://bonolinitransfer.com/" } },
+      { id: "det-5", category: "gtm_configuration", missedCount: 0, evidence: { dedupeKey: "gtm_unpublished:GTM-ABC123:1" } },
+      { id: "det-6", category: "landing_page_availability", missedCount: 0, evidence: { dedupeKey: "landing_page_error:https://bonolinitransfer.com/" } },
+      { id: "det-7", category: "attribution", missedCount: 0, evidence: { dedupeKey: "attribution_untagged_ratio:tenant-1" } },
+    ];
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(fakeState.updateCalls.filter((c) => c.values.status === "resolved")).toHaveLength(0);
+  });
+
+  it("4: running the cleanup again after resolution has no further effect (idempotent)", async () => {
+    fakeState.openFindings = [
+      {
+        id: "legacy-1",
+        category: "attribution",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:attribution:Assess phone/WhatsApp attribution" },
+      },
+    ];
+
+    await runCheck("tenant-1", "quick_check");
+    expect(fakeState.updateCalls.filter((c) => c.values.status === "resolved")).toHaveLength(1);
+
+    // Next run: the resolved finding no longer has status "open", so the
+    // real status="open" query would no longer return it — simulated here
+    // by removing it from the fake open-findings result.
+    fakeState.openFindings = [];
+    fakeState.updateCalls = [];
+    fakeState.findingsQueryCount = 0;
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(fakeState.updateCalls.filter((c) => c.table === findingsTable)).toHaveLength(0);
+  });
+
+  it("5: legacy findings across different categories are all resolved independently, canonical ones survive", async () => {
+    fakeState.openFindings = [
+      {
+        id: "legacy-attr",
+        category: "attribution",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:attribution:Assess phone/WhatsApp attribution" },
+      },
+      {
+        id: "legacy-organic",
+        category: "organic_traffic",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:organic_traffic:Traffic drop requires root-cause triage" },
+      },
+      {
+        id: "legacy-landing",
+        category: "landing_page_availability",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:landing_page_availability:Validate mobile booking funnel usability" },
+      },
+      {
+        id: "canonical-competitor",
+        category: "competitor_observation",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:competitor_observation" },
+      },
+    ];
+
+    await runCheck("tenant-1", "quick_check");
+
+    const resolved = fakeState.updateCalls.filter((c) => c.values.status === "resolved");
+    expect(resolved).toHaveLength(3); // the 3 legacy findings only, not the canonical one
   });
 });
 

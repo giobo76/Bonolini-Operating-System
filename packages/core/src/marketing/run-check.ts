@@ -249,6 +249,24 @@ export async function runCheck(
       ]),
     );
 
+    // Three separate resolve passes below (api_error recovery, OAuth-
+    // correlated AI commentary, legacy AI dedupeKey cleanup) all read from
+    // the same openFindings snapshot taken before any of them run, so a
+    // legacy claude:account_health:* finding that's also OAuth-correlated
+    // would otherwise be matched — and get a redundant extra UPDATE — by
+    // more than one pass. Tracking already-resolved ids here keeps each row
+    // touched at most once per run without changing which rows end up
+    // resolved.
+    const resolvedThisRun = new Set<string>();
+    async function resolveOnce(id: string) {
+      if (resolvedThisRun.has(id)) return;
+      resolvedThisRun.add(id);
+      await db
+        .update(findingsTable)
+        .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
+        .where(eq(findingsTable.id, id));
+    }
+
     // Resolve api_error findings for resources whose check just succeeded
     // again. Deliberately separate from the miss-based auto-resolve loop
     // below, which excludes api_error entirely (see
@@ -264,10 +282,7 @@ export async function runCheck(
     for (const dedupeKey of recoveredApiErrorDedupeKeys) {
       const existingApiError = openByKey.get(`account_health:${dedupeKey}`);
       if (existingApiError) {
-        await db
-          .update(findingsTable)
-          .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
-          .where(eq(findingsTable.id, existingApiError.id));
+        await resolveOnce(existingApiError.id);
       }
     }
 
@@ -315,11 +330,30 @@ export async function runCheck(
       });
 
       for (const finding of oauthDerivedAiFindings) {
-        await db
-          .update(findingsTable)
-          .set({ status: "resolved", resolvedAt: new Date(), updatedAt: new Date() })
-          .where(eq(findingsTable.id, finding.id));
+        await resolveOnce(finding.id);
       }
+    }
+
+    // Legacy AI findings cleanup — dedupeKey was `claude:${category}:${title}`
+    // before this fix, now `claude:${category}` (see strategist.ts). Legacy
+    // rows are structurally identifiable by shape alone: they have a second
+    // ":" segment (the old embedded title) that the canonical bare form
+    // never has — `claude:${category}:` is a prefix of the legacy form but
+    // never equal to the canonical one. Left alone, they'd only clear via
+    // the miss-based auto-resolve loop below, which needs 2 consecutive
+    // daily_audit/on_demand runs (once a day) to fire — resolving them
+    // directly here instead clears the whole historical pile on the very
+    // next run, of any run_type, since this is pure reconciliation against
+    // already-open rows and doesn't depend on this run's AI Analyst output.
+    // Only ever touches status "open" rows sourced from openFindings, so
+    // re-running finds nothing left to resolve — idempotent by construction.
+    const legacyClaudeFindings = openFindings.filter((f) => {
+      const key = (f.evidence as Record<string, unknown> | null)?.dedupeKey as string | undefined;
+      return key?.startsWith(`claude:${f.category}:`);
+    });
+
+    for (const finding of legacyClaudeFindings) {
+      await resolveOnce(finding.id);
     }
 
     // Reopen candidates: findings resolved (by the auto-resolution logic
