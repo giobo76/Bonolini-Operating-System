@@ -113,7 +113,17 @@ export async function runStrategistSynthesis(
       {
         ...result.data,
         financialImpact: undefined,
-        dedupeKey: `claude:${result.data.category}:${result.data.title}`,
+        // Deliberately category-scoped, not title-scoped. Claude regenerates
+        // fresh wording every run even when restating the same underlying
+        // topic (e.g. "assess phone/WhatsApp attribution"), so embedding the
+        // title here — as this used to do — meant the dedupeKey was almost
+        // never stable across invocations: run-check.ts's dedup match
+        // (category:dedupeKey) would miss, and a new row got created every
+        // time instead of the existing one being refreshed. One AI
+        // commentary slot per category is also exactly what the product
+        // wants: a single representative strategic finding per topic, not
+        // an accumulating pile of near-duplicates.
+        dedupeKey: `claude:${result.data.category}`,
       },
     ];
   });

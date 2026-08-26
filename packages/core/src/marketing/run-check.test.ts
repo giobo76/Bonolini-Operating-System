@@ -839,18 +839,157 @@ describe("findings lifecycle — OAuth-correlated stale AI account_health commen
   });
 });
 
+describe("findings lifecycle — claude: dedupeKey collapsed to category scope", () => {
+  // Regression for MIE noise: strategist.ts used to embed Claude's
+  // free-text title in the dedupeKey, which regenerates every run even when
+  // restating the same topic — so the exact-match dedup in run-check.ts
+  // almost never fired and a new row was created daily instead of the
+  // existing one being refreshed. Now the dedupeKey is `claude:${category}`
+  // only, and claude:* was removed from NEVER_AUTO_RESOLVE_PREFIXES so the
+  // existing generic miss-based auto-resolve loop (already used for
+  // website-checks/attribution-checks findings) applies to it too.
+  const claudeDraft = (overrides: Record<string, unknown> = {}) => ({
+    dedupeKey: "claude:attribution",
+    category: "attribution",
+    nature: "strategic_opportunity",
+    severity: "medium",
+    confidenceScore: 55,
+    title: "Assess phone/WhatsApp attribution",
+    observation: "today's wording",
+    businessImpact: "...",
+    financialImpact: null,
+    recommendedActions: [],
+    requiresApproval: false,
+    evidence: {},
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    fakeState.linkedResources = [];
+    fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
+    fakeState.resolvedFindings = [];
+    fakeState.findingsQueryCount = 0;
+    fakeState.updateCalls = [];
+    vi.clearAllMocks();
+  });
+
+  it("A: a claude: finding with the same category dedupeKey is updated in place across runs, never duplicated", async () => {
+    fakeState.openFindings = [
+      { id: "claude-attr-1", category: "attribution", missedCount: 0, evidence: { dedupeKey: "claude:attribution" } },
+    ];
+    runGoogleMarketingAnalyst.mockResolvedValueOnce([claudeDraft()]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    expect(createFinding).not.toHaveBeenCalled();
+    const findingUpdates = fakeState.updateCalls.filter((c) => c.table === findingsTable);
+    expect(findingUpdates).toHaveLength(1);
+    expect(findingUpdates[0]!.values).toMatchObject({ missedCount: 0, observation: "today's wording" });
+  });
+
+  it("B: two claude: drafts sharing the same category within one run collapse into a single finding", async () => {
+    runGoogleMarketingAnalyst.mockResolvedValueOnce([
+      claudeDraft({ title: "First observation", observation: "first" }),
+      claudeDraft({ title: "Second observation", observation: "second", nature: "technical_issue" }),
+    ]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    expect(createFinding).toHaveBeenCalledTimes(1);
+  });
+
+  it("C: a claude: finding not re-detected on a covered run gets its first miss recorded, not resolved yet", async () => {
+    fakeState.openFindings = [
+      {
+        id: "claude-comp-1",
+        category: "competitor_observation",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:competitor_observation" },
+      },
+    ];
+    runGoogleMarketingAnalyst.mockResolvedValueOnce([]); // Claude has nothing to say about this topic today
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const missUpdate = fakeState.updateCalls.find((c) => c.table === findingsTable && c.values.missedCount === 1);
+    expect(missUpdate).toBeDefined();
+    expect(missUpdate!.values).not.toHaveProperty("status");
+  });
+
+  it("D: a claude: finding at missedCount 1 that's undetected again on the second covered run is auto-resolved", async () => {
+    fakeState.openFindings = [
+      {
+        id: "claude-comp-1",
+        category: "competitor_observation",
+        missedCount: 1,
+        evidence: { dedupeKey: "claude:competitor_observation" },
+      },
+    ];
+    runGoogleMarketingAnalyst.mockResolvedValueOnce([]);
+
+    await runCheck("tenant-1", "on_demand", "user-1");
+
+    const resolveUpdate = fakeState.updateCalls.find(
+      (c) => c.table === findingsTable && c.values.status === "resolved",
+    );
+    expect(resolveUpdate).toBeDefined();
+    expect(resolveUpdate!.values.missedCount).toBe(2);
+  });
+
+  it("E: a claude: finding is left completely untouched on quick_check (the AI Analyst never runs there)", async () => {
+    fakeState.openFindings = [
+      {
+        id: "claude-comp-1",
+        category: "competitor_observation",
+        missedCount: 0,
+        evidence: { dedupeKey: "claude:competitor_observation" },
+      },
+    ];
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(runGoogleMarketingAnalyst).not.toHaveBeenCalled();
+    expect(fakeState.updateCalls.filter((c) => c.table === findingsTable)).toHaveLength(0);
+  });
+
+  it("F: a legacy title-embedded claude: finding (pre-fix data) is unaffected the run it's created, then self-heals via the same miss cycle", async () => {
+    // Simulates the historical pile already in Production: old rows whose
+    // dedupeKey still embeds a title. They're structurally indistinguishable
+    // from any other claude:* finding to the miss-tracking loop — this just
+    // confirms the prefix-only checks (isNeverAutoResolved/isCoveredByRunType)
+    // don't accidentally require the new bare-category exact shape.
+    fakeState.openFindings = [
+      {
+        id: "legacy-1",
+        category: "organic_traffic",
+        missedCount: 1,
+        evidence: { dedupeKey: "claude:organic_traffic:Traffic drop requires root-cause triage before conclusions can be drawn" },
+      },
+    ];
+    runGoogleMarketingAnalyst.mockResolvedValueOnce([]); // today's synthesis no longer restates this old topic
+
+    await runCheck("tenant-1", "daily_audit");
+
+    const resolveUpdate = fakeState.updateCalls.find(
+      (c) => c.table === findingsTable && c.values.status === "resolved",
+    );
+    expect(resolveUpdate).toBeDefined();
+  });
+});
+
 describe("findings lifecycle — pure decision functions", () => {
-  it("isNeverAutoResolved: true for claude:*, gsc_indexing:*, gtm_no_live_version:*, api_error:*", () => {
-    expect(isNeverAutoResolved("claude:organic_traffic:Some note")).toBe(true);
+  it("isNeverAutoResolved: true for gsc_indexing:*, gtm_no_live_version:*, api_error:*", () => {
     expect(isNeverAutoResolved("gsc_indexing:https://bonolinitransfer.com/")).toBe(true);
     expect(isNeverAutoResolved("gtm_no_live_version:GTM-ABC123")).toBe(true);
     expect(isNeverAutoResolved("api_error:ga4_property:524948086")).toBe(true);
   });
 
-  it("isNeverAutoResolved: false for the auto-resolvable deterministic prefixes", () => {
+  it("isNeverAutoResolved: false for the auto-resolvable deterministic prefixes and claude:* (now category-scoped, see strategist.ts)", () => {
     expect(isNeverAutoResolved("ga4_traffic_drop:524948086")).toBe(false);
     expect(isNeverAutoResolved("gsc_click_drop:https://bonolinitransfer.com/")).toBe(false);
     expect(isNeverAutoResolved("landing_page_error:https://bonolinitransfer.com/")).toBe(false);
+    expect(isNeverAutoResolved("claude:organic_traffic")).toBe(false);
   });
 
   // 6 (unit-level companion): quick_check never covers claude:* — this is
@@ -870,12 +1009,31 @@ describe("findings lifecycle — pure decision functions", () => {
     }
   });
 
-  // 7. claude:* is never auto-resolved even when the run_type covers it
-  it("7: isEligibleForMissTracking is false for claude:* even on daily_audit (covered but excluded)", () => {
+  // 7. claude:* IS eligible for the generic miss-based auto-resolve on
+  // daily_audit/on_demand now that its dedupeKey is category-scoped and
+  // therefore stable across runs (see strategist.ts) — it behaves like
+  // website-checks/attribution-checks findings (no linked resource to gate
+  // on, so always eligible once covered and not re-detected).
+  it("7: isEligibleForMissTracking is true for claude:* on daily_audit (covered, category-scoped dedupeKey)", () => {
     expect(
       isEligibleForMissTracking({
-        dedupeKey: "claude:other:Some strategic note",
+        dedupeKey: "claude:other",
         runType: "daily_audit",
+        evidence: {},
+        draftsThisRun: [],
+        activeResources: [],
+      }),
+    ).toBe(true);
+  });
+
+  // 7b. ...but never on quick_check, since the AI Analyst doesn't run there
+  // (isCoveredByRunType already covers this at the pure-function level
+  // above) — this confirms the composed isEligibleForMissTracking respects it.
+  it("7b: isEligibleForMissTracking is false for claude:* on quick_check (not covered — AI Analyst never runs there)", () => {
+    expect(
+      isEligibleForMissTracking({
+        dedupeKey: "claude:other",
+        runType: "quick_check",
         evidence: {},
         draftsThisRun: [],
         activeResources: [],

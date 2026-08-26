@@ -72,9 +72,6 @@ const COVERAGE_BY_RUN_TYPE: Record<CheckRunType, readonly string[]> = {
 };
 
 // Absolute exclusions from auto-resolution, regardless of run_type coverage:
-// - claude:* — dedupeKey is built from the AI Analyst's free-text title
-//   (strategist.ts), which is not stable across invocations; "not
-//   re-detected" carries no reliable meaning here.
 // - gsc_indexing:* — a per-URL inspection failure is swallowed by its own
 //   try/catch (search-console-checks.ts) with no signal left behind;
 //   "not re-detected" is indistinguishable from "inspection silently failed".
@@ -83,7 +80,19 @@ const COVERAGE_BY_RUN_TYPE: Record<CheckRunType, readonly string[]> = {
 //   "no live version" are indistinguishable from this finding's absence.
 // - api_error:* — this dedupeKey type IS the failure signal for the other
 //   four; auto-resolving an error report on its own absence would be circular.
-const NEVER_AUTO_RESOLVE_PREFIXES = ["claude:", "gsc_indexing:", "gtm_no_live_version:", "api_error:"] as const;
+//
+// claude:* used to be excluded here too: strategist.ts's dedupeKey embedded
+// the AI's free-text title, which regenerated every run, so "not
+// re-detected" was meaningless — a near-duplicate with a new title would
+// just look like a brand-new finding, not a miss. Now that the dedupeKey is
+// `claude:${category}` (stable across runs — see strategist.ts), the
+// existing miss-based auto-resolve loop below applies to it exactly like
+// website-checks/attribution-checks findings: it accumulates missedCount
+// when the AI Analyst simply stops mentioning that category, and
+// auto-resolves after AUTO_RESOLVE_AFTER_MISSES consecutive misses — no
+// special-casing needed. Only covered on daily_audit/on_demand (see
+// COVERAGE_BY_RUN_TYPE), matching the only run types that ever produce it.
+const NEVER_AUTO_RESOLVE_PREFIXES = ["gsc_indexing:", "gtm_no_live_version:", "api_error:"] as const;
 
 // Resource-tied dedupeKey prefixes eligible for auto-resolution, mapped to
 // the marketingLinkedResources.resourceType that must still be active, and
@@ -339,8 +348,25 @@ export async function runCheck(
     let criticalCount = 0;
     const criticalDrafts: FindingDraft[] = [];
 
+    // claude:* dedupeKeys are now category-scoped (see strategist.ts), not
+    // per-title-unique like every deterministic check's dedupeKey — so,
+    // unlike before, the AI Analyst can genuinely emit two drafts sharing
+    // the same category:dedupeKey within one run (it did, in Production,
+    // for account_health during the OAuth outage: one finding about the
+    // failure itself, one about the lack of fallback monitoring). Without
+    // this guard both would independently miss `openByKey` (built before
+    // this loop ran) and each call createFinding, producing two rows under
+    // the identical key that neither this loop nor a future run could ever
+    // tell apart again. Keeping only the first draft per key this run is
+    // exactly the "one representative finding per problem" the category
+    // collapse is for.
+    const handledThisRun = new Set<string>();
+
     for (const draft of drafts) {
       const key = `${draft.category}:${draft.dedupeKey}`;
+      if (handledThisRun.has(key)) continue;
+      handledThisRun.add(key);
+
       const existing = openByKey.get(key);
 
       if (existing) {
@@ -377,9 +403,10 @@ export async function runCheck(
           // first_detected_at and check_run_id keep reflecting when this
           // recurring issue was *first* seen, not just this latest bout.
           // Removed from resolvedByKey so a second draft this same run with
-          // the same category:dedupeKey (shouldn't happen — each check's
-          // dedupeKeys are unique per iteration — but kept defensive) can't
-          // reopen the same row twice.
+          // the same category:dedupeKey can't reopen the same row twice —
+          // the handledThisRun guard above already keeps this to at most one
+          // draft per key per run, but this stays as a second line of
+          // defense either way.
           resolvedByKey.delete(key);
           await db
             .update(findingsTable)
