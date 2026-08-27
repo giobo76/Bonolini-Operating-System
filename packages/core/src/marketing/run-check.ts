@@ -227,6 +227,9 @@ export async function runCheck(
       drafts.push(...(await runGoogleMarketingAnalyst(tenantId, drafts, triggeredBy ?? "system")));
     }
 
+    /* Defensive normalization, independent of strategist.ts's own discipline (see its dedupeKey comment): any claude:*-prefixed draft is forced back to the canonical claude:category shape here, using the draft's own zod-validated category rather than trusting whatever suffix the dedupeKey string carries. Not a fix for strategist.ts (correct since 0c1e2aa) -- a second, independent guard at the point every draft is actually consumed, so the reconciliation loop below and every findings.evidence.dedupeKey write stays stable even if some future caller (or an older deployment's code, briefly reachable during a Vercel Skew Protection window after a deploy) ever produces a title-embedded claude:category:title value again. Deterministic and api_error dedupeKeys are untouched. */
+        for (const draft of drafts) { if (draft.dedupeKey.startsWith("claude:")) { draft.dedupeKey = `claude:${draft.category}`; } }
+    
     const openFindings = await db
       .select()
       .from(findingsTable)

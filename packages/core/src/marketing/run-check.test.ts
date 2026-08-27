@@ -1000,7 +1000,47 @@ describe("findings lifecycle — claude: dedupeKey collapsed to category scope",
     );
     expect(resolveUpdate).toBeDefined();
   });
-});
+
+  it("G: a draft that arrives with a title-embedded claude: dedupeKey is still persisted under the canonical category-scoped form", async () => {
+        // Defense-in-depth regression: even if runGoogleMarketingAnalyst /
+        // strategist.ts ever again produced (or, transiently, an older
+        // deployment reachable via Vercel's Skew Protection window produced)
+        // a claude:<category>:<title> draft, run-check.ts's own normalization
+        // pass must still collapse it to claude:<category> before it's used as
+        // a dedup key or written to evidence -- so persistence never depends
+        // solely on the producer's discipline.
+        runGoogleMarketingAnalyst.mockResolvedValueOnce([
+                claudeDraft({ dedupeKey: "claude:attribution:Some free-text title that changes every run" }),
+              ]);
+
+        await runCheck("tenant-1", "on_demand", "user-1");
+
+        expect(createFinding).toHaveBeenCalledTimes(1);
+        expect(createFinding).toHaveBeenCalledWith(
+                "tenant-1",
+                expect.objectContaining({
+                          evidence: expect.objectContaining({ dedupeKey: "claude:attribution" }),
+                }),
+              );
+  });
+
+    it("H: a title-embedded claude: draft matches an already-open canonical finding instead of creating a duplicate", async () => {
+          fakeState.openFindings = [
+            { id: "claude-attr-1", category: "attribution", missedCount: 0, evidence: { dedupeKey: "claude:attribution" } },
+                ];
+          runGoogleMarketingAnalyst.mockResolvedValueOnce([
+                  claudeDraft({ dedupeKey: "claude:attribution:Different wording than last time" }),
+                ]);
+
+          await runCheck("tenant-1", "on_demand", "user-1");
+
+          expect(createFinding).not.toHaveBeenCalled();
+          const findingUpdates = fakeState.updateCalls.filter((c) => c.table === findingsTable);
+          expect(findingUpdates).toHaveLength(1);
+          expect(findingUpdates[0]!.values.evidence).toMatchObject({ dedupeKey: "claude:attribution" });
+    });
+  
+  });
 
 describe("findings lifecycle — legacy claude: dedupeKey cleanup", () => {
   // Regression: after the category-scoped dedupeKey shipped, the historical
