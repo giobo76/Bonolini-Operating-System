@@ -179,6 +179,17 @@ export async function updateFindingStatus(
     .set({ status, resolvedAt: status === "resolved" ? new Date() : null, updatedAt: new Date() })
     .where(and(eq(findings.tenantId, tenantId), eq(findings.id, id)))
     .returning();
+
+  // Without this, the Health Score badge on /marketing stays stale after a
+  // manual Mark resolved/Dismiss until the next scheduled check_run (up to
+  // 4h away on quick_check's cadence) — a resolved finding would keep
+  // dragging the score down even though the page shows it as no longer
+  // open. checkRunId is intentionally omitted: this snapshot wasn't
+  // produced by a check run, it's a direct consequence of a manual action.
+  if (row) {
+    await recordHealthScoreSnapshot(tenantId);
+  }
+
   return row ?? null;
 }
 

@@ -8,21 +8,27 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 // the caller passed in (never trusting a bare id alone), and
 // linkLeadToClient never succeeds across tenants.
 
-const { fakeState, tenantsTable, clientsTable, marketingLeadsTable } = vi.hoisted(() => {
-  return {
-    fakeState: {
-      tenant: { id: "tenant-1" } as { id: string } | undefined,
-      leadExistsInTenant: true,
-      clientExistsInTenant: true,
-      insertedValues: undefined as unknown,
-      updateSetValues: undefined as unknown,
-      selectLimitArg: undefined as number | undefined,
-    },
-    tenantsTable: { __name: "tenants" },
-    clientsTable: { __name: "clients" },
-    marketingLeadsTable: { __name: "marketingLeads" },
-  };
-});
+const { fakeState, tenantsTable, clientsTable, marketingLeadsTable, findingsTable, healthScoresTable } = vi.hoisted(
+  () => {
+    return {
+      fakeState: {
+        tenant: { id: "tenant-1" } as { id: string } | undefined,
+        leadExistsInTenant: true,
+        clientExistsInTenant: true,
+        insertedValues: undefined as unknown,
+        updateSetValues: undefined as unknown,
+        selectLimitArg: undefined as number | undefined,
+        findingUpdateReturns: { id: "finding-1", status: "resolved" } as Record<string, unknown> | null,
+        healthScoreInsertCalls: [] as unknown[],
+      },
+      tenantsTable: { __name: "tenants" },
+      clientsTable: { __name: "clients" },
+      marketingLeadsTable: { __name: "marketingLeads" },
+      findingsTable: { __name: "findings" },
+      healthScoresTable: { __name: "marketingHealthScores" },
+    };
+  },
+);
 
 vi.mock("@bos/db", () => {
   const db = {
@@ -36,6 +42,7 @@ vi.mock("@bos/db", () => {
             if (table === tenantsTable) return fakeState.tenant ? [fakeState.tenant] : [];
             if (table === marketingLeadsTable) return fakeState.leadExistsInTenant ? [{ id: "lead-1" }] : [];
             if (table === clientsTable) return fakeState.clientExistsInTenant ? [{ id: "client-1" }] : [];
+            if (table === findingsTable) return []; // listOpenFindings, inside recordHealthScoreSnapshot
             return [];
           };
           return {
@@ -55,6 +62,10 @@ vi.mock("@bos/db", () => {
         returning: async () => {
           fakeState.insertedValues = vals;
           if (table === marketingLeadsTable) return [{ id: "lead-new", ...(vals as object) }];
+          if (table === healthScoresTable) {
+            fakeState.healthScoreInsertCalls.push(vals);
+            return [{ id: "hs-1", ...(vals as object) }];
+          }
           return [{ id: "row-1" }];
         },
       }),
@@ -67,6 +78,9 @@ vi.mock("@bos/db", () => {
             if (table === marketingLeadsTable) {
               return [{ id: "lead-1", clientId: "client-1", status: "converted" }];
             }
+            if (table === findingsTable) {
+              return fakeState.findingUpdateReturns ? [fakeState.findingUpdateReturns] : [];
+            }
             return [];
           },
         }),
@@ -78,12 +92,14 @@ vi.mock("@bos/db", () => {
     tenants: tenantsTable,
     clients: clientsTable,
     marketingLeads: marketingLeadsTable,
+    findings: findingsTable,
+    marketingHealthScores: healthScoresTable,
     assertOne: (rows: unknown[]) => rows[0],
     getDb: () => db,
   };
 });
 
-const { recordLeadIntent, listUnlinkedLeads, linkLeadToClient } = await import("./service");
+const { recordLeadIntent, listUnlinkedLeads, linkLeadToClient, updateFindingStatus } = await import("./service");
 
 describe("recordLeadIntent", () => {
   beforeEach(() => {
@@ -163,5 +179,35 @@ describe("linkLeadToClient", () => {
     const result = await linkLeadToClient("tenant-1", { marketingLeadId: "lead-1", clientId: "client-1" });
     expect(fakeState.updateSetValues).toEqual({ clientId: "client-1", status: "converted" });
     expect(result).toMatchObject({ clientId: "client-1", status: "converted" });
+  });
+});
+
+describe("updateFindingStatus", () => {
+  // Regression: the Health Score badge on /marketing previously stayed
+  // stale after a manual Mark resolved/Dismiss until the next scheduled
+  // check_run (up to 4h away) — a resolved finding kept dragging the score
+  // down even though the page no longer showed it as open.
+  beforeEach(() => {
+    fakeState.findingUpdateReturns = { id: "finding-1", status: "resolved" };
+    fakeState.healthScoreInsertCalls = [];
+  });
+
+  it("recomputes and stores a fresh Health Score snapshot when a finding is actually updated", async () => {
+    const result = await updateFindingStatus("tenant-1", "finding-1", "resolved");
+
+    expect(result).toMatchObject({ id: "finding-1", status: "resolved" });
+    expect(fakeState.healthScoreInsertCalls).toHaveLength(1);
+    expect(fakeState.healthScoreInsertCalls[0]).toMatchObject({ tenantId: "tenant-1" });
+    // Not produced by a check run — checkRunId must stay absent.
+    expect((fakeState.healthScoreInsertCalls[0] as { checkRunId?: unknown }).checkRunId).toBeUndefined();
+  });
+
+  it("does not recompute the Health Score when no finding was actually updated (wrong tenant/id)", async () => {
+    fakeState.findingUpdateReturns = null;
+
+    const result = await updateFindingStatus("tenant-1", "nonexistent", "resolved");
+
+    expect(result).toBeNull();
+    expect(fakeState.healthScoreInsertCalls).toHaveLength(0);
   });
 });
