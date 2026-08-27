@@ -14,7 +14,7 @@ import {
 } from "@bos/db";
 import { encryptToken } from "./encryption";
 import { computeHealthScore } from "./health-score";
-import { log } from "../observability";
+
 import type {
   AddLinkedResourceInput,
   CreateFindingInput,
@@ -131,30 +131,6 @@ export async function removeLinkedResource(tenantId: string, id: string) {
 // finding a check produces.
 
 export async function createFinding(tenantId: string, input: CreateFindingInput) {
-  // TEMPORARY DIAGNOSTIC — [MIE_RUNTIME_DIAG], remove once the Production
-  // legacy-dedupeKey investigation is closed. Read-only inspection of the
-  // exact input this function receives, plus build/runtime identity, to
-  // determine which deployed commit and call chain produced a claude:*
-  // finding — never modifies dedupeKey or any other value, no new query, no
-  // behavior change beyond this log line.
-  const diagDedupeKey = (input.evidence as Record<string, unknown> | undefined)?.dedupeKey as string | undefined;
-  if (typeof diagDedupeKey === "string" && diagDedupeKey.startsWith("claude:")) {
-    log("[MIE_RUNTIME_DIAG]", {
-      dedupeKey: diagDedupeKey,
-      category: input.category,
-      title: input.title,
-      tenantId,
-      nodeEnv: process.env.NODE_ENV ?? null,
-      vercelEnv: process.env.VERCEL_ENV ?? null,
-      vercelGitCommitSha: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
-      callChain:
-        new Error("MIE_RUNTIME_DIAG stack capture").stack
-          ?.split("\n")
-          .slice(1, 7)
-          .map((line) => line.trim()) ?? null,
-    });
-  }
-
   const db = getDb();
   const rows = await db
     .insert(findings)
