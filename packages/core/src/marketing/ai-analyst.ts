@@ -71,9 +71,16 @@ const AI_BLOCK_IF_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], reado
 // invented from nothing. Absence blocks creation.
 const AI_REQUIRE_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readonly string[]>> = {
   search_console_indexing: ["gsc_indexing:", "gsc_click_drop:"],
-  budget_waste: ["google_ads:"],
-  account_health: ["google_ads:", "api_error:"],
+  budget_waste: ["google_ads:", "google_ads_campaign_cpa_anomaly:"],
+  account_health: ["google_ads:", "api_error:", "google_ads_campaign_spend_no_conversion:", "google_ads_campaign_conversion_drop:"],
   conversion_tracking: ["ga4_event_stopped:", "google_ads:"],
+  // Both added alongside the campaign-level Google Ads checks
+  // (checks/google-ads-checks.ts) — previously unconstrained (any Claude
+  // commentary in these categories passed through with no deterministic
+  // backing required), now gated the same way as every other
+  // evidence-requiring category.
+  budget_pacing: ["google_ads_campaign_spend_anomaly:"],
+  bid_cpc_anomaly: ["google_ads_campaign_cpc_anomaly:"],
 };
 
 // Claude findings are a strategic-commentary layer on top of deterministic

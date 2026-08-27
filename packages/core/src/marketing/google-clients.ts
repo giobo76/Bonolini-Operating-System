@@ -9,6 +9,74 @@ import { decryptToken } from "./encryption";
 // issues (exact response shapes, quota errors, token edge cases) the first
 // time this actually runs. See packages/core/src/marketing/README.md.
 
+// The googleapis/google-auth-library client surfaces a failed token refresh
+// as a GaxiosError whose response body is Google's OAuth2 error JSON
+// ({ error: "invalid_grant", error_description: "..." }) — never a typed
+// error class, so this checks the same two places googleapis' own error
+// normalization does (response.data.error, falling back to .message for
+// older library versions that stringify it into the thrown Error instead).
+// invalid_grant specifically means the refresh token itself is dead (user
+// revoked access, Google auto-expired it, or — the most likely cause for a
+// Testing-status OAuth client — Google's 7-day refresh-token expiry for
+// unverified apps) — never a transient network/quota error, so this is
+// safe to treat as "this connection needs a human to reconnect," not
+// retried.
+function isInvalidGrantError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const withResponse = error as { response?: { data?: { error?: unknown } } };
+  if (withResponse.response?.data?.error === "invalid_grant") return true;
+  const withMessage = error as { message?: unknown };
+  return typeof withMessage.message === "string" && withMessage.message.includes("invalid_grant");
+}
+
+// Previously promised by a comment here ("see the catch-and-mark-needs-reauth
+// pattern in run-check.ts") but never actually implemented anywhere —
+// verified by search, not assumed: run-check.ts only ever mentions
+// needs_reauth inside a recommended-action string shown to the admin, no
+// code path ever wrote it. The connection's DB status stayed "active"
+// forever regardless of whether Google still honored the refresh token,
+// so every check run kept hitting the same dead token and reporting a
+// generic, unexplained api_error finding instead of a clear "reconnect"
+// signal. This is the fix for that gap — it does not and cannot fix an
+// actual expired/revoked refresh token itself, which only a real
+// browser-based re-authorization at /marketing/connections can do.
+async function markConnectionNeedsReauth(tenantId: string): Promise<void> {
+  const db = getDb();
+  await db
+    .update(marketingConnections)
+    .set({ status: "needs_reauth", updatedAt: new Date() })
+    .where(eq(marketingConnections.tenantId, tenantId));
+}
+
+// GOOGLE_OAUTH_REDIRECT_URI must be pre-registered, byte-for-byte, in the
+// Google Cloud OAuth client's "Authorized redirect URIs" list — Google
+// rejects any mismatch, so this can never be derived dynamically from
+// request headers (that would also mean trusting an attacker-controllable
+// Host header). It has to stay a fixed env var, scoped per Vercel
+// environment (Production vs local .env.local).
+//
+// The only real failure mode is that env var being set wrong for the
+// environment it's actually running in: the Production Vercel env var left
+// pointing at the local dev value (http://localhost:3001/...), so Google
+// rejected the request with "Error 400: invalid_request" before it ever
+// reached this app. VERCEL_ENV is set automatically by Vercel on every
+// deploy (never set for local `next dev`), so it reliably distinguishes
+// "really running as the Production deployment" from local/preview, with
+// no new configuration required.
+export function assertValidOAuthRedirectUri(redirectUri: string | undefined): string {
+  if (!redirectUri) {
+    throw new Error("GOOGLE_OAUTH_REDIRECT_URI is not set.");
+  }
+
+  if (process.env.VERCEL_ENV === "production" && redirectUri.includes("localhost")) {
+    throw new Error(
+      "GOOGLE_OAUTH_REDIRECT_URI is set to a localhost value in the Production environment — fix it in Vercel project settings before retrying.",
+    );
+  }
+
+  return redirectUri;
+}
+
 async function getOAuth2Client(tenantId: string) {
   const db = getDb();
   const [connection] = await db
@@ -28,14 +96,26 @@ async function getOAuth2Client(tenantId: string) {
   );
   oauth2Client.setCredentials({ refresh_token: refreshToken });
 
-  // If Google reports the refresh token itself is invalid (revoked access,
-  // expired), flag the connection so /marketing/connections can prompt a
-  // reconnect instead of failing silently on every check run.
-  oauth2Client.on("tokens", () => {
-    // Access token refreshed successfully — no action needed, this
-    // listener exists so a future invalid_grant handler has a clear place
-    // to live (see the catch-and-mark-needs-reauth pattern in run-check.ts).
-  });
+  // Eagerly validate the refresh token here, once, uniformly for every
+  // integration that goes through this function (GA4/GTM/Search
+  // Console/Ads) — the googleapis client libraries otherwise only refresh
+  // lazily, deep inside the first real API call each one makes, where an
+  // invalid_grant failure would surface far from here (a different error
+  // shape per library) and never get classified or recorded. Validating
+  // eagerly, in one place, means every caller fails the same clear way and
+  // the connection is flagged for reconnect instead of failing silently
+  // and repeatedly on every future check run.
+  try {
+    await oauth2Client.getAccessToken();
+  } catch (error) {
+    if (isInvalidGrantError(error)) {
+      await markConnectionNeedsReauth(tenantId);
+      throw new Error(
+        `Google connection for tenant ${tenantId} needs reauthorization (invalid_grant) — reconnect at /marketing/connections`,
+      );
+    }
+    throw error;
+  }
 
   return oauth2Client;
 }
@@ -221,6 +301,140 @@ export async function fetchGoogleAdsWeeklyPerformance(tenantId: string, customer
     },
     rows,
   };
+}
+
+// Per-campaign metrics for one date window — shared shape for both the
+// "recent" and "previous" comparison windows fetchGoogleAdsCampaignComparison
+// builds below. Field names/parsing mirror fetchGoogleAdsWeeklyPerformance
+// exactly (camelCase response keys, parseNumber for the same "field omitted
+// when zero" behavior confirmed against a real response — see below).
+interface GoogleAdsCampaignWindowRow {
+  campaignId: string;
+  campaignName: string;
+  campaignStatus: string;
+  budgetMicros: number;
+  impressions: number;
+  clicks: number;
+  costMicros: number;
+  conversions: number;
+  conversionValue: number;
+  averageCpcMicros: number;
+  ctr: number;
+}
+
+function parseCampaignRow(result: Record<string, unknown>): GoogleAdsCampaignWindowRow {
+  const campaign = result.campaign as Record<string, unknown> | undefined;
+  const budget = result.campaignBudget as Record<string, unknown> | undefined;
+  const metrics = result.metrics as Record<string, unknown> | undefined;
+
+  return {
+    campaignId: typeof campaign?.id === "string" ? campaign.id : "",
+    campaignName: typeof campaign?.name === "string" ? campaign.name : "",
+    campaignStatus: typeof campaign?.status === "string" ? campaign.status : "",
+    budgetMicros: parseNumber(budget?.amountMicros),
+    impressions: parseNumber(metrics?.impressions),
+    clicks: parseNumber(metrics?.clicks),
+    costMicros: parseNumber(metrics?.costMicros),
+    conversions: parseNumber(metrics?.conversions),
+    conversionValue: parseNumber(metrics?.conversionsValue),
+    // Confirmed against a real response (verified live against Production,
+    // 2026-08-27): metrics.ctr and metrics.averageCpc are OMITTED entirely
+    // from the response — not present as 0 — for any campaign with zero
+    // clicks/impressions in the window, same "field absent, not zero"
+    // behavior already documented for fetchGoogleAdsWeeklyPerformance.
+    // parseNumber already treats a missing field as 0, which is correct here.
+    averageCpcMicros: parseNumber(metrics?.averageCpc),
+    ctr: parseNumber(metrics?.ctr),
+  };
+}
+
+async function fetchCampaignWindow(
+  tenantId: string,
+  customerId: string,
+  startDate: string,
+  endDate: string,
+): Promise<Map<string, GoogleAdsCampaignWindowRow>> {
+  const query =
+    "SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros, " +
+    "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, " +
+    "metrics.conversions_value, metrics.average_cpc, metrics.ctr " +
+    `FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`;
+
+  const body = await queryGoogleAds(tenantId, customerId, query);
+  const rows = Array.isArray(body.results) ? body.results.map(parseCampaignRow) : [];
+  return new Map(rows.filter((r) => r.campaignId).map((r) => [r.campaignId, r]));
+}
+
+export interface GoogleAdsCampaignComparisonRow {
+  campaignId: string;
+  campaignName: string;
+  campaignStatus: string;
+  budgetMicros: number;
+  recentCostCents: number;
+  recentConversions: number;
+  recentConversionValue: number;
+  recentClicks: number;
+  recentImpressions: number;
+  recentAverageCpc: number;
+  previousCostCents: number;
+  previousConversions: number;
+  previousClicks: number;
+  previousImpressions: number;
+  previousAverageCpc: number;
+}
+
+// Two comparable, contiguous, non-overlapping 7-day windows — same
+// discipline as ga4-checks.ts's RECENT_RANGE/PREVIOUS_RANGE (comparing
+// windows of different lengths silently inflates whatever percentage
+// change gets computed). GAQL's reporting API aggregates metrics over the
+// whole WHERE date range into one row per campaign when segments.date isn't
+// itself selected — two separate queries are required to get two separate
+// per-campaign totals, not one query with a wider range.
+export async function fetchGoogleAdsCampaignComparison(
+  tenantId: string,
+  customerId: string,
+): Promise<GoogleAdsCampaignComparisonRow[]> {
+  const now = new Date();
+  const dateOffset = (days: number) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  const recentEnd = dateOffset(0);
+  const recentStart = dateOffset(6);
+  const previousEnd = dateOffset(7);
+  const previousStart = dateOffset(13);
+
+  const [recentMap, previousMap] = await Promise.all([
+    fetchCampaignWindow(tenantId, customerId, recentStart, recentEnd),
+    fetchCampaignWindow(tenantId, customerId, previousStart, previousEnd),
+  ]);
+
+  const campaignIds = new Set([...recentMap.keys(), ...previousMap.keys()]);
+  const rows: GoogleAdsCampaignComparisonRow[] = [];
+
+  for (const campaignId of campaignIds) {
+    const recent = recentMap.get(campaignId);
+    const previous = previousMap.get(campaignId);
+    const meta = recent ?? previous!;
+
+    rows.push({
+      campaignId,
+      campaignName: meta.campaignName,
+      campaignStatus: meta.campaignStatus,
+      budgetMicros: meta.budgetMicros,
+      recentCostCents: Math.round((recent?.costMicros ?? 0) / 10000),
+      recentConversions: recent?.conversions ?? 0,
+      recentConversionValue: recent?.conversionValue ?? 0,
+      recentClicks: recent?.clicks ?? 0,
+      recentImpressions: recent?.impressions ?? 0,
+      recentAverageCpc: (recent?.averageCpcMicros ?? 0) / 1000000,
+      previousCostCents: Math.round((previous?.costMicros ?? 0) / 10000),
+      previousConversions: previous?.conversions ?? 0,
+      previousClicks: previous?.clicks ?? 0,
+      previousImpressions: previous?.impressions ?? 0,
+      previousAverageCpc: (previous?.averageCpcMicros ?? 0) / 1000000,
+    });
+  }
+
+  return rows;
 }
 
 // The GTM public container ID (GTM-XXXXXXX, what's visible on the site and
