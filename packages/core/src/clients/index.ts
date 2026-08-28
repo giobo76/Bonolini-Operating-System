@@ -2,6 +2,8 @@ export { clientsRouter } from "./router";
 export { getClient } from "./service";
 export * from "./schema";
 export * from "./constants";
+export { buildAttributionCookieValue, parseAttributionCookie, resolveAttribution } from "./attribution";
+export type { AttributionFields, AttributionCookiePayload } from "./attribution";
 export type { Client, NewClient } from "@bos/db";
 
 // getClient is exported here (in addition to the router) so other core

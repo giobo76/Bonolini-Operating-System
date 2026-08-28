@@ -1,3 +1,5 @@
+import { cookies } from "next/headers";
+import { parseAttributionCookie, resolveAttribution } from "@bos/core";
 import { submitLeadAction } from "./actions";
 
 function getParam(
@@ -16,18 +18,34 @@ export default async function RequestQuotePage({
   const sp = await searchParams;
   const errorMessage = getParam(sp, "error");
 
-  // Captured once here, at the page that receives the ad click, and
-  // carried through as hidden fields — this is the "Click" end of
-  // Click → Lead. See packages/db/src/schema/clients.ts (first-touch
-  // attribution fields) and packages/core/src/marketing/business-kpis.ts
-  // (how these get grouped into acquisition sources).
-  const utmSource = getParam(sp, "utm_source");
-  const utmMedium = getParam(sp, "utm_medium");
-  const utmCampaign = getParam(sp, "utm_campaign");
-  const utmTerm = getParam(sp, "utm_term");
-  const utmContent = getParam(sp, "utm_content");
-  const gclid = getParam(sp, "gclid");
-  const landingPage = "/request-quote";
+  // Root-cause fix (see packages/core/src/clients/attribution.ts): prefer
+  // the bos_attribution cookie written on arrival at whichever page of this
+  // app the visitor actually landed on — it's what survives navigation
+  // through to this form. Falls back to this exact page's own URL params
+  // (an ad's final URL pointing straight at /request-quote), then to
+  // "no attribution, still a valid lead" if neither exists.
+  const cookieStore = await cookies();
+  const cookie = parseAttributionCookie(cookieStore.get("bos_attribution")?.value);
+  const attribution = resolveAttribution(
+    cookie,
+    {
+      utmSource: getParam(sp, "utm_source") || undefined,
+      utmMedium: getParam(sp, "utm_medium") || undefined,
+      utmCampaign: getParam(sp, "utm_campaign") || undefined,
+      utmTerm: getParam(sp, "utm_term") || undefined,
+      utmContent: getParam(sp, "utm_content") || undefined,
+      gclid: getParam(sp, "gclid") || undefined,
+    },
+    "/request-quote",
+  );
+
+  const utmSource = attribution.utmSource ?? "";
+  const utmMedium = attribution.utmMedium ?? "";
+  const utmCampaign = attribution.utmCampaign ?? "";
+  const utmTerm = attribution.utmTerm ?? "";
+  const utmContent = attribution.utmContent ?? "";
+  const gclid = attribution.gclid ?? "";
+  const landingPage = attribution.landingPage ?? "/request-quote";
 
   return (
     <main className="mx-auto flex min-h-screen max-w-lg flex-col justify-center gap-6 p-8">

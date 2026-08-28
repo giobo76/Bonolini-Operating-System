@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Script from "next/script";
 import "./globals.css";
+import { AttributionCapture } from "./attribution-capture";
 
 export const metadata: Metadata = {
   title: "Bonolini Transfer",
@@ -38,6 +39,7 @@ export default function RootLayout({
             />
           </noscript>
         ) : null}
+        <AttributionCapture />
         {children}
       </body>
     </html>

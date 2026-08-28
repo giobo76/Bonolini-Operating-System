@@ -8,6 +8,9 @@ export {
   getReport,
 } from "./service";
 export { runCheck } from "./run-check";
+export { assertValidOAuthRedirectUri } from "./google-clients";
+export { trackLeadConversion, sendGa4ConversionEvent, resolveGa4ClientId } from "./measurement-protocol";
+export type { Ga4ConversionEventInput, Ga4ConversionEventResult } from "./measurement-protocol";
 export type { CheckRunType } from "./run-check";
 export {
   handleLeadIntentRequest,
