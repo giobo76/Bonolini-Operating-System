@@ -6,6 +6,27 @@ vi.mock("../google-clients", () => ({
   getAnalyticsDataClient: async () => ({ properties: { runReport } }),
 }));
 
+// Same strategy as service.test.ts/attribution-checks.test.ts: @bos/db is
+// fully mocked, keyed by table identity. clientsRows defaults to [] so
+// every pre-existing test (none of which cares about the DB) is unaffected.
+const { fakeDb, clientsTable } = vi.hoisted(() => {
+  return {
+    fakeDb: { clientsRows: [] as Array<{ id: string }> },
+    clientsTable: { __name: "clients" },
+  };
+});
+
+vi.mock("@bos/db", () => ({
+  clients: clientsTable,
+  getDb: () => ({
+    select: () => ({
+      from: (table: unknown) => ({
+        where: (_cond: unknown) => Promise.resolve(table === clientsTable ? fakeDb.clientsRows : []),
+      }),
+    }),
+  }),
+}));
+
 const { runChecks, severityForBaseline, confidenceForBaseline } = await import("./ga4-checks");
 
 // WINDOW_DAYS is a private constant of ga4-checks.ts (7 in production code).
@@ -68,6 +89,7 @@ describe("ga4-checks — severityForBaseline / confidenceForBaseline (pure funct
 describe("ga4-checks — runChecks traffic-drop", () => {
   beforeEach(() => {
     runReport.mockReset();
+    fakeDb.clientsRows = [];
   });
 
   it("A: produces no finding when the baseline is below MIN_BASELINE_SESSIONS, however large the drop", async () => {
@@ -180,5 +202,62 @@ describe("ga4-checks — runChecks traffic-drop", () => {
     });
     expect(drafts[0]!.observation).toContain("7-day period");
     expect(drafts[0]!.observation).toContain("last 7 days");
+  });
+});
+
+describe("ga4-checks — runChecks conversion tracking gap (GA4 vs BOS's own lead data)", () => {
+  beforeEach(() => {
+    runReport.mockReset();
+    fakeDb.clientsRows = [];
+  });
+
+  it("fires when GA4 shows 0 generate_lead events but BOS has real leads at/above the volume gate", async () => {
+    mockGa4({ recentEventRows: [], previousSessionCount: 0, recentSessionCount: 0 });
+    fakeDb.clientsRows = Array.from({ length: 12 }, (_, i) => ({ id: `client-${i}` }));
+
+    const drafts = await runChecks("tenant-1", "524948086");
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({
+      dedupeKey: "conversion_tracking_gap:524948086:generate_lead",
+      category: "conversion_tracking",
+      severity: "critical",
+      confidenceScore: 85,
+    });
+    expect(drafts[0]!.evidence).toMatchObject({ recentLeadsCount: 12, windowDays: 7, ga4GenerateLeadCount: 0 });
+  });
+
+  it("does not fire below the volume gate, however clear the gap looks", async () => {
+    mockGa4({ recentEventRows: [], previousSessionCount: 0, recentSessionCount: 0 });
+    fakeDb.clientsRows = Array.from({ length: 9 }, (_, i) => ({ id: `client-${i}` }));
+
+    const drafts = await runChecks("tenant-1", "524948086");
+
+    expect(drafts).toHaveLength(0);
+  });
+
+  it("does not fire when GA4 already shows generate_lead events firing", async () => {
+    mockGa4({ recentEventRows: [eventRow("generate_lead", 3)], previousSessionCount: 0, recentSessionCount: 0 });
+    fakeDb.clientsRows = Array.from({ length: 20 }, (_, i) => ({ id: `client-${i}` }));
+
+    const drafts = await runChecks("tenant-1", "524948086");
+
+    expect(drafts).toHaveLength(0);
+  });
+
+  it("can fire alongside the event-stopped-firing check when both conditions are independently true", async () => {
+    mockGa4({
+      previousEventRows: [eventRow("generate_lead", 12)],
+      recentEventRows: [],
+      previousSessionCount: 0,
+      recentSessionCount: 0,
+    });
+    fakeDb.clientsRows = Array.from({ length: 15 }, (_, i) => ({ id: `client-${i}` }));
+
+    const drafts = await runChecks("tenant-1", "524948086");
+
+    expect(drafts.map((d) => d.dedupeKey)).toEqual(
+      expect.arrayContaining(["ga4_event_stopped:524948086:generate_lead", "conversion_tracking_gap:524948086:generate_lead"]),
+    );
   });
 });

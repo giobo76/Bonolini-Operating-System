@@ -63,6 +63,24 @@ const DETERMINISTIC_PREFIXES = [
   "landing_page_slow:",
   "landing_page_unreachable:",
   "attribution_untagged_ratio:",
+  // Added while auditing this list for Conversion & Landing Page
+  // Intelligence: these five (campaign-level) and one (search-term-level)
+  // prefixes from checks/google-ads-checks.ts were never added here when
+  // that code shipped, meaning every finding under them was permanently
+  // ineligible for miss-based auto-resolution (isEligibleForMissTracking
+  // fails closed on any prefix not in this list) — a real bug, not
+  // something intentionally excluded like the three in
+  // NEVER_AUTO_RESOLVE_PREFIXES below. Fixed here since it's a one-line
+  // registry gap, not a change to that module's detection logic.
+  "google_ads_campaign_spend_no_conversion:",
+  "google_ads_campaign_spend_anomaly:",
+  "google_ads_campaign_cpc_anomaly:",
+  "google_ads_campaign_conversion_drop:",
+  "google_ads_campaign_cpa_anomaly:",
+  "google_ads_search_term:",
+  // Conversion & Landing Page Intelligence (this turn):
+  "conversion_tracking_gap:",
+  "attribution_capture_failure:",
 ] as const;
 
 const COVERAGE_BY_RUN_TYPE: Record<CheckRunType, readonly string[]> = {
@@ -110,6 +128,16 @@ const RESOURCE_LOOKUP_BY_PREFIX: Record<string, { resourceType: string; evidence
   "gtm_unpublished:": { resourceType: "gtm_container", evidenceField: "publicContainerId" },
   "gsc_click_drop:": { resourceType: "search_console_site", evidenceField: "siteUrl" },
   "google_ads:": { resourceType: "google_ads_account", evidenceField: "customerId" },
+  // Added alongside the DETERMINISTIC_PREFIXES fix above, same reasoning:
+  // every campaign/search-term-level Google Ads finding already carries
+  // `customerId` in its evidence (see checks/google-ads-checks.ts), so they
+  // can get the same "don't auto-resolve on a disconnected/erroring
+  // account" protection "google_ads:" already has, instead of falling back
+  // to the unconditional true findResourceLookup(null) gives resource-less
+  // checks like attribution-checks.
+  "google_ads_campaign_": { resourceType: "google_ads_account", evidenceField: "customerId" },
+  "google_ads_search_term:": { resourceType: "google_ads_account", evidenceField: "customerId" },
+  "conversion_tracking_gap:": { resourceType: "ga4_property", evidenceField: "propertyId" },
 };
 
 const AUTO_RESOLVE_AFTER_MISSES = 2;

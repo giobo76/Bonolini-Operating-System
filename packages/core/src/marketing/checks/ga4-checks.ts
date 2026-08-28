@@ -1,3 +1,5 @@
+import { and, eq, gte } from "drizzle-orm";
+import { getDb, clients } from "@bos/db";
 import { getAnalyticsDataClient } from "../google-clients";
 import type { FindingDraft } from "../rule-types";
 
@@ -29,6 +31,11 @@ const PREVIOUS_RANGE = { startDate: daysAgo(WINDOW_DAYS * 2 - 1), endDate: daysA
 
 const MIN_BASELINE_SESSIONS = 20;
 const TRAFFIC_DROP_THRESHOLD = -0.5;
+
+// Reuses the exact same volume-gate value as attribution-checks.ts's
+// MIN_LEADS_FOR_CHECK — same "is this even enough leads to trust a
+// conclusion" judgment, applied here to a different data source.
+const MIN_LEADS_FOR_TRACKING_GAP_CHECK = 10;
 
 // Severity/confidence scale with the size of the baseline sample, not just
 // the raw percentage change — a 50%+ drop on a handful of sessions is much
@@ -128,6 +135,64 @@ export async function runChecks(tenantId: string, propertyId: string): Promise<F
         requiresApproval: false,
         expectedBenefit: "Restores accurate conversion data for bidding and reporting.",
         evidence: { propertyId, eventName, recentCount, previousCount },
+      });
+    }
+  }
+
+  // Cross-check against BOS's own first-party lead data (the `clients`
+  // table, same source attribution-checks.ts already treats as the most
+  // reliable in the catalog — no Google API involved). This catches a
+  // conversion event that has NEVER fired at all, which the event-stopped-
+  // firing check above structurally cannot see (it only fires when
+  // previousCount > 0). Verified real gap, 2026-08-28: 28 real leads in
+  // BOS's own DB over the prior 8 days, 0 generate_lead events ever
+  // recorded in GA4 over the same period — this is the founder's own FASE 4
+  // distinction ("users arrive but no conversion is recorded") with real
+  // evidence behind it, not a hypothesis.
+  const recentGenerateLeadCount = recentCounts.get("generate_lead") ?? 0;
+  if (recentGenerateLeadCount === 0) {
+    const db = getDb();
+    const since = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const recentLeads = await db
+      .select()
+      .from(clients)
+      .where(and(eq(clients.tenantId, tenantId), gte(clients.createdAt, since)));
+
+    if (recentLeads.length >= MIN_LEADS_FOR_TRACKING_GAP_CHECK) {
+      drafts.push({
+        dedupeKey: `conversion_tracking_gap:${propertyId}:generate_lead`,
+        category: "conversion_tracking",
+        nature: "technical_issue",
+        severity: "critical",
+        confidenceScore: 85,
+        title: "Real leads are arriving but GA4 shows zero conversion events",
+        observation: `${recentLeads.length} real lead(s) were recorded in BOS over the last ${WINDOW_DAYS} days, but GA4's "generate_lead" event fired 0 times in the same period.`,
+        rootCause:
+          "Users are completing the request-quote flow (proven by BOS's own database), but the GA4 conversion event isn't reaching Google Analytics — likely a GTM tag/trigger issue, a consent/cookie tool blocking the script before it fires, or the thank-you page not being reached in the real flow the way it is in testing.",
+        businessImpact:
+          "This is a tracking gap, not a demand gap: real leads are arriving, but Google Ads and GA4 both report zero conversions, which can cause Google Ads' automated bidding to under-serve campaigns that are actually working.",
+        financialImpact: {
+          amount: null,
+          currency: "EUR",
+          period: "weekly",
+          direction: "cost",
+          note: "Automated bidding may under-serve campaigns that appear to convert at 0%, even though real leads are arriving.",
+        },
+        recommendedActions: [
+          "Verify the generate_lead dataLayer push actually fires in a real browser session (GTM Preview mode or GA4 DebugView)",
+          "Check for a consent/cookie tool blocking the GTM script before the event can fire",
+          "Confirm the thank-you page is actually reached after a real form submission in Production, not just in local testing",
+        ],
+        requiresApproval: false,
+        expectedBenefit:
+          "Restoring this event lets Google Ads and GA4 see the conversions that are already happening, improving both automated bidding and reporting accuracy.",
+        evidence: {
+          propertyId,
+          tenantId,
+          recentLeadsCount: recentLeads.length,
+          windowDays: WINDOW_DAYS,
+          ga4GenerateLeadCount: recentGenerateLeadCount,
+        },
       });
     }
   }

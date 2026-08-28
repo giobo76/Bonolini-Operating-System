@@ -73,7 +73,7 @@ const AI_REQUIRE_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readon
   search_console_indexing: ["gsc_indexing:", "gsc_click_drop:"],
   budget_waste: ["google_ads:", "google_ads_campaign_cpa_anomaly:", "google_ads_search_term:"],
   account_health: ["google_ads:", "api_error:", "google_ads_campaign_spend_no_conversion:", "google_ads_campaign_conversion_drop:"],
-  conversion_tracking: ["ga4_event_stopped:", "google_ads:"],
+  conversion_tracking: ["ga4_event_stopped:", "google_ads:", "conversion_tracking_gap:"],
   // Both added alongside the campaign-level Google Ads checks
   // (checks/google-ads-checks.ts) — previously unconstrained (any Claude
   // commentary in these categories passed through with no deterministic
@@ -87,6 +87,11 @@ const AI_REQUIRE_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readon
   // control category, and impression_share is otherwise unused by any
   // check, so this doesn't collide with existing test/gate assumptions).
   impression_share: ["google_ads_search_term:"],
+  // Added alongside Conversion & Landing Page Intelligence — "attribution"
+  // had a real deterministic check (attribution_untagged_ratio) but no
+  // evidence gate at all until now, same kind of pre-existing gap closed
+  // for the other categories above.
+  attribution: ["attribution_untagged_ratio:", "attribution_capture_failure:"],
 };
 
 // Claude findings are a strategic-commentary layer on top of deterministic

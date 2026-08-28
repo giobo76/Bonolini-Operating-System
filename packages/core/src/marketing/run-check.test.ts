@@ -1202,6 +1202,34 @@ describe("findings lifecycle — pure decision functions", () => {
     }
   });
 
+  // Regression: these prefixes (checks/google-ads-checks.ts's campaign- and
+  // search-term-level findings, plus this turn's conversion_tracking_gap
+  // and attribution_capture_failure) were missing from DETERMINISTIC_PREFIXES
+  // when their check modules shipped — meaning isEligibleForMissTracking
+  // failed closed for every finding under them and they could never
+  // auto-resolve, permanently, even after the underlying condition cleared.
+  it("isCoveredByRunType: campaign/search-term Google Ads and conversion/attribution prefixes are covered", () => {
+    for (const runType of ["quick_check", "daily_audit", "on_demand"] as const) {
+      expect(isCoveredByRunType("google_ads_campaign_spend_no_conversion:111", runType)).toBe(true);
+      expect(isCoveredByRunType("google_ads_campaign_cpa_anomaly:111", runType)).toBe(true);
+      expect(isCoveredByRunType("google_ads_search_term:222:some query", runType)).toBe(true);
+      expect(isCoveredByRunType("conversion_tracking_gap:524948086:generate_lead", runType)).toBe(true);
+      expect(isCoveredByRunType("attribution_capture_failure:tenant-1", runType)).toBe(true);
+    }
+  });
+
+  it("isEligibleForMissTracking: a campaign-level Google Ads finding is gated on the google_ads_account resource, same as account-level ones", () => {
+    const base = {
+      dedupeKey: "google_ads_campaign_spend_no_conversion:111",
+      runType: "quick_check" as const,
+      evidence: { customerId: "678-018-7978" },
+      draftsThisRun: [],
+    };
+
+    expect(isEligibleForMissTracking({ ...base, activeResources: [{ resourceType: "google_ads_account", externalId: "678-018-7978" }] })).toBe(true);
+    expect(isEligibleForMissTracking({ ...base, activeResources: [] })).toBe(false); // account no longer linked
+  });
+
   // 7. claude:* IS eligible for the generic miss-based auto-resolve on
   // daily_audit/on_demand now that its dedupeKey is category-scoped and
   // therefore stable across runs (see strategist.ts) — it behaves like
