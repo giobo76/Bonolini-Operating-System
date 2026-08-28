@@ -437,6 +437,135 @@ export async function fetchGoogleAdsCampaignComparison(
   return rows;
 }
 
+// Per-search-term data for Search Term Intelligence (checks/google-ads-
+// search-term-checks.ts). Fields confirmed against a real read-only GAQL
+// call to Production (2026-08-28):
+// - `ad_group_criterion` (needed for match type / matched keyword text)
+//   cannot be selected together with `search_term_view` in the same query —
+//   the API rejects it with PROHIBITED_RESOURCE_TYPE_IN_SELECT_CLAUSE. There
+//   is no join that recovers "which keyword this term matched" at the GAQL
+//   level; only search_term_view.status (ADDED/EXCLUDED/NONE) tells us
+//   whether Google Ads itself already treats the term as a keyword or a
+//   negative — that's the only "already handled" signal available.
+// - metrics.ctr / metrics.average_cpc follow the same "field omitted, not
+//   zero" behavior already documented elsewhere in this file.
+// - metrics.conversions can be fractional (e.g. 0.833334) — Google Ads
+//   attributes partial/assisted conversions to a query; treat it as a real
+//   number throughout, never round or coerce to an integer.
+export type GoogleAdsSearchTermStatus = "ADDED" | "EXCLUDED" | "NONE";
+
+export interface GoogleAdsSearchTermRow {
+  campaignId: string;
+  campaignName: string;
+  searchTerm: string;
+  normalizedSearchTerm: string;
+  status: GoogleAdsSearchTermStatus;
+  costCents: number;
+  clicks: number;
+  impressions: number;
+  conversions: number;
+  conversionValue: number;
+  ctr: number;
+  averageCpc: number;
+}
+
+export function normalizeSearchTerm(term: string): string {
+  return term.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Tie-break when the same (campaign, normalized search term) appears under
+// more than one ad group with a different status — doesn't happen in the
+// verified real account, but EXCLUDED must win if it ever does: recommending
+// a negative-keyword review, or claiming an opportunity, on a term already
+// excluded somewhere in the campaign would be actively wrong.
+const SEARCH_TERM_STATUS_PRECEDENCE: Record<GoogleAdsSearchTermStatus, number> = {
+  EXCLUDED: 2,
+  ADDED: 1,
+  NONE: 0,
+};
+
+function parseSearchTermRow(result: Record<string, unknown>) {
+  const campaign = result.campaign as Record<string, unknown> | undefined;
+  const metrics = result.metrics as Record<string, unknown> | undefined;
+  const searchTermView = result.searchTermView as Record<string, unknown> | undefined;
+
+  const searchTerm = typeof searchTermView?.searchTerm === "string" ? searchTermView.searchTerm : "";
+  const status = typeof searchTermView?.status === "string" ? searchTermView.status : "NONE";
+
+  return {
+    campaignId: typeof campaign?.id === "string" ? campaign.id : "",
+    campaignName: typeof campaign?.name === "string" ? campaign.name : "",
+    searchTerm,
+    normalizedSearchTerm: normalizeSearchTerm(searchTerm),
+    status: (status === "ADDED" || status === "EXCLUDED" ? status : "NONE") as GoogleAdsSearchTermStatus,
+    costMicros: parseNumber(metrics?.costMicros),
+    clicks: parseNumber(metrics?.clicks),
+    impressions: parseNumber(metrics?.impressions),
+    conversions: parseNumber(metrics?.conversions),
+    conversionValue: parseNumber(metrics?.conversionsValue),
+    ctr: parseNumber(metrics?.ctr),
+    averageCpc: parseNumber(metrics?.averageCpc),
+  };
+}
+
+// 30-day window, not 7 — confirmed against Production (2026-08-28) that
+// weekly search-term volume is too sparse to classify reliably (28 terms/7
+// days vs 132/30 days for this account, with only 6 converting terms in the
+// last 365 days total). A 7-day window would starve the "insufficient data"
+// bucket of almost everything real. Flagged to the founder as the window
+// choice; not an invented numeric threshold, just the lookback length.
+export async function fetchGoogleAdsSearchTerms(
+  tenantId: string,
+  customerId: string,
+): Promise<GoogleAdsSearchTermRow[]> {
+  const query =
+    "SELECT search_term_view.search_term, search_term_view.status, campaign.id, campaign.name, " +
+    "metrics.clicks, metrics.impressions, metrics.cost_micros, metrics.conversions, " +
+    "metrics.conversions_value, metrics.ctr, metrics.average_cpc " +
+    "FROM search_term_view WHERE segments.date DURING LAST_30_DAYS ORDER BY metrics.cost_micros DESC";
+
+  const body = await queryGoogleAds(tenantId, customerId, query);
+  const rawRows = Array.isArray(body.results) ? body.results.map(parseSearchTermRow) : [];
+
+  // Aggregate by (campaignId, normalizedSearchTerm) — the dedupeKey grain
+  // the founder specified omits ad group, and the same term can legitimately
+  // appear under more than one ad group within a campaign.
+  const aggregated = new Map<string, GoogleAdsSearchTermRow>();
+  for (const row of rawRows) {
+    if (!row.campaignId || !row.normalizedSearchTerm) continue;
+    const key = `${row.campaignId}:${row.normalizedSearchTerm}`;
+    const existing = aggregated.get(key);
+    if (!existing) {
+      aggregated.set(key, {
+        campaignId: row.campaignId,
+        campaignName: row.campaignName,
+        searchTerm: row.searchTerm,
+        normalizedSearchTerm: row.normalizedSearchTerm,
+        status: row.status,
+        costCents: Math.round(row.costMicros / 10000),
+        clicks: row.clicks,
+        impressions: row.impressions,
+        conversions: row.conversions,
+        conversionValue: row.conversionValue,
+        ctr: row.ctr,
+        averageCpc: row.averageCpc,
+      });
+      continue;
+    }
+
+    existing.costCents += Math.round(row.costMicros / 10000);
+    existing.clicks += row.clicks;
+    existing.impressions += row.impressions;
+    existing.conversions += row.conversions;
+    existing.conversionValue += row.conversionValue;
+    if (SEARCH_TERM_STATUS_PRECEDENCE[row.status] > SEARCH_TERM_STATUS_PRECEDENCE[existing.status]) {
+      existing.status = row.status;
+    }
+  }
+
+  return Array.from(aggregated.values());
+}
+
 // The GTM public container ID (GTM-XXXXXXX, what's visible on the site and
 // what /marketing/connections asks for) is not the same as the internal
 // accounts/{accountId}/containers/{containerId} path the Tag Manager API

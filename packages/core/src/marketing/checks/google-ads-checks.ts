@@ -1,5 +1,9 @@
-import { fetchGoogleAdsWeeklyPerformance, fetchGoogleAdsCampaignComparison } from "../google-clients";
-import type { GoogleAdsCampaignComparisonRow } from "../google-clients";
+import {
+  fetchGoogleAdsWeeklyPerformance,
+  fetchGoogleAdsCampaignComparison,
+  fetchGoogleAdsSearchTerms,
+} from "../google-clients";
+import type { GoogleAdsCampaignComparisonRow, GoogleAdsSearchTermRow } from "../google-clients";
 import type { FindingDraft } from "../rule-types";
 
 // Account-level totals (below) were originally written against documented
@@ -241,6 +245,173 @@ export function runCampaignChecks(
   return drafts;
 }
 
+// ── Search Term Intelligence ─────────────────────────────────────────
+// Deliberately does NOT classify search-term relevance/pertinence itself —
+// only Google Ads' own numbers (cost, clicks, conversions, CPA) and its own
+// search_term_view.status (ADDED/EXCLUDED/NONE — whether the account owner
+// already turned this term into a keyword or a negative). Whether a query
+// fits Bonolini Transfer's premium positioning is a judgment call for the
+// founder; the deterministic layer surfaces evidence and a REVIEW label,
+// never an assertion of irrelevance (see NEGATIVE_KEYWORD_REVIEW below,
+// which mirrors the founder's own worked example: "REVIEW / POSSIBILE
+// NEGATIVE", not a flat "NEGATIVE").
+//
+// MIN_CONVERSIONS_FOR_KEYWORD_OPPORTUNITY reuses the most natural possible
+// floor (>=1 full attributed conversion — Google Ads conversions can be
+// fractional, e.g. 0.83, for assisted/cross-device attribution; a term that
+// hasn't reached one whole conversion yet isn't a proven opportunity).
+// MIN_CLICKS_FOR_ZERO_CONVERSION_REVIEW has no existing precedent to reuse
+// (same situation as MIN_PREVIOUS_PERIOD_CONVERSIONS above) — flagged to
+// the founder, see report. HIGH_COST_PER_CONVERSION_CENTS is the exact same
+// €150 threshold already used at account level, not a new number.
+const MIN_CONVERSIONS_FOR_KEYWORD_OPPORTUNITY = 1;
+const MIN_CLICKS_FOR_ZERO_CONVERSION_REVIEW = 3; // no existing precedent — flagged to the founder, see report
+
+export type SearchTermDecision =
+  | "performance_problem"
+  | "positive_keyword_opportunity"
+  | "negative_keyword_review"
+  | "keep_monitor";
+
+export interface SearchTermClassification {
+  decision: SearchTermDecision;
+  costPerConversionCents: number | null;
+}
+
+// Exported for direct testing, same rationale as filterAiFindingDrafts
+// (ai-analyst.ts) and severityForBaseline-style pure decision functions
+// elsewhere in this package.
+export function classifySearchTerm(row: GoogleAdsSearchTermRow): SearchTermClassification {
+  const costPerConversionCents = row.conversions > 0 ? Math.round(row.costCents / row.conversions) : null;
+
+  if (row.conversions > 0 && costPerConversionCents !== null && costPerConversionCents >= HIGH_COST_PER_CONVERSION_CENTS) {
+    return { decision: "performance_problem", costPerConversionCents };
+  }
+
+  if (row.conversions >= MIN_CONVERSIONS_FOR_KEYWORD_OPPORTUNITY && row.status !== "ADDED") {
+    return { decision: "positive_keyword_opportunity", costPerConversionCents };
+  }
+
+  if (row.conversions === 0 && row.status !== "ADDED" && row.clicks >= MIN_CLICKS_FOR_ZERO_CONVERSION_REVIEW) {
+    return { decision: "negative_keyword_review", costPerConversionCents };
+  }
+
+  return { decision: "keep_monitor", costPerConversionCents };
+}
+
+// Only the three actionable decisions become findings — keep_monitor is
+// "pertinent by default, insufficient data to act", the same "healthy, no
+// finding" convention every other check in this module already follows.
+// EXCLUDED search terms are skipped entirely: the founder already resolved
+// them in Google Ads, so they're no longer "useful" (per the founder's own
+// phrasing) for a new decision.
+export function runSearchTermChecks(customerId: string, rows: GoogleAdsSearchTermRow[]): FindingDraft[] {
+  const drafts: FindingDraft[] = [];
+
+  for (const row of rows) {
+    if (row.status === "EXCLUDED") continue;
+
+    const { decision, costPerConversionCents } = classifySearchTerm(row);
+    const costEuros = (row.costCents / 100).toFixed(2);
+    const evidence = {
+      customerId,
+      campaignId: row.campaignId,
+      campaignName: row.campaignName,
+      searchTerm: row.searchTerm,
+      status: row.status,
+      costCents: row.costCents,
+      clicks: row.clicks,
+      impressions: row.impressions,
+      ctr: row.ctr,
+      averageCpc: row.averageCpc,
+      conversions: row.conversions,
+      conversionValue: row.conversionValue,
+      costPerConversionCents,
+    };
+
+    if (decision === "performance_problem") {
+      drafts.push({
+        dedupeKey: `google_ads_search_term:${row.campaignId}:${row.normalizedSearchTerm}`,
+        category: "budget_waste",
+        nature: "technical_issue",
+        severity: "high",
+        confidenceScore: 75,
+        title: `Search term "${row.searchTerm}" converts but at a high cost`,
+        observation: `In campaign "${row.campaignName}", the query "${row.searchTerm}" spent €${costEuros} over the last 30 days across ${row.clicks} click(s), producing ${row.conversions} conversion(s) at €${((costPerConversionCents ?? 0) / 100).toFixed(2)} per conversion.`,
+        rootCause: "The query is commercially relevant but converts inefficiently — likely broad match spillover, high competition, or a landing page mismatch specific to this intent.",
+        businessImpact: "This query is a proven source of bookings, but at a cost per conversion well above the account's own €150 threshold.",
+        financialImpact: {
+          amount: (costPerConversionCents ?? 0) / 100,
+          currency: "EUR",
+          period: "monthly",
+          direction: "cost",
+          note: "Cost per conversion for this search term, last 30 days.",
+        },
+        recommendedActions: [
+          "Consider adding this exact query as a dedicated keyword with its own bid, instead of relying on broad/phrase match",
+          "Review the landing page shown for this query's ad group",
+        ],
+        requiresApproval: false,
+        expectedBenefit: "Bringing this query's cost per conversion in line with the account average improves margin without losing a proven conversion source.",
+        evidence,
+      });
+      continue;
+    }
+
+    if (decision === "positive_keyword_opportunity") {
+      drafts.push({
+        dedupeKey: `google_ads_search_term:${row.campaignId}:${row.normalizedSearchTerm}`,
+        category: "impression_share",
+        nature: "strategic_opportunity",
+        severity: "low",
+        confidenceScore: 70,
+        title: `Search term "${row.searchTerm}" is a candidate for a dedicated keyword`,
+        observation: `In campaign "${row.campaignName}", the query "${row.searchTerm}" produced ${row.conversions} conversion(s) over the last 30 days (€${costEuros} spent, ${row.clicks} click(s)) and is not yet an explicit keyword in this account (status: ${row.status}).`,
+        rootCause: "Real booking intent is showing up through broad/phrase match or close variants rather than an exact, dedicated keyword.",
+        businessImpact: "Without a dedicated keyword, this query's bid and budget are governed by whatever keyword happened to match it, not by its own proven value.",
+        financialImpact: null,
+        recommendedActions: [
+          "Consider adding this exact query as its own keyword (exact match) with a bid reflecting its proven conversion value",
+        ],
+        requiresApproval: false,
+        expectedBenefit: "A dedicated keyword gives direct bid control over a query that already demonstrably converts.",
+        evidence,
+      });
+      continue;
+    }
+
+    if (decision === "negative_keyword_review") {
+      drafts.push({
+        dedupeKey: `google_ads_search_term:${row.campaignId}:${row.normalizedSearchTerm}`,
+        category: "budget_waste",
+        nature: "technical_issue",
+        severity: "medium",
+        confidenceScore: 55,
+        title: `Search term "${row.searchTerm}" — review for possible negative keyword`,
+        observation: `In campaign "${row.campaignName}", the query "${row.searchTerm}" received ${row.clicks} click(s) and cost €${costEuros} over the last 30 days with 0 conversions recorded.`,
+        rootCause: "Zero conversions with repeated clicks over 30 days — could be genuinely irrelevant intent, or a query type that doesn't fit this campaign's positioning; cost/click data alone cannot prove which.",
+        businessImpact: "This query is consuming budget without any recorded return so far.",
+        financialImpact: {
+          amount: row.costCents / 100,
+          currency: "EUR",
+          period: "monthly",
+          direction: "cost",
+          note: "Spend on this search term with 0 conversions, last 30 days.",
+        },
+        recommendedActions: [
+          "Manually review this query against Bonolini Transfer's premium NCC positioning before excluding it",
+          "If confirmed off-intent, add it as a negative keyword at the ad group or campaign level",
+        ],
+        requiresApproval: true,
+        expectedBenefit: "Excluding genuinely off-intent queries stops wasted spend without risking a query that just hasn't converted yet.",
+        evidence,
+      });
+    }
+  }
+
+  return drafts;
+}
+
 export async function runChecks(tenantId: string, customerId: string): Promise<FindingDraft[]> {
   const drafts: FindingDraft[] = [];
   const performance = await fetchGoogleAdsWeeklyPerformance(tenantId, customerId);
@@ -339,6 +510,9 @@ export async function runChecks(tenantId: string, customerId: string): Promise<F
 
   const campaignComparison = await fetchGoogleAdsCampaignComparison(tenantId, customerId);
   drafts.push(...runCampaignChecks(customerId, campaignComparison));
+
+  const searchTerms = await fetchGoogleAdsSearchTerms(tenantId, customerId);
+  drafts.push(...runSearchTermChecks(customerId, searchTerms));
 
   return drafts;
 }

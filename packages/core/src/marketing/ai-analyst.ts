@@ -71,7 +71,7 @@ const AI_BLOCK_IF_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], reado
 // invented from nothing. Absence blocks creation.
 const AI_REQUIRE_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readonly string[]>> = {
   search_console_indexing: ["gsc_indexing:", "gsc_click_drop:"],
-  budget_waste: ["google_ads:", "google_ads_campaign_cpa_anomaly:"],
+  budget_waste: ["google_ads:", "google_ads_campaign_cpa_anomaly:", "google_ads_search_term:"],
   account_health: ["google_ads:", "api_error:", "google_ads_campaign_spend_no_conversion:", "google_ads_campaign_conversion_drop:"],
   conversion_tracking: ["ga4_event_stopped:", "google_ads:"],
   // Both added alongside the campaign-level Google Ads checks
@@ -81,6 +81,12 @@ const AI_REQUIRE_SIGNAL_PRESENT: Partial<Record<FindingDraft["category"], readon
   // evidence-requiring category.
   budget_pacing: ["google_ads_campaign_spend_anomaly:"],
   bid_cpc_anomaly: ["google_ads_campaign_cpc_anomaly:"],
+  // Added alongside Search Term Intelligence — impression_share is the
+  // category positive_keyword_opportunity findings use (deliberately not
+  // "other": ai-analyst.test.ts uses "other" as its documented ungated
+  // control category, and impression_share is otherwise unused by any
+  // check, so this doesn't collide with existing test/gate assumptions).
+  impression_share: ["google_ads_search_term:"],
 };
 
 // Claude findings are a strategic-commentary layer on top of deterministic

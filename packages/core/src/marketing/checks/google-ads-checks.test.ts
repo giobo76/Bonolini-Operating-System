@@ -1,15 +1,17 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { GoogleAdsCampaignComparisonRow } from "../google-clients";
+import type { GoogleAdsCampaignComparisonRow, GoogleAdsSearchTermRow } from "../google-clients";
 
 const fetchGoogleAdsWeeklyPerformance = vi.fn();
 const fetchGoogleAdsCampaignComparison = vi.fn();
+const fetchGoogleAdsSearchTerms = vi.fn();
 
 vi.mock("../google-clients", () => ({
   fetchGoogleAdsWeeklyPerformance: (...args: unknown[]) => fetchGoogleAdsWeeklyPerformance(...args),
   fetchGoogleAdsCampaignComparison: (...args: unknown[]) => fetchGoogleAdsCampaignComparison(...args),
+  fetchGoogleAdsSearchTerms: (...args: unknown[]) => fetchGoogleAdsSearchTerms(...args),
 }));
 
-const { runChecks, runCampaignChecks } = await import("./google-ads-checks");
+const { runChecks, runCampaignChecks, runSearchTermChecks, classifySearchTerm } = await import("./google-ads-checks");
 
 function performance(totals: Partial<Record<string, number>>) {
   return {
@@ -34,6 +36,8 @@ describe("google-ads-checks", () => {
     fetchGoogleAdsWeeklyPerformance.mockReset();
     fetchGoogleAdsCampaignComparison.mockReset();
     fetchGoogleAdsCampaignComparison.mockResolvedValue([]);
+    fetchGoogleAdsSearchTerms.mockReset();
+    fetchGoogleAdsSearchTerms.mockResolvedValue([]);
   });
 
   it("flags zero conversions with meaningful spend as a critical account_health finding", async () => {
@@ -138,6 +142,23 @@ describe("google-ads-checks", () => {
 
     expect(drafts).toHaveLength(1);
     expect(drafts[0]).toMatchObject({ dedupeKey: "google_ads_campaign_spend_no_conversion:111" });
+  });
+
+  it("propagates a search-term fetch error the same way as an account/campaign-level one", async () => {
+    fetchGoogleAdsWeeklyPerformance.mockResolvedValue(performance({}));
+    fetchGoogleAdsSearchTerms.mockRejectedValue(new Error("Google Ads query failed (400): search term report"));
+
+    await expect(runChecks("tenant-1", "678-018-7978")).rejects.toThrow("Google Ads query failed (400)");
+  });
+
+  it("merges search-term findings from runSearchTermChecks into the account-level drafts", async () => {
+    fetchGoogleAdsWeeklyPerformance.mockResolvedValue(performance({}));
+    fetchGoogleAdsSearchTerms.mockResolvedValue([searchTermRow({ clicks: 5, conversions: 0, costCents: 900 })]);
+
+    const drafts = await runChecks("tenant-1", "678-018-7978");
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({ dedupeKey: "google_ads_search_term:222:test query" });
   });
 });
 
@@ -282,5 +303,157 @@ describe("runCampaignChecks", () => {
     ]);
 
     expect(drafts).toHaveLength(0);
+  });
+});
+
+function searchTermRow(overrides: Partial<GoogleAdsSearchTermRow> = {}): GoogleAdsSearchTermRow {
+  return {
+    campaignId: "222",
+    campaignName: "Test Search Campaign",
+    searchTerm: "test query",
+    normalizedSearchTerm: "test query",
+    status: "NONE",
+    costCents: 0,
+    clicks: 0,
+    impressions: 0,
+    conversions: 0,
+    conversionValue: 0,
+    ctr: 0,
+    averageCpc: 0,
+    ...overrides,
+  };
+}
+
+describe("classifySearchTerm", () => {
+  it("classifies as performance_problem when it converts but cost per conversion is at/above the €150 account-level threshold", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 15000, conversions: 1 }));
+
+    expect(result).toEqual({ decision: "performance_problem", costPerConversionCents: 15000 });
+  });
+
+  it("classifies as positive_keyword_opportunity when it has at least one real conversion and isn't already an added keyword", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 3000, conversions: 1, status: "NONE" }));
+
+    expect(result.decision).toBe("positive_keyword_opportunity");
+  });
+
+  it("does not classify as an opportunity when conversions are fractional and below 1 (partial/assisted attribution)", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 1000, conversions: 0.83, clicks: 1 }));
+
+    expect(result.decision).toBe("keep_monitor");
+  });
+
+  it("does not classify as an opportunity when the term is already an added keyword (already realized, nothing to create)", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 3000, conversions: 1, status: "ADDED" }));
+
+    expect(result.decision).toBe("keep_monitor");
+  });
+
+  it("classifies as negative_keyword_review when it has real clicks/cost, zero conversions, and isn't already added", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 900, clicks: 3, conversions: 0, status: "NONE" }));
+
+    expect(result.decision).toBe("negative_keyword_review");
+  });
+
+  it("does not classify as negative_keyword_review below the click threshold (avoids noise on a single stray click)", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 200, clicks: 2, conversions: 0, status: "NONE" }));
+
+    expect(result.decision).toBe("keep_monitor");
+  });
+
+  it("does not classify an already-added keyword's zero-conversion term as negative_keyword_review", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 900, clicks: 5, conversions: 0, status: "ADDED" }));
+
+    expect(result.decision).toBe("keep_monitor");
+  });
+
+  it("performance_problem takes priority over positive_keyword_opportunity when both conditions technically overlap", () => {
+    const result = classifySearchTerm(searchTermRow({ costCents: 20000, conversions: 1, status: "NONE" }));
+
+    expect(result.decision).toBe("performance_problem");
+  });
+});
+
+describe("runSearchTermChecks", () => {
+  it("emits a budget_waste finding for a performance_problem search term with the stable campaign+term dedupeKey", () => {
+    const drafts = runSearchTermChecks("678-018-7978", [
+      searchTermRow({ campaignId: "333", searchTerm: "bernina express milan", normalizedSearchTerm: "bernina express milan", costCents: 18000, conversions: 1 }),
+    ]);
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({
+      dedupeKey: "google_ads_search_term:333:bernina express milan",
+      category: "budget_waste",
+      severity: "high",
+      nature: "technical_issue",
+    });
+  });
+
+  it("emits an impression_share strategic_opportunity finding for a positive_keyword_opportunity search term", () => {
+    const drafts = runSearchTermChecks("678-018-7978", [
+      searchTermRow({ costCents: 2500, conversions: 1, status: "NONE" }),
+    ]);
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({
+      category: "impression_share",
+      nature: "strategic_opportunity",
+      severity: "low",
+    });
+  });
+
+  it("emits a requiresApproval budget_waste review finding for a negative_keyword_review search term, never asserting irrelevance", () => {
+    const drafts = runSearchTermChecks("678-018-7978", [
+      searchTermRow({ clicks: 4, costCents: 1200, conversions: 0, status: "NONE" }),
+    ]);
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({ category: "budget_waste", severity: "medium", requiresApproval: true });
+    expect(drafts[0]?.title).toMatch(/review/i);
+    expect(drafts[0]?.title).not.toMatch(/^Negative keyword/i);
+  });
+
+  it("emits no finding for a keep_monitor search term (insufficient data — the same 'healthy, no finding' convention as every other check)", () => {
+    const drafts = runSearchTermChecks("678-018-7978", [searchTermRow({ clicks: 1, costCents: 200, conversions: 0 })]);
+
+    expect(drafts).toHaveLength(0);
+  });
+
+  it("skips an EXCLUDED search term entirely, even with heavy zero-conversion spend (already resolved in Google Ads)", () => {
+    const drafts = runSearchTermChecks("678-018-7978", [
+      searchTermRow({ clicks: 20, costCents: 5000, conversions: 0, status: "EXCLUDED" }),
+    ]);
+
+    expect(drafts).toHaveLength(0);
+  });
+
+  it("includes the full QUERY/CAMPAGNA/COSTO/CLIC/IMPRESSION/CTR/CPC/CONVERSIONI/COST-PER-CONVERSIONE evidence the founder asked for", () => {
+    const drafts = runSearchTermChecks("678-018-7978", [
+      searchTermRow({
+        campaignId: "444",
+        campaignName: "Malpensa Core",
+        searchTerm: "taxi sondrio aeroporto",
+        clicks: 6,
+        impressions: 40,
+        costCents: 1500,
+        conversions: 0,
+        ctr: 0.15,
+        averageCpc: 2.5,
+        status: "NONE",
+      }),
+    ]);
+
+    expect(drafts[0]?.evidence).toMatchObject({
+      campaignId: "444",
+      campaignName: "Malpensa Core",
+      searchTerm: "taxi sondrio aeroporto",
+      clicks: 6,
+      impressions: 40,
+      costCents: 1500,
+      conversions: 0,
+      ctr: 0.15,
+      averageCpc: 2.5,
+      costPerConversionCents: null,
+    });
   });
 });
