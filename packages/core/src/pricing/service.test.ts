@@ -239,3 +239,155 @@ describe("calculatePrice — defensive edge cases", () => {
     expect(result.manualRequiredReason).toBe("passengers_missing");
   });
 });
+
+// Founder-approved commercial fixed fares for the English/foreign-facing
+// site pages (2026-08-31): Varenna/Menaggio/Como/Milan/Malpensa <-> Tirano,
+// up to 4 passengers, identical in both directions. See service.ts's
+// FOREIGN_FIXED_TIRANO_* comment for why these are checked ahead of the
+// pre-existing airport-fixed-fare and Como-Tirano branches.
+describe("calculatePrice — foreign Lake Como / Milan / Malpensa <-> Tirano fixed fares", () => {
+  const NAMED_ROUTES: Array<{ town: string; label: string; fareCents: number; matchedRule: string }> = [
+    { town: "Varenna", label: "varenna_tirano_fixed_foreign", fareCents: 26000, matchedRule: "varenna_tirano_fixed_foreign" },
+    { town: "Menaggio", label: "menaggio_tirano_fixed_foreign", fareCents: 30000, matchedRule: "menaggio_tirano_fixed_foreign" },
+    { town: "Como", label: "como_tirano_fixed_foreign", fareCents: 36000, matchedRule: "como_tirano_fixed_foreign" },
+    { town: "Milan", label: "milan_tirano_fixed_foreign", fareCents: 39000, matchedRule: "milan_tirano_fixed_foreign" },
+    { town: "Malpensa", label: "malpensa_tirano_fixed_foreign", fareCents: 44000, matchedRule: "malpensa_tirano_fixed_foreign" },
+  ];
+
+  describe.each(NAMED_ROUTES)("$town <-> Tirano", ({ town, fareCents, matchedRule }) => {
+    // FOREIGN — 1 pax, both directions
+    it(`1 pax: ${town} -> Tirano and Tirano -> ${town} both resolve to the same fixed fare`, () => {
+      const forward = calculatePrice(input({ customerType: "foreign", pickup: town, destination: "Tirano", passengers: 1 }));
+      const backward = calculatePrice(input({ customerType: "foreign", pickup: "Tirano", destination: town, passengers: 1 }));
+
+      for (const result of [forward, backward]) {
+        expect(result.pricingStatus).toBe("fixed");
+        expect(result.pricingBreakdown.matchedRule).toBe(matchedRule);
+        expect(result.finalAmountCents).toBe(fareCents);
+      }
+      expect(forward.finalAmountCents).toBe(backward.finalAmountCents);
+    });
+
+    // FOREIGN — 4 pax, both directions (upper edge of the published band)
+    it(`4 pax: ${town} -> Tirano and Tirano -> ${town} both resolve to the same fixed fare`, () => {
+      const forward = calculatePrice(input({ customerType: "foreign", pickup: town, destination: "Tirano", passengers: 4 }));
+      const backward = calculatePrice(input({ customerType: "foreign", pickup: "Tirano", destination: town, passengers: 4 }));
+
+      for (const result of [forward, backward]) {
+        expect(result.pricingStatus).toBe("fixed");
+        expect(result.finalAmountCents).toBe(fareCents);
+      }
+    });
+
+    // FOREIGN — 5 pax: personalized quote, never a base price
+    it(`5 pax: ${town} <-> Tirano defers to manual_required, never a fixed price`, () => {
+      const forward = calculatePrice(input({ customerType: "foreign", pickup: town, destination: "Tirano", passengers: 5 }));
+      const backward = calculatePrice(input({ customerType: "foreign", pickup: "Tirano", destination: town, passengers: 5 }));
+
+      for (const result of [forward, backward]) {
+        expect(result.pricingStatus).toBe("manual_required");
+        expect(result.manualRequiredReason).toBe("passengers_above_supported_fare_band");
+        expect(result.finalAmountCents).toBeNull();
+      }
+    });
+
+    // FOREIGN — 8 pax: same
+    it(`8 pax: ${town} <-> Tirano defers to manual_required, never a fixed price`, () => {
+      const forward = calculatePrice(input({ customerType: "foreign", pickup: town, destination: "Tirano", passengers: 8 }));
+      const backward = calculatePrice(input({ customerType: "foreign", pickup: "Tirano", destination: town, passengers: 8 }));
+
+      for (const result of [forward, backward]) {
+        expect(result.pricingStatus).toBe("manual_required");
+        expect(result.manualRequiredReason).toBe("passengers_above_supported_fare_band");
+        expect(result.finalAmountCents).toBeNull();
+      }
+    });
+  });
+
+  // FOREIGN — other Lake Como locations: no fixed price, ever, regardless
+  // of passenger count.
+  describe.each(["Bellagio", "Tremezzo"])("%s <-> Tirano (no published fare)", (town) => {
+    it("never returns a fixed price in either direction, 1-4 pax", () => {
+      const forward = calculatePrice(input({ customerType: "foreign", pickup: town, destination: "Tirano", passengers: 2 }));
+      const backward = calculatePrice(input({ customerType: "foreign", pickup: "Tirano", destination: town, passengers: 2 }));
+
+      for (const result of [forward, backward]) {
+        expect(result.pricingStatus).toBe("manual_required");
+        expect(result.manualRequiredReason).toBe("lake_como_location_requires_personalized_quote");
+        expect(result.finalAmountCents).toBeNull();
+      }
+    });
+
+    it("does not fall through to a generic_km price even when a distance is supplied", () => {
+      const result = calculatePrice(
+        input({ customerType: "foreign", pickup: town, destination: "Tirano", passengers: 2, distanceKm: 150 }),
+      );
+      expect(result.pricingStatus).toBe("manual_required");
+      expect(result.pricingBreakdown.matchedRule).toBe("manual_required");
+    });
+  });
+
+  // ITALIAN regression: none of the five new named routes should affect an
+  // italian customer at all — they must keep using exactly the pre-existing
+  // rules (Como-Tirano km-based, Milan/Malpensa generic_km unless already
+  // covered by the airport table).
+  describe("italian customers are unaffected by the new foreign fixed fares", () => {
+    it("Varenna/Menaggio <-> Tirano still fall through to generic_km for an italian customer", () => {
+      for (const town of ["Varenna", "Menaggio"]) {
+        const result = calculatePrice(input({ customerType: "italian", pickup: town, destination: "Tirano", distanceKm: 115.5 }));
+        expect(result.pricingStatus).toBe("calculated_km");
+        expect(result.pricingBreakdown.matchedRule).toBe("generic_km");
+      }
+    });
+
+    it("Como <-> Tirano still uses como_tirano_km_italian for an italian customer, unchanged", () => {
+      const result = calculatePrice(input({ customerType: "italian", pickup: "Como", destination: "Tirano", distanceKm: 85 }));
+      expect(result.pricingStatus).toBe("calculated_km");
+      expect(result.pricingBreakdown.matchedRule).toBe("como_tirano_km_italian");
+      expect(result.finalAmountCents).toBe(9180); // unchanged from test 12 above
+    });
+
+    it("Milan -> Tirano still falls through to generic_km for an italian customer (no fixed fare exists for this direction/customer type)", () => {
+      const result = calculatePrice(input({ customerType: "italian", pickup: "Milan", destination: "Tirano", distanceKm: 145 }));
+      expect(result.pricingStatus).toBe("calculated_km");
+      expect(result.pricingBreakdown.matchedRule).toBe("generic_km");
+    });
+
+    it("Malpensa -> Tirano still falls through to generic_km for an italian customer", () => {
+      const result = calculatePrice(input({ customerType: "italian", pickup: "Malpensa", destination: "Tirano", distanceKm: 175 }));
+      expect(result.pricingStatus).toBe("calculated_km");
+      expect(result.pricingBreakdown.matchedRule).toBe("generic_km");
+    });
+
+    it("Bellagio/Tremezzo <-> Tirano still fall through to generic_km for an italian customer (the new manual_required rule is foreign-only)", () => {
+      for (const town of ["Bellagio", "Tremezzo"]) {
+        const result = calculatePrice(input({ customerType: "italian", pickup: town, destination: "Tirano", distanceKm: 156.5 }));
+        expect(result.pricingStatus).toBe("calculated_km");
+        expect(result.pricingBreakdown.matchedRule).toBe("generic_km");
+      }
+    });
+
+    it("italian airport fixed fares (Malpensa/Linate as destination) are completely unaffected", () => {
+      const malpensa = calculatePrice(input({ customerType: "italian", destination: "Malpensa", passengers: 5 }));
+      expect(malpensa.pricingBreakdown.matchedRule).toBe("fixed_airport_malpensa");
+      expect(malpensa.finalAmountCents).toBe(27000);
+
+      const linate = calculatePrice(input({ customerType: "italian", destination: "Linate", passengers: 8 }));
+      expect(linate.pricingBreakdown.matchedRule).toBe("fixed_airport_linate_orio_city");
+      expect(linate.finalAmountCents).toBe(32000);
+    });
+  });
+
+  // Regression: an unrelated foreign route (no "Tirano" anywhere) must be
+  // completely untouched by all of the new logic above.
+  it("a foreign route with no Tirano anywhere is unaffected (existing airport-fare/generic-km behavior preserved)", () => {
+    const airport = calculatePrice(input({ customerType: "foreign", pickup: "Sondrio", destination: "Malpensa", passengers: 2 }));
+    expect(airport.pricingBreakdown.matchedRule).toBe("fixed_airport_malpensa");
+
+    // Livigno matches no airport keyword and no Tirano/Como mention — a
+    // genuinely unrelated generic_km route, unlike "Milano" as a
+    // destination (which would hit the pre-existing airport-fare table).
+    const generic = calculatePrice(input({ customerType: "foreign", pickup: "Bellagio", destination: "Livigno", distanceKm: 80 }));
+    expect(generic.pricingBreakdown.matchedRule).toBe("generic_km");
+  });
+});

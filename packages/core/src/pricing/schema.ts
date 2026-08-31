@@ -40,6 +40,12 @@ export type ManualRequiredReason =
   | "gettransfer_base_tariff_not_defined"
   | "viator_external_price_not_provided"
   | "night_holiday_surcharge_requires_admin_decision"
+  // Added for the named foreign Lake Como <-> Tirano fixed fares (see
+  // service.ts's FOREIGN_FIXED_TIRANO_*): a recognized Lake Como location
+  // (Bellagio, Tremezzo, etc.) other than the three with a published fare
+  // (Varenna, Menaggio, Como) — a deliberate commercial decision not to
+  // auto-price it, not a missing-data gap like distance_not_provided.
+  | "lake_como_location_requires_personalized_quote"
   | null;
 
 export type MatchedRule =
@@ -47,6 +53,14 @@ export type MatchedRule =
   | "fixed_airport_malpensa"
   | "como_tirano_fixed_foreign"
   | "como_tirano_km_italian"
+  // The four other named foreign fixed routes to/from Tirano, added
+  // alongside como_tirano_fixed_foreign above — same commercial mechanism,
+  // one MatchedRule per route (matching the existing fixed_airport_*
+  // convention of one rule per fare table, not a single generic value).
+  | "varenna_tirano_fixed_foreign"
+  | "menaggio_tirano_fixed_foreign"
+  | "milan_tirano_fixed_foreign"
+  | "malpensa_tirano_fixed_foreign"
   | "generic_km"
   | "manual_required";
 
