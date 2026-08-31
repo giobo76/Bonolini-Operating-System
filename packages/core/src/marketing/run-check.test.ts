@@ -104,9 +104,14 @@ vi.mock("./service", () => ({
 }));
 vi.mock("./alerts", () => ({ sendCriticalAlertEmail: (...a: unknown[]) => sendCriticalAlertEmail(...a) }));
 
-const { runCheck, isNeverAutoResolved, isCoveredByRunType, isEligibleForMissTracking } = await import(
-  "./run-check"
-);
+const {
+  runCheck,
+  isNeverAutoResolved,
+  isCoveredByRunType,
+  isEligibleForMissTracking,
+  shouldSendCriticalAlert,
+  isFinancialChangeMaterial,
+} = await import("./run-check");
 
 function openFinding(overrides: Record<string, unknown> = {}) {
   return {
@@ -1343,5 +1348,263 @@ describe("findings lifecycle — pure decision functions", () => {
         activeResources: [],
       }),
     ).toBe(true);
+  });
+});
+
+describe("isFinancialChangeMaterial (pure)", () => {
+  it("is not material when the change is below the 50% threshold", () => {
+    expect(isFinancialChangeMaterial("cost", 5739, 5640)).toBe(false); // real example: €56.40 -> €57.39, ~1.75%
+  });
+
+  it("is material when a cost figure increases by >=50% since the last alert", () => {
+    expect(isFinancialChangeMaterial("cost", 9000, 5000)).toBe(true); // +80%
+  });
+
+  it("is not material when a cost figure decreases (not a worsening for direction=cost)", () => {
+    expect(isFinancialChangeMaterial("cost", 1000, 5000)).toBe(false); // -80%, but a drop in cost isn't "worse"
+  });
+
+  it("is material when an opportunity figure shrinks by >=50% (less upside = worse for direction=opportunity)", () => {
+    expect(isFinancialChangeMaterial("opportunity", 1000, 5000)).toBe(true); // -80%
+  });
+
+  it("is not material when an opportunity figure grows (not a worsening for direction=opportunity)", () => {
+    expect(isFinancialChangeMaterial("opportunity", 9000, 5000)).toBe(false); // +80%
+  });
+
+  it("is not material when either amount is missing or the baseline is zero (nothing to compare against)", () => {
+    expect(isFinancialChangeMaterial("cost", null, 5000)).toBe(false);
+    expect(isFinancialChangeMaterial("cost", 9000, null)).toBe(false);
+    expect(isFinancialChangeMaterial("cost", 9000, 0)).toBe(false);
+  });
+
+  it("defaults to the cost-direction rule when direction is undefined (every critical deterministic finding today uses cost)", () => {
+    expect(isFinancialChangeMaterial(undefined, 9000, 5000)).toBe(true);
+  });
+});
+
+describe("shouldSendCriticalAlert (pure)", () => {
+  it("A: a new finding always alerts", () => {
+    expect(
+      shouldSendCriticalAlert({
+        isNewOrReopened: true,
+        newSeverity: "critical",
+        financialDirection: "cost",
+        newFinancialAmount: 5640,
+        lastAlertedSeverity: undefined,
+        lastAlertedFinancialAmount: undefined,
+      }),
+    ).toBe(true);
+  });
+
+  it("D: a reopened finding always alerts", () => {
+    expect(
+      shouldSendCriticalAlert({
+        isNewOrReopened: true,
+        newSeverity: "critical",
+        financialDirection: "cost",
+        newFinancialAmount: 5640,
+        lastAlertedSeverity: "critical",
+        lastAlertedFinancialAmount: 5640,
+      }),
+    ).toBe(true);
+  });
+
+  it("B: an existing finding whose numbers moved only slightly does not re-alert (the real production case: €56.40 -> €57.39, 32 -> 33 clicks)", () => {
+    expect(
+      shouldSendCriticalAlert({
+        isNewOrReopened: false,
+        newSeverity: "critical",
+        financialDirection: "cost",
+        newFinancialAmount: 5739,
+        lastAlertedSeverity: "critical",
+        lastAlertedFinancialAmount: 5640,
+      }),
+    ).toBe(false);
+  });
+
+  it("C: an existing finding whose cost worsened by >=50% since the last alert re-alerts", () => {
+    expect(
+      shouldSendCriticalAlert({
+        isNewOrReopened: false,
+        newSeverity: "critical",
+        financialDirection: "cost",
+        newFinancialAmount: 9000,
+        lastAlertedSeverity: "critical",
+        lastAlertedFinancialAmount: 5000,
+      }),
+    ).toBe(true);
+  });
+
+  it("severity increase re-alerts even with an unchanged/lower financial figure", () => {
+    expect(
+      shouldSendCriticalAlert({
+        isNewOrReopened: false,
+        newSeverity: "critical",
+        financialDirection: "cost",
+        newFinancialAmount: 5000,
+        lastAlertedSeverity: "high",
+        lastAlertedFinancialAmount: 5000,
+      }),
+    ).toBe(true);
+  });
+
+  it("a finding that has never actually triggered an alert before (lastAlertedSeverity undefined) is treated as new information", () => {
+    expect(
+      shouldSendCriticalAlert({
+        isNewOrReopened: false,
+        newSeverity: "critical",
+        financialDirection: "cost",
+        newFinancialAmount: 5000,
+        lastAlertedSeverity: undefined,
+        lastAlertedFinancialAmount: undefined,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("critical-alert throttling — integration through runCheck", () => {
+  beforeEach(() => {
+    fakeState.linkedResources = [{ resourceType: "google_ads_account", externalId: "678-018-7978" }];
+    fakeState.openFindings = [];
+    fakeState.accountHealthHistory = [];
+    fakeState.resolvedFindings = [];
+    fakeState.findingsQueryCount = 0;
+    fakeState.updateCalls = [];
+    vi.clearAllMocks();
+    sendCriticalAlertEmail.mockResolvedValue(true);
+  });
+
+  function criticalDraft(overrides: Record<string, unknown> = {}) {
+    return {
+      dedupeKey: "google_ads_campaign_spend_no_conversion:23785471436",
+      category: "account_health",
+      nature: "technical_issue",
+      severity: "critical",
+      confidenceScore: 85,
+      title: "Campaign spending with zero conversions",
+      observation: "...",
+      businessImpact: "...",
+      financialImpact: { amount: 56.4, currency: "EUR", period: "weekly", direction: "cost" },
+      recommendedActions: [],
+      requiresApproval: false,
+      evidence: { customerId: "678-018-7978" },
+      ...overrides,
+    };
+  }
+
+  // 1. new finding -> notification
+  it("1: a brand-new critical finding triggers an email", async () => {
+    createFinding.mockResolvedValueOnce({ id: "finding-new" });
+    googleAdsRunChecks.mockResolvedValueOnce([criticalDraft()]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(sendCriticalAlertEmail).toHaveBeenCalledTimes(1);
+    expect(sendCriticalAlertEmail).toHaveBeenCalledWith([expect.objectContaining({ dedupeKey: criticalDraft().dedupeKey })]);
+  });
+
+  // 2. same finding unchanged -> no new notification (the real Production
+  // case: €56.40 -> €57.39 across four re-detections, 32 -> 33 clicks)
+  it("2: an unchanged re-confirmation of an already-alerted finding sends no email", async () => {
+    fakeState.openFindings = [
+      openFinding({
+        category: "account_health",
+        evidence: {
+          dedupeKey: "google_ads_campaign_spend_no_conversion:23785471436",
+          customerId: "678-018-7978",
+          lastAlertedSeverity: "critical",
+          lastAlertedFinancialAmount: 56.4,
+        },
+      }),
+    ];
+    googleAdsRunChecks.mockResolvedValueOnce([criticalDraft({ financialImpact: { amount: 57.39, currency: "EUR", period: "weekly", direction: "cost" } })]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(sendCriticalAlertEmail).not.toHaveBeenCalled();
+  });
+
+  // 3. material worsening -> new notification, and the new alerted amount is persisted
+  it("3: a >=50% cost worsening since the last alert triggers a new email and updates the persisted lastAlerted snapshot", async () => {
+    fakeState.openFindings = [
+      openFinding({
+        category: "account_health",
+        evidence: {
+          dedupeKey: "google_ads_campaign_spend_no_conversion:23785471436",
+          customerId: "678-018-7978",
+          lastAlertedSeverity: "critical",
+          lastAlertedFinancialAmount: 50,
+        },
+      }),
+    ];
+    googleAdsRunChecks.mockResolvedValueOnce([criticalDraft({ financialImpact: { amount: 90, currency: "EUR", period: "weekly", direction: "cost" } })]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(sendCriticalAlertEmail).toHaveBeenCalledTimes(1);
+    const persistedUpdate = fakeState.updateCalls.find(
+      (c) => c.table === findingsTable && (c.values.evidence as Record<string, unknown> | undefined)?.lastAlertedFinancialAmount === 90,
+    );
+    expect(persistedUpdate).toBeDefined();
+    expect((persistedUpdate!.values.evidence as Record<string, unknown>).lastAlertedSeverity).toBe("critical");
+  });
+
+  // 4. severity increased -> new notification (modeled as: previously open at
+  // a lower severity, never alerted, now re-evaluated as critical — see
+  // shouldSendCriticalAlert's lastAlertedSeverity-undefined fallback, the
+  // actual path this wiring takes since only critical findings are ever
+  // alerted on in the first place).
+  it("4: a finding that just became critical (no prior alert on record) triggers a new email", async () => {
+    fakeState.openFindings = [
+      openFinding({
+        category: "account_health",
+        evidence: { dedupeKey: "google_ads_campaign_spend_no_conversion:23785471436", customerId: "678-018-7978" },
+      }),
+    ];
+    googleAdsRunChecks.mockResolvedValueOnce([criticalDraft()]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(sendCriticalAlertEmail).toHaveBeenCalledTimes(1);
+  });
+
+  // 5. resolved -> reopened -> new notification
+  it("5: a finding resolved and then rediscovered (reopened) triggers a new email even though it was alerted on before", async () => {
+    const resolvedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    fakeState.openFindings = [];
+    fakeState.resolvedFindings = [
+      {
+        id: "finding-1",
+        category: "account_health",
+        evidence: {
+          dedupeKey: "google_ads_campaign_spend_no_conversion:23785471436",
+          customerId: "678-018-7978",
+          lastAlertedSeverity: "critical",
+          lastAlertedFinancialAmount: 56.4,
+        },
+        resolvedAt,
+      },
+    ];
+    // Same amount as last time it was alerted on — proves the reopen itself
+    // is what triggers the email, not a coincidental financial change.
+    googleAdsRunChecks.mockResolvedValueOnce([criticalDraft()]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    expect(sendCriticalAlertEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not persist a lastAlerted snapshot when sendCriticalAlertEmail reports failure (misconfigured Resend, etc.)", async () => {
+    sendCriticalAlertEmail.mockResolvedValueOnce(false);
+    createFinding.mockResolvedValueOnce({ id: "finding-new" });
+    googleAdsRunChecks.mockResolvedValueOnce([criticalDraft()]);
+
+    await runCheck("tenant-1", "quick_check");
+
+    const persistedUpdate = fakeState.updateCalls.find(
+      (c) => c.table === findingsTable && (c.values.evidence as Record<string, unknown> | undefined)?.lastAlertedSeverity,
+    );
+    expect(persistedUpdate).toBeUndefined();
   });
 });

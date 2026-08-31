@@ -143,6 +143,77 @@ const RESOURCE_LOOKUP_BY_PREFIX: Record<string, { resourceType: string; evidence
 const AUTO_RESOLVE_AFTER_MISSES = 2;
 const REOPEN_WINDOW_DAYS = 30;
 
+// ── Critical-alert throttling ────────────────────────────────────────
+// Root cause of the repetitive-email problem: the per-draft loop below
+// used to push every draft with severity "critical" into criticalDrafts
+// unconditionally — including a plain re-confirmation of an open finding
+// whose numbers hadn't materially moved (e.g. Google Ads spend €56.40 ->
+// €57.39, 32 -> 33 clicks, still 0 conversions). Every quick_check run
+// that re-detects an already-open critical finding re-sent the same email.
+//
+// Fix compares each re-confirmed critical finding against the LAST STATE
+// AN EMAIL WAS ACTUALLY SENT FOR (lastAlertedSeverity/
+// lastAlertedFinancialAmount, persisted into the finding's own `evidence`
+// jsonb — the existing flexible per-finding storage this file already
+// writes dedupeKey into, not a new column/table), not against the
+// previous run's raw numbers. Comparing against the last-*alerted* value
+// specifically (rather than run-over-run) is deliberate: it prevents a
+// slow drift (a few % every couple of hours) from ever individually
+// crossing the threshold while still adding up to a real change over a
+// day — the comparison baseline only moves when an alert actually fires.
+//
+// 50% reuses SIGNIFICANT_CHANGE_THRESHOLD from checks/google-ads-checks.ts
+// verbatim — the one "how much change counts as significant" convention
+// already established across this engine — not a new invented number.
+const CRITICAL_ALERT_MATERIAL_CHANGE_THRESHOLD = 0.5;
+
+// Same mapping as ai-analyst.ts's SEVERITY_RANK — redeclared locally
+// rather than exported/imported across files for one three-line constant.
+const SEVERITY_RANK: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0 };
+
+// Exported for direct testing, same rationale as isEligibleForMissTracking.
+// "cost" worsening = amount increasing; "opportunity" worsening = amount
+// shrinking (less upside available) — direction defaults to "cost" (the
+// only direction any critical deterministic finding in this codebase
+// currently uses) when financialImpact carries no explicit direction.
+export function isFinancialChangeMaterial(
+  direction: "cost" | "opportunity" | undefined,
+  newAmount: number | null | undefined,
+  lastAlertedAmount: number | null | undefined,
+): boolean {
+  if (typeof newAmount !== "number" || typeof lastAlertedAmount !== "number" || lastAlertedAmount <= 0) return false;
+  const change = (newAmount - lastAlertedAmount) / lastAlertedAmount;
+  if (direction === "opportunity") return change <= -CRITICAL_ALERT_MATERIAL_CHANGE_THRESHOLD;
+  return change >= CRITICAL_ALERT_MATERIAL_CHANGE_THRESHOLD;
+}
+
+// The four cases the founder specified:
+// A) new finding / D) reopened -> always alert (isNewOrReopened).
+// B) existing, unchanged -> no alert (falls through to `return false`).
+// C) existing, materially changed -> alert (severity increased, or the
+//    financial figure moved against the finding by >=50% since the last
+//    alert). lastAlertedSeverity === undefined means this finding has
+//    never actually triggered an email before (e.g. it just became
+//    critical, or predates this throttle) — treated as new information,
+//    same as a brand-new finding.
+export function shouldSendCriticalAlert(params: {
+  isNewOrReopened: boolean;
+  newSeverity: string;
+  financialDirection: "cost" | "opportunity" | undefined;
+  newFinancialAmount: number | null | undefined;
+  lastAlertedSeverity: string | undefined;
+  lastAlertedFinancialAmount: number | null | undefined;
+}): boolean {
+  if (params.isNewOrReopened) return true;
+  if (params.lastAlertedSeverity === undefined) return true;
+
+  const newRank = SEVERITY_RANK[params.newSeverity] ?? 0;
+  const lastRank = SEVERITY_RANK[params.lastAlertedSeverity] ?? 0;
+  if (newRank > lastRank) return true;
+
+  return isFinancialChangeMaterial(params.financialDirection, params.newFinancialAmount, params.lastAlertedFinancialAmount);
+}
+
 export function isNeverAutoResolved(dedupeKey: string): boolean {
   return NEVER_AUTO_RESOLVE_PREFIXES.some((prefix) => dedupeKey.startsWith(prefix));
 }
@@ -427,12 +498,24 @@ export async function runCheck(
     // collapse is for.
     const handledThisRun = new Set<string>();
 
+    // Populated below for every critical draft this run decides to actually
+    // alert on (see shouldSendCriticalAlert) — used after sendCriticalAlertEmail
+    // to persist "this is the state we last emailed about" onto each
+    // finding's own evidence, so the NEXT run's re-confirmation has
+    // something to compare against instead of re-alerting on an unchanged
+    // situation.
+    const alertedFindingIds: Array<{ id: string; draft: FindingDraft; evidenceAfterUpdate: Record<string, unknown> }> = [];
+
     for (const draft of drafts) {
       const key = `${draft.category}:${draft.dedupeKey}`;
       if (handledThisRun.has(key)) continue;
       handledThisRun.add(key);
 
       const existing = openByKey.get(key);
+      let findingId: string;
+      let isNewOrReopened: boolean;
+      let priorEvidence: Record<string, unknown> | null = null;
+      let evidenceAfterUpdate: Record<string, unknown>;
 
       if (existing) {
         // Re-confirming an open finding refreshes its severity/confidence/
@@ -446,6 +529,18 @@ export async function runCheck(
         // the run that last confirmed it. missedCount resets to 0 — being
         // re-detected after a miss (or several) means it's still an active,
         // ongoing issue, not a candidate for auto-resolution anymore.
+        //
+        // Evidence merge preserves existing.evidence first, THEN spreads
+        // draft.evidence over it (fresh check data wins for keys the check
+        // itself controls) — previously this overwrote evidence entirely,
+        // which would have silently discarded lastAlertedSeverity/
+        // lastAlertedFinancialAmount (below) on every single re-confirmation,
+        // making the alert-throttle comparison meaningless from the second
+        // run onward.
+        isNewOrReopened = false;
+        priorEvidence = (existing.evidence ?? null) as Record<string, unknown> | null;
+        findingId = existing.id;
+        evidenceAfterUpdate = { ...(existing.evidence ?? {}), ...(draft.evidence ?? {}), dedupeKey: draft.dedupeKey };
         await db
           .update(findingsTable)
           .set({
@@ -453,7 +548,7 @@ export async function runCheck(
             confidenceScore: draft.confidenceScore,
             severity: draft.severity,
             observation: draft.observation,
-            evidence: { ...(draft.evidence ?? {}), dedupeKey: draft.dedupeKey },
+            evidence: evidenceAfterUpdate,
             missedCount: 0,
             updatedAt: new Date(),
           })
@@ -461,6 +556,7 @@ export async function runCheck(
       } else {
         const reopenCandidate = resolvedByKey.get(key);
         const { dedupeKey, evidence, ...rest } = draft;
+        isNewOrReopened = true;
 
         if (reopenCandidate) {
           // Same underlying issue resurfaced within the reopen window — reuse
@@ -473,6 +569,8 @@ export async function runCheck(
           // draft per key per run, but this stays as a second line of
           // defense either way.
           resolvedByKey.delete(key);
+          findingId = reopenCandidate.id;
+          evidenceAfterUpdate = { ...(evidence ?? {}), dedupeKey };
           await db
             .update(findingsTable)
             .set({
@@ -483,22 +581,41 @@ export async function runCheck(
               confidenceScore: draft.confidenceScore,
               severity: draft.severity,
               observation: draft.observation,
-              evidence: { ...(evidence ?? {}), dedupeKey },
+              evidence: evidenceAfterUpdate,
               updatedAt: new Date(),
             })
             .where(eq(findingsTable.id, reopenCandidate.id));
         } else {
-          await createFinding(tenantId, {
+          evidenceAfterUpdate = { ...(evidence ?? {}), dedupeKey };
+          const created = await createFinding(tenantId, {
             ...rest,
             checkRunId: run.id,
-            evidence: { ...(evidence ?? {}), dedupeKey },
+            evidence: evidenceAfterUpdate,
           });
+          findingId = created.id;
         }
       }
 
       if (draft.severity === "critical") {
         criticalCount += 1;
-        criticalDrafts.push(draft);
+
+        // A) new / D) reopened -> always alert. B) existing + unchanged ->
+        // no alert. C) existing + severity increased or the financial
+        // figure moved against the finding by >=50% since the last alert
+        // -> alert. See shouldSendCriticalAlert.
+        const shouldAlert = shouldSendCriticalAlert({
+          isNewOrReopened,
+          newSeverity: draft.severity,
+          financialDirection: draft.financialImpact?.direction,
+          newFinancialAmount: draft.financialImpact?.amount ?? null,
+          lastAlertedSeverity: priorEvidence?.lastAlertedSeverity as string | undefined,
+          lastAlertedFinancialAmount: priorEvidence?.lastAlertedFinancialAmount as number | null | undefined,
+        });
+
+        if (shouldAlert) {
+          criticalDrafts.push(draft);
+          alertedFindingIds.push({ id: findingId, draft, evidenceAfterUpdate });
+        }
       }
     }
 
@@ -544,7 +661,28 @@ export async function runCheck(
     await recordHealthScoreSnapshot(tenantId, run.id);
 
     if (criticalDrafts.length > 0) {
-      await sendCriticalAlertEmail(criticalDrafts);
+      const sent = await sendCriticalAlertEmail(criticalDrafts);
+
+      // Only record "we alerted on this state" once the email actually went
+      // out — if Resend/the API key is misconfigured (sendCriticalAlertEmail
+      // returns false), the next run should still see this as un-alerted
+      // and try again, not silently treat a failed send as delivered.
+      if (sent) {
+        for (const { id, draft, evidenceAfterUpdate } of alertedFindingIds) {
+          await db
+            .update(findingsTable)
+            .set({
+              evidence: {
+                ...evidenceAfterUpdate,
+                lastAlertedSeverity: draft.severity,
+                lastAlertedFinancialAmount: draft.financialImpact?.amount ?? null,
+                lastAlertedAt: new Date().toISOString(),
+              },
+              updatedAt: new Date(),
+            })
+            .where(eq(findingsTable.id, id));
+        }
+      }
     }
 
     await db
