@@ -1,14 +1,15 @@
 import { eq } from "drizzle-orm";
-import { getDb, clients, quotes, bookings, type Client } from "@bos/db";
+import { getDb, clients, quotes, bookings, transferRequests, type Client } from "@bos/db";
 
 // Deliberate, narrow exception to the module-boundary rule in ADR 0002:
 // this file runs read-only analytical queries directly against clients/
-// quotes/bookings (owned by the clients/quotes/bookings modules) instead of
-// going through their routers. Justification: attribution/KPI reporting is
-// inherently cross-module, and read-only aggregation carries none of the
-// risk direct writes would (a bug here can't corrupt booking/quote state).
-// Writes to those tables must still only ever happen through their own
-// module's service functions.
+// quotes/bookings/transfer_requests (owned by the clients/quotes/bookings/
+// transfer-requests modules) instead of going through their routers.
+// Justification: attribution/KPI reporting is inherently cross-module, and
+// read-only aggregation carries none of the risk direct writes would (a bug
+// here can't corrupt booking/quote/transfer_request state). Writes to those
+// tables must still only ever happen through their own module's service
+// functions.
 
 function deriveSource(client: Pick<Client, "utmCampaign" | "utmSource" | "gclid">): string {
   if (client.utmCampaign) return client.utmCampaign;
@@ -230,6 +231,89 @@ export async function getLtvBySource(tenantId: string): Promise<LtvSourceEntry[]
       averageRevenueCents: clientCount ? Math.round(totalRevenueCents / clientCount) : 0,
     }))
     .sort((a, b) => b.averageRevenueCents - a.averageRevenueCents);
+}
+
+// ── Transfer request funnel (WhatsApp/email intake, pre-quote) ──────────
+// getFunnelSummary above starts counting at `clients` — a transfer_request
+// that never reaches `converted_to_quote` is invisible there, which makes
+// every WhatsApp-originated request that's still being worked (or that
+// stalled) look like a dead end instead of a visible, in-progress stage.
+// This is the missing view: one row per transfer_request, bucketed by its
+// own real `status` column — six mutually exclusive, exhaustive buckets
+// covering all seven status enum values (cancelled/expired share a bucket,
+// per the founder's requested KPI names; every other status maps 1:1).
+//
+// Read-only, structural guarantee, not just a convention: this function
+// only ever SELECTs from transfer_requests — it has no code path that
+// writes to transfer_requests, quotes, bookings, or any revenue field.
+// Promotion to quote/booking stays exclusively the job of
+// transfer-requests' own acceptTransferRequest/modifyPriceForTransferRequest
+// and bookings' ensureBookingForApprovedTransferRequest, both untouched by
+// this file.
+export interface TransferRequestFunnel {
+  requestsReceived: number;
+  requestsInProgress: number;
+  requestsReadyForPricing: number;
+  requestsPendingApproval: number;
+  requestsConvertedToQuote: number;
+  requestsCancelledOrExpired: number;
+  total: number;
+}
+
+export async function getTransferRequestFunnel(tenantId: string): Promise<TransferRequestFunnel> {
+  const db = getDb();
+  const allRequests = await db.select().from(transferRequests).where(eq(transferRequests.tenantId, tenantId));
+
+  const counts: TransferRequestFunnel = {
+    requestsReceived: 0,
+    requestsInProgress: 0,
+    requestsReadyForPricing: 0,
+    requestsPendingApproval: 0,
+    requestsConvertedToQuote: 0,
+    requestsCancelledOrExpired: 0,
+    total: allRequests.length,
+  };
+
+  for (const request of allRequests) {
+    switch (request.status) {
+      // Still being gathered (pickup/destination/date/etc. incomplete) —
+      // the request has been "received" but isn't actionable yet.
+      case "collecting_info":
+        counts.requestsReceived += 1;
+        break;
+      // Complete, but not yet priced.
+      case "ready_for_pricing":
+        counts.requestsReadyForPricing += 1;
+        break;
+      // Priced, waiting on an admin ACCEPT/REJECT/MODIFY_PRICE decision.
+      case "pending_admin_approval":
+        counts.requestsPendingApproval += 1;
+        break;
+      // Admin-approved, booking snapshot created, but not yet promoted to
+      // an official quote — the one active "in motion" stage between
+      // approval and conversion.
+      case "approved":
+        counts.requestsInProgress += 1;
+        break;
+      case "converted_to_quote":
+        counts.requestsConvertedToQuote += 1;
+        break;
+      case "cancelled":
+      case "expired":
+        counts.requestsCancelledOrExpired += 1;
+        break;
+      default: {
+        // Exhaustiveness guard: if transferRequestStatusEnum ever gains a
+        // new value, this fails to typecheck instead of silently dropping
+        // that request from every bucket (breaking "mutually exclusive and
+        // exhaustive" — every request must land in exactly one bucket).
+        const exhaustiveCheck: never = request.status;
+        throw new Error(`Unhandled transfer_request status: ${String(exhaustiveCheck)}`);
+      }
+    }
+  }
+
+  return counts;
 }
 
 // ── Cost-per-stage (NOT wired to tRPC yet) ───────────────────────────────

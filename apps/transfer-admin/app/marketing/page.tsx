@@ -53,7 +53,14 @@ export default async function MarketingOverviewPage({
 
   const caller = await createServerCaller();
 
-  let healthScore, history, openFindings, funnel, conversionRates, revenueBySource, ltvBySource;
+  let healthScore,
+    history,
+    openFindings,
+    funnel,
+    conversionRates,
+    revenueBySource,
+    ltvBySource,
+    transferRequestFunnel;
   try {
     [
       healthScore,
@@ -63,6 +70,7 @@ export default async function MarketingOverviewPage({
       conversionRates,
       revenueBySource,
       ltvBySource,
+      transferRequestFunnel,
     ] = await Promise.all([
       caller.marketing.getHealthScore(),
       caller.marketing.listHealthScoreHistory(),
@@ -71,6 +79,7 @@ export default async function MarketingOverviewPage({
       caller.marketing.getConversionRates(),
       caller.marketing.getRevenueBySource(),
       caller.marketing.getLtvBySource(),
+      caller.marketing.getTransferRequestFunnel(),
     ]);
   } catch (error) {
     if (error instanceof TRPCError && error.code === "FORBIDDEN") {
@@ -222,6 +231,47 @@ export default async function MarketingOverviewPage({
               </table>
             ) : null}
           </>
+        )}
+      </section>
+
+      <section className="rounded border p-4">
+        <h2 className="mb-1 text-sm font-medium text-neutral-500 dark:text-neutral-400">
+          Transfer Request Funnel
+        </h2>
+        <p className="mb-3 text-xs text-neutral-400">
+          Every WhatsApp/email request currently in the pipeline, not just the ones that
+          became a quote — six mutually exclusive stages, always summing to the total below.
+        </p>
+
+        {transferRequestFunnel.total === 0 ? (
+          <p className="text-sm text-neutral-400">No transfer requests yet.</p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">Received</div>
+              <div className="text-lg font-medium">{transferRequestFunnel.requestsReceived}</div>
+            </div>
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">Ready for pricing</div>
+              <div className="text-lg font-medium">{transferRequestFunnel.requestsReadyForPricing}</div>
+            </div>
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">Pending approval</div>
+              <div className="text-lg font-medium">{transferRequestFunnel.requestsPendingApproval}</div>
+            </div>
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">In progress</div>
+              <div className="text-lg font-medium">{transferRequestFunnel.requestsInProgress}</div>
+            </div>
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">Converted to quote</div>
+              <div className="text-lg font-medium">{transferRequestFunnel.requestsConvertedToQuote}</div>
+            </div>
+            <div>
+              <div className="text-xs text-neutral-500 dark:text-neutral-400">Cancelled / expired</div>
+              <div className="text-lg font-medium">{transferRequestFunnel.requestsCancelledOrExpired}</div>
+            </div>
+          </div>
         )}
       </section>
 

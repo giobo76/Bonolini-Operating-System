@@ -78,6 +78,13 @@ export const marketingRouter = router({
     businessKpis.getLtvBySource(ctx.session.profile.tenantId),
   ),
 
+  // Transfer request funnel (WhatsApp/email intake, pre-quote) — see
+  // business-kpis.ts's getTransferRequestFunnel for why this exists
+  // separately from getFunnelSummary above.
+  getTransferRequestFunnel: adminProcedure.query(({ ctx }) =>
+    businessKpis.getTransferRequestFunnel(ctx.session.profile.tenantId),
+  ),
+
   // "Analyze Now" — runs the same check pipeline the scheduled jobs use,
   // synchronously, awaited by the caller. Slower than a normal mutation
   // (calls out to GA4/GTM/Search Console/Claude in sequence) but avoids
