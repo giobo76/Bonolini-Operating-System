@@ -71,8 +71,40 @@ export const transferRequests = pgTable("transfer_requests", {
   adminApprovedAt: timestamp("admin_approved_at", { withTimezone: true }),
   adminApprovedBy: uuid("admin_approved_by").references(() => profiles.id, { onDelete: "set null" }),
   // Only meaningful when status = 'cancelled' — free text rather than a
-  // second enum, to avoid multiplying status values (see README.md).
+  // second enum, to avoid multiplying status values (see README.md). Also
+  // used for an admin REJECT decision (value 'rejected_by_admin', or
+  // 'rejected_by_admin: <note>') — reusing this field rather than adding a
+  // 'rejected' status, per the founder-approved admin-decision design (see
+  // README.md's "Admin decision" section).
   cancelledReason: text("cancelled_reason"),
+  // The pricing engine's output (calculatedAmountCents) is never what gets
+  // approved verbatim — this is. Set atomically together with the
+  // pending_admin_approval -> approved transition (ACCEPT or MODIFY_PRICE),
+  // never in a separate step; null until an admin has decided. Every future
+  // consumer that represents the actually-approved service (quote, booking,
+  // calendar event) must read this column, never calculatedAmountCents —
+  // see README.md's "Admin decision" section for the full rationale.
+  finalAmountCents: integer("final_amount_cents"),
+  // Non-null only when finalAmountCents came from MODIFY_PRICE (an admin
+  // override), null on a plain ACCEPT — its presence alone distinguishes
+  // "approved as computed" from "approved at an admin-chosen price", no
+  // separate boolean needed. Mirrors the `reason` input already documented
+  // for bookings.overridePrice in docs/domain/13-api-contracts.md.
+  priceOverrideReason: text("price_override_reason"),
+  // One-way pickup -> destination drive time in minutes, from
+  // packages/core/src/maps-distance's calculateRoute([pickup, destination])
+  // — never the round-trip total pricingBreakdown.distanceLookup carries
+  // (a different, Sondrio-anchored convention pricing needs, structurally
+  // the wrong shape for this column). Null until the Availability
+  // connection successfully resolves it; feeds the future Booking Snapshot
+  // milestone's bookings.customer_trip_duration_minutes directly. See
+  // packages/core/src/transfer-requests/README.md's "Availability" section.
+  customerTripDurationMinutes: integer("customer_trip_duration_minutes"),
+  // Structured, admin-explainable Availability result — symmetric to
+  // pricingBreakdown. Never blocks status progression to
+  // pending_admin_approval; see AvailabilityBreakdown in
+  // packages/core/src/transfer-requests/schema.ts for the exact shape.
+  availabilityBreakdown: jsonb("availability_breakdown"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

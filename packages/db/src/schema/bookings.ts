@@ -2,6 +2,7 @@ import { pgTable, uuid, text, integer, timestamp, pgEnum } from "drizzle-orm/pg-
 import { tenants } from "./tenants";
 import { clients } from "./clients";
 import { quotes } from "./quotes";
+import { transferRequests } from "./transfer-requests";
 
 // Minimal skeleton — status + money + client link only. No dispatch, driver
 // assignment, or calendar logic (that's the real Booking Management feature,
@@ -24,6 +25,31 @@ export const bookings = pgTable("bookings", {
     .notNull()
     .references(() => clients.id, { onDelete: "cascade" }),
   quoteId: uuid("quote_id").references(() => quotes.id, { onDelete: "set null" }),
+  // Set only by ensureBookingForApprovedTransferRequest (Booking Snapshot
+  // milestone) — null for a booking created directly via createBooking()
+  // (the pre-existing admin/manual path, untouched by this milestone).
+  // Unique so a transfer_request can never produce more than one booking;
+  // on delete set null (never cascade) so deleting a transfer_request never
+  // deletes an already-confirmed booking, same convention as quoteId.
+  transferRequestId: uuid("transfer_request_id")
+    .references(() => transferRequests.id, { onDelete: "set null" })
+    .unique(),
+  // Historical snapshot of the confirmed service — copied from the
+  // transfer_request at approval time, never re-derived later. Nullable at
+  // the DDL level only for pre-existing rows created via createBooking()
+  // (which has no route to know these); ensureBookingForApprovedTransferRequest
+  // always populates pickup/destination/customerTripDurationMinutes, never
+  // leaves them null — see packages/core/src/bookings/service.ts.
+  pickup: text("pickup"),
+  destination: text("destination"),
+  pickupAddress: text("pickup_address"),
+  destinationAddress: text("destination_address"),
+  // One-way pickup -> destination minutes, same convention as
+  // transfer_requests.customer_trip_duration_minutes — never the round-trip
+  // pricing convention. Never null for a booking created by
+  // ensureBookingForApprovedTransferRequest (resolved via Maps fallback if
+  // the transfer_request's own value was null).
+  customerTripDurationMinutes: integer("customer_trip_duration_minutes"),
   status: bookingStatusEnum("status").notNull().default("confirmed"),
   currency: text("currency").notNull().default("EUR"),
   depositAmountCents: integer("deposit_amount_cents"),

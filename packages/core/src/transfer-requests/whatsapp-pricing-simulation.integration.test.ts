@@ -441,6 +441,18 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
     // handling, already proven in maps-distance/service.test.ts.
     process.env.GOOGLE_MAPS_API_KEY = "test-key-do-not-use";
     vi.stubGlobal("fetch", fetchMock);
+    // First real fetch call: Availability's one-way customerTripDuration
+    // (Sondrio -> Livigno only, a single leg) — runs BEFORE pricing in the
+    // founder-confirmed sequence (Maps one-way -> Availability -> Pricing).
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          routes: [{ legs: [{ distanceMeters: 68400, duration: "4740s" }] }], // Sondrio -> Livigno: 68.4km / 79min
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    // Second real fetch call: pricing's own round-trip lookup (unchanged).
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -504,11 +516,22 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
     // reaches maps-distance at all when its own first calculatePrice()
     // returned manualRequiredReason "distance_not_provided" (the gate
     // condition in transfer-requests/service.ts) — the fact this real
-    // fetch call happened is itself proof that gate fired. Exactly one
-    // real (mocked-at-the-boundary) HTTP call, with the real request shape
-    // calculateRoute() builds.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, requestInit] = fetchMock.mock.calls[0]!;
+    // fetch call happened is itself proof that gate fired. Two real
+    // (mocked-at-the-boundary) HTTP calls now: Availability's one-way
+    // customerTripDuration first, pricing's round-trip lookup second.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const [availabilityUrl, availabilityRequestInit] = fetchMock.mock.calls[0]!;
+    expect(availabilityUrl).toBe("https://routes.googleapis.com/directions/v2:computeRoutes");
+    const availabilityRequestBody = JSON.parse((availabilityRequestInit as RequestInit).body as string);
+    expect(availabilityRequestBody).toMatchObject({
+      origin: { address: "Sondrio, Italia" },
+      destination: { address: "Livigno, Italia" },
+      travelMode: "DRIVE",
+    });
+    expect(availabilityRequestBody.intermediates).toEqual([]); // one-way, no intermediate stop
+
+    const [url, requestInit] = fetchMock.mock.calls[1]!;
     expect(url).toBe("https://routes.googleapis.com/directions/v2:computeRoutes");
     const requestBody = JSON.parse((requestInit as RequestInit).body as string);
     expect(requestBody).toMatchObject({
@@ -517,6 +540,20 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
       intermediates: [{ address: "Livigno, Italia" }],
       travelMode: "DRIVE",
     });
+
+    // Availability: verified, feasible (no previous service in this
+    // milestone — see runAvailabilityForTransferRequest's own doc comment
+    // on why previousService is always null today), and the one-way
+    // customerTripDurationMinutes is exactly the single-leg duration — not
+    // pricing's own round-trip total (158 min, asserted separately below).
+    expect(priced.customerTripDurationMinutes).toBe(79);
+    const availabilityBreakdown = priced.availabilityBreakdown as Record<string, unknown>;
+    expect(availabilityBreakdown.status).toBe("verified");
+    expect(availabilityBreakdown.customerTripDuration).toMatchObject({ status: "ok", durationMinutes: 79 });
+    expect(availabilityBreakdown.relocation).toMatchObject({ status: "not_applicable", origin: "Sondrio" });
+    const feasibility = availabilityBreakdown.feasibility as Record<string, unknown>;
+    expect(feasibility.feasible).toBe(true);
+    expect(feasibility.reason).toBe("no_previous_service");
 
     // customerType resolved automatically from the client's phone.
     expect(determineCustomerType(TEST_PHONE_LIVIGNO)).toBe("foreign");

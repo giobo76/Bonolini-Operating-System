@@ -1,0 +1,26 @@
+-- Bonolini OS — Drizzle Kit bookkeeping baseline (no schema change)
+--
+-- Context: migrations 0006-0013 were hand-authored (see each file's own
+-- header comment) because no Node/drizzle-kit was available in the
+-- environment that produced them — drizzle-kit's own bookkeeping
+-- (packages/db/migrations/meta/) was never advanced past migration 0005 as
+-- a result. This is the first `pnpm db:generate` run since then (M1
+-- milestone), producing the correct current-schema snapshot
+-- (packages/db/migrations/meta/0006_snapshot.json — filename matches this
+-- journal entry's idx, not this file's own 0014 number; that's drizzle-kit's
+-- own convention, left untouched) so that the *next* real schema change
+-- generates a small, correct diff again instead of one spanning all the way
+-- back to 0005.
+--
+-- Deliberately empty of DDL: the diff drizzle-kit computed (schema as of
+-- 0005 -> schema today) exactly reproduces what 0006_marketing_leads.sql
+-- through 0013_bookings_transfer_request_snapshot.sql already did by hand.
+-- Applying that diff for real here would attempt to recreate tables/columns
+-- that already exist wherever 0006-0013 have already been applied.
+--
+-- 0000_init.sql through 0013_bookings_transfer_request_snapshot.sql remain
+-- the real, authoritative migration history — apply those by hand, in
+-- order, exactly as each of their own header comments says and as
+-- docs/adr/0003-supabase-postgres-single-db.md states ("migrations are the
+-- source of truth for schema"). This file is never part of that sequence;
+-- it only exists so drizzle-kit's tooling state is no longer stale.

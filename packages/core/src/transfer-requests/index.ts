@@ -5,8 +5,13 @@ export {
   listTransferRequestsForClient,
   computeMissingInformation,
   runPricingForTransferRequest,
+  runAvailabilityForTransferRequest,
+  acceptTransferRequest,
+  rejectTransferRequest,
+  modifyPriceForTransferRequest,
 } from "./service";
 export type { TransferRequestMessageInput } from "./service";
+export { transferRequestsRouter } from "./router";
 export * from "./schema";
 export type { TransferRequest, NewTransferRequest } from "@bos/db";
 

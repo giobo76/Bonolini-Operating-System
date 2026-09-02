@@ -43,6 +43,13 @@
       "when": 1786378841162,
       "tag": "0005_marketing_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787328035847,
+      "tag": "0014_drizzle_kit_baseline",
+      "breakpoints": true
     }
   ]
 }

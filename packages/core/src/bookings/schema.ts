@@ -33,3 +33,27 @@ export const listBookingsForClientSchema = z.object({ clientId: z.string().uuid(
 
 export type CreateBookingInput = z.infer<typeof createBookingSchema>;
 export type UpdateBookingInput = z.infer<typeof updateBookingSchema>;
+
+// ── Booking Snapshot (transfer_request -> booking) ───────────────────────
+// Input for ensureBookingForApprovedTransferRequest, called only from
+// transfer-requests' ACCEPT/MODIFY_PRICE — deliberately not CreateBookingInput
+// (that schema/mutation stays the pre-existing admin/manual booking path,
+// untouched by this milestone). Every field here is already resolved by the
+// caller (transfer-requests/service.ts): this function never calls Maps,
+// never interprets a timezone, never reads calculatedAmountCents — see
+// packages/core/src/transfer-requests/README.md's "Booking Snapshot"
+// section for the full rationale.
+export const ensureBookingSnapshotSchema = z.object({
+  transferRequestId: z.string().uuid(),
+  clientId: z.string().uuid(),
+  pickup: z.string().trim().min(1),
+  destination: z.string().trim().min(1),
+  pickupAddress: z.string().trim().min(1).nullable(),
+  destinationAddress: z.string().trim().min(1).nullable(),
+  customerTripDurationMinutes: z.number().int().nonnegative(),
+  scheduledAt: z.date(),
+  finalAmountCents: z.number().int().nonnegative(),
+  currency: z.string().min(1),
+});
+
+export type EnsureBookingSnapshotInput = z.infer<typeof ensureBookingSnapshotSchema>;

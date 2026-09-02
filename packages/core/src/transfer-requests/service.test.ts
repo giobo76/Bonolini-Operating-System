@@ -2,6 +2,7 @@ import { Param, StringChunk } from "drizzle-orm";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { TransferRequestExtractedFields } from "./schema";
 import type { RouteDistanceResult } from "../maps-distance";
+import type { PreviousService } from "../availability";
 
 // @bos/db is fully mocked, same convention as
 // packages/core/src/whatsapp/service.test.ts and
@@ -22,17 +23,20 @@ import type { RouteDistanceResult } from "../maps-distance";
 // primitive string/number chunks (drizzle's own Column reference chunk is
 // neither) to isolate the bound row id.
 
-const { fakeState, transferRequestsTable, whatsappMessagesTable, clientsTable } = vi.hoisted(() => {
+const { fakeState, transferRequestsTable, whatsappMessagesTable, clientsTable, bookingsTable } = vi.hoisted(() => {
   return {
     fakeState: {
       requests: [] as Array<Record<string, unknown>>,
       messages: [] as Array<Record<string, unknown>>,
       clients: [] as Array<Record<string, unknown>>,
+      bookings: [] as Array<Record<string, unknown>>,
       nextRequestId: 1,
+      nextBookingId: 1,
     },
     transferRequestsTable: { __name: "transferRequests" },
     whatsappMessagesTable: { __name: "whatsappMessages" },
     clientsTable: { __name: "clients" },
+    bookingsTable: { __name: "bookings" },
   };
 });
 
@@ -48,6 +52,7 @@ function thenable(rows: unknown[]) {
 function sourceFor(table: unknown): Array<Record<string, unknown>> {
   if (table === transferRequestsTable) return fakeState.requests;
   if (table === clientsTable) return fakeState.clients;
+  if (table === bookingsTable) return fakeState.bookings;
   return fakeState.messages;
 }
 
@@ -123,11 +128,68 @@ vi.mock("@bos/db", () => {
         },
       }),
     }),
-    // Backs insertNewTransferRequest's atomic `INSERT ... ON CONFLICT ...
-    // DO NOTHING RETURNING *`. Params are bound in the exact order
-    // service.ts's template interpolates them.
+    // Backs both raw INSERT ... ON CONFLICT ... DO NOTHING RETURNING *
+    // sites in this module graph: insertNewTransferRequest's (into
+    // transfer_requests) and, since this same @bos/db mock is shared with
+    // whatever ../bookings pulls in transitively, ensureBookingForApprovedTransferRequest's
+    // (into bookings, packages/core/src/bookings/service.ts) — distinguished
+    // by the literal SQL text in the query's own StringChunks, since the two
+    // statements bind a completely different number/order of params.
     execute: async (query: { queryChunks: unknown[] }) => {
+      const sqlText = query.queryChunks
+        .filter((chunk): chunk is InstanceType<typeof StringChunk> => chunk instanceof StringChunk)
+        .map((chunk) => chunk.value.join(""))
+        .join("");
       const params = query.queryChunks.filter((chunk) => !(chunk instanceof StringChunk));
+
+      if (sqlText.includes("insert into bookings")) {
+        const [
+          tenantId,
+          clientId,
+          transferRequestId,
+          pickup,
+          destination,
+          pickupAddress,
+          destinationAddress,
+          customerTripDurationMinutes,
+          scheduledAt,
+          finalAmountCents,
+          currency,
+        ] = params as [string, string, string, string, string, string | null, string | null, number, string, number, string];
+
+        const conflict = fakeState.bookings.some((b) => b.transferRequestId === transferRequestId);
+        if (conflict) return [];
+
+        const row: Record<string, unknown> = {
+          id: `booking-${fakeState.nextBookingId++}`,
+          tenantId,
+          clientId,
+          transferRequestId,
+          quoteId: null,
+          pickup,
+          destination,
+          pickupAddress,
+          destinationAddress,
+          customerTripDurationMinutes,
+          status: "confirmed",
+          currency,
+          depositAmountCents: null,
+          depositPaidAt: null,
+          finalAmountCents,
+          scheduledAt: new Date(scheduledAt),
+          completedAt: null,
+          cancelledAt: null,
+          invoicedAt: null,
+          invoiceAmountCents: null,
+          paidAt: null,
+          paidAmountCents: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        fakeState.bookings.push(row);
+        return [row];
+      }
+
       const [
         tenantId,
         clientId,
@@ -187,7 +249,11 @@ vi.mock("@bos/db", () => {
     transferRequests: transferRequestsTable,
     whatsappMessages: whatsappMessagesTable,
     clients: clientsTable,
-    assertOne: (rows: unknown[]) => rows[0],
+    bookings: bookingsTable,
+    assertOne: (rows: unknown[]) => {
+      if (rows.length === 0) throw new Error("Expected exactly one row, got none");
+      return rows[0];
+    },
     getDb: () => db,
   };
 });
@@ -211,9 +277,17 @@ const calculateGenericRouteRoundTrip = vi.fn(
   async (_pickup: string, _destination: string): Promise<RouteDistanceResult> => defaultMapsError,
 );
 const calculateComoTiranoRoundTrip = vi.fn(async (): Promise<RouteDistanceResult> => defaultMapsError);
+// Backs Availability's one-way customerTripDuration/relocation calls
+// (runAvailabilityForTransferRequest) — same default-error convention as
+// the two round-trip wrappers above, so every existing pricing-focused
+// test keeps its exact prior behavior (customerTripDurationMinutes simply
+// stays null, availabilityBreakdown.status "not_verified" only when a
+// previous service was actually given) unless a test overrides it.
+const calculateRoute = vi.fn(async (_waypoints: string[]): Promise<RouteDistanceResult> => defaultMapsError);
 vi.mock("../maps-distance", () => ({
   calculateGenericRouteRoundTrip: (pickup: string, destination: string) => calculateGenericRouteRoundTrip(pickup, destination),
   calculateComoTiranoRoundTrip: () => calculateComoTiranoRoundTrip(),
+  calculateRoute: (waypoints: string[]) => calculateRoute(waypoints),
 }));
 
 const {
@@ -221,6 +295,11 @@ const {
   processTransferRequestForMessageAndPrice,
   computeMissingInformation,
   runPricingForTransferRequest,
+  runAvailabilityForTransferRequest,
+  acceptTransferRequest,
+  rejectTransferRequest,
+  modifyPriceForTransferRequest,
+  getTransferRequest,
 } = await import("./service");
 
 function seedMessage(id: string, transferRequestId: string | null = null) {
@@ -244,13 +323,16 @@ beforeEach(() => {
   fakeState.requests = [];
   fakeState.messages = [];
   fakeState.clients = [];
+  fakeState.bookings = [];
   fakeState.nextRequestId = 1;
+  fakeState.nextBookingId = 1;
   calculateGenericRouteRoundTrip.mockClear();
   calculateComoTiranoRoundTrip.mockClear();
+  calculateRoute.mockClear();
 });
 
 describe("computeMissingInformation", () => {
-  it("requires pickup, destination, passengers, and date", () => {
+  it("requires pickup, destination, passengers, date, and time", () => {
     expect(
       computeMissingInformation({
         pickup: null,
@@ -260,13 +342,18 @@ describe("computeMissingInformation", () => {
         passengers: null,
         flightNumber: null,
       }),
-    ).toEqual(["pickup", "destination", "passengers", "date"]);
+    ).toEqual(["pickup", "destination", "passengers", "date", "time"]);
   });
 
-  it("additionally requires time when destination is an airport", () => {
+  // Availability milestone (founder decision): requestedTime is now
+  // required for EVERY route — not only "andata" towards an airport as in
+  // the original CChiefGrowthAI rule — because a candidate.startAt is
+  // needed to run Availability before pricing, and no default/invented
+  // time is ever acceptable.
+  it("requires time even for a route with no airport involved", () => {
     const missing = computeMissingInformation({
-      pickup: "Sondrio",
-      destination: "Malpensa",
+      pickup: "Milano",
+      destination: "Tirano",
       requestedDate: "2026-08-25",
       requestedTime: null,
       passengers: 2,
@@ -287,13 +374,13 @@ describe("computeMissingInformation", () => {
     expect(missing).toEqual(["flight_number"]);
   });
 
-  it("is empty when every required field is present and no airport is involved", () => {
+  it("is empty when every required field is present, including time, and no airport is involved", () => {
     expect(
       computeMissingInformation({
         pickup: "Milano",
         destination: "Tirano",
         requestedDate: "2026-08-25",
-        requestedTime: null,
+        requestedTime: "10:00",
         passengers: 2,
         flightNumber: null,
       }),
@@ -307,7 +394,7 @@ describe("processTransferRequestForMessage", () => {
     seedMessage("msg-1");
 
     const result = await processTransferRequestForMessage(
-      inputFor("msg-1", { pickup: "Milano", destination: "Tirano", date: "2026-08-25", passengers: 2 }),
+      inputFor("msg-1", { pickup: "Milano", destination: "Tirano", date: "2026-08-25", time: "10:00", passengers: 2 }),
     );
 
     expect(result.status).toBe("ready_for_pricing");
@@ -325,7 +412,7 @@ describe("processTransferRequestForMessage", () => {
     );
 
     expect(result.status).toBe("collecting_info");
-    expect(result.missingInformation).toEqual(["passengers", "date"]);
+    expect(result.missingInformation).toEqual(["passengers", "date", "time"]);
   });
 
   // C. three messages accumulate into the same transfer_request
@@ -337,7 +424,7 @@ describe("processTransferRequestForMessage", () => {
     const first = await processTransferRequestForMessage(
       inputFor("msg-1", { pickup: "Milano", destination: "Tirano" }),
     );
-    const second = await processTransferRequestForMessage(inputFor("msg-2", { date: "2026-08-25" }));
+    const second = await processTransferRequestForMessage(inputFor("msg-2", { date: "2026-08-25", time: "10:00" }));
     const third = await processTransferRequestForMessage(inputFor("msg-3", { passengers: 3 }));
 
     expect(second.id).toBe(first.id);
@@ -346,6 +433,7 @@ describe("processTransferRequestForMessage", () => {
       pickup: "Milano",
       destination: "Tirano",
       requestedDate: "2026-08-25",
+      requestedTime: "10:00",
       passengers: 3,
       status: "ready_for_pricing",
     });
@@ -805,7 +893,7 @@ describe("processTransferRequestForMessageAndPrice", () => {
     // Livigno matches no fixed-fare/Como-Tirano keyword and no distanceKm
     // is ever supplied by this connection -> manual_required.
     const result = await processTransferRequestForMessageAndPrice(
-      inputFor("msg-1", { pickup: "Sondrio", destination: "Livigno", date: "2026-09-20", passengers: 2 }),
+      inputFor("msg-1", { pickup: "Sondrio", destination: "Livigno", date: "2026-09-20", time: "10:00", passengers: 2 }),
     );
 
     expect(result.status).toBe("ready_for_pricing"); // never advanced
@@ -834,5 +922,652 @@ describe("processTransferRequestForMessageAndPrice", () => {
         inputFor("msg-1", { pickup: "Sondrio", destination: "Malpensa", date: "2026-09-20", time: "10:00", passengers: 4 }),
       ),
     ).rejects.toThrow(/client .* not found/);
+  });
+});
+
+describe("runAvailabilityForTransferRequest", () => {
+  function seedReadyForAvailability(overrides: Partial<Record<string, unknown>> = {}) {
+    fakeState.requests.push({
+      id: "request-1",
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      status: "ready_for_pricing",
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      requestedDate: "2026-09-20",
+      requestedTime: "08:00",
+      passengers: 4,
+      luggage: null,
+      flightNumber: null,
+      trainNumber: null,
+      hotel: null,
+      language: null,
+      intent: null,
+      missingInformation: [],
+      pricingStatus: "not_priced",
+      calculatedAmountCents: null,
+      currency: "EUR",
+      pricingBreakdown: null,
+      quoteId: null,
+      finalAmountCents: null,
+      priceOverrideReason: null,
+      adminApprovedAt: null,
+      adminApprovedBy: null,
+      cancelledReason: null,
+      customerTripDurationMinutes: null,
+      availabilityBreakdown: null,
+      ...overrides,
+    });
+  }
+
+  function mapsOk(durationMinutes: number): RouteDistanceResult {
+    return { status: "ok", provider: "google_routes_api", distanceKm: 1, durationMinutes, legs: [], error: null };
+  }
+
+  function breakdownOf(result: { availabilityBreakdown: unknown }) {
+    return result.availabilityBreakdown as {
+      status: string;
+      customerTripDuration: Record<string, unknown>;
+      relocation: Record<string, unknown>;
+      previousServiceEndAt: string | null;
+      feasibility: Record<string, unknown> | null;
+    };
+  }
+
+  // 1
+  it("1: no previous service — Sondrio -> Malpensa, one-way duration mocked, feasible", async () => {
+    seedReadyForAvailability();
+    calculateRoute.mockResolvedValueOnce(mapsOk(150));
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", null);
+
+    expect(calculateRoute).toHaveBeenCalledTimes(1);
+    expect(calculateRoute).toHaveBeenCalledWith(["Sondrio", "Malpensa"]); // 11: one-way, never 3 waypoints
+    expect(result.customerTripDurationMinutes).toBe(150);
+    const breakdown = breakdownOf(result);
+    expect(breakdown.status).toBe("verified");
+    expect(breakdown.relocation).toMatchObject({ status: "not_applicable", origin: "Sondrio" });
+    expect(breakdown.feasibility).toMatchObject({ feasible: true, reason: "no_previous_service" });
+  });
+
+  // 2
+  it("2: previous service Sondrio->Malpensa, candidate pickup Malpensa -> relocation is Malpensa->candidate.pickup", async () => {
+    seedReadyForAvailability({ pickup: "Malpensa", destination: "Aprica", requestedTime: "12:00" });
+    calculateRoute
+      .mockResolvedValueOnce(mapsOk(60)) // customerTripDuration Malpensa -> Aprica
+      .mockResolvedValueOnce(mapsOk(5)); // relocation Malpensa -> Malpensa (previous destination == candidate pickup)
+
+    const previousService: PreviousService = {
+      startAt: new Date("2026-09-20T08:00:00"),
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      customerTripDurationMinutes: 150,
+    };
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", previousService);
+
+    expect(calculateRoute).toHaveBeenNthCalledWith(1, ["Malpensa", "Aprica"]);
+    expect(calculateRoute).toHaveBeenNthCalledWith(2, ["Malpensa", "Malpensa"]); // relocationOrigin = previous.destination
+    const breakdown = breakdownOf(result);
+    expect(breakdown.relocation).toMatchObject({ status: "ok", origin: "Malpensa", durationMinutes: 5 });
+    expect(breakdown.status).toBe("verified");
+  });
+
+  // 3, 10
+  it("3/10: previous service Aprica->Sondrio, candidate pickup Milano -> relocation Sondrio->Milano (previous really ends at Sondrio), never Aprica->Sondrio->Milano", async () => {
+    seedReadyForAvailability({ pickup: "Milano", destination: "Roma", requestedTime: "14:30" });
+    calculateRoute
+      .mockResolvedValueOnce(mapsOk(90)) // customerTripDuration Milano -> Roma
+      .mockResolvedValueOnce(mapsOk(70)); // relocation Sondrio -> Milano
+
+    const previousService: PreviousService = {
+      startAt: new Date("2026-09-20T10:00:00"),
+      pickup: "Aprica",
+      destination: "Sondrio", // the previous service genuinely ends at Sondrio — not assumed
+      customerTripDurationMinutes: 45,
+    };
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", previousService);
+
+    // The relocation call is a plain 2-waypoint route Sondrio -> Milano
+    // (the previous service's REAL destination) — never a 3-waypoint
+    // Aprica -> Sondrio -> Milano detour, and never Aprica -> Milano
+    // either (that would ignore where the vehicle really ended up).
+    expect(calculateRoute).toHaveBeenNthCalledWith(2, ["Sondrio", "Milano"]);
+    const breakdown = breakdownOf(result);
+    expect(breakdown.relocation).toMatchObject({ status: "ok", origin: "Sondrio", durationMinutes: 70 });
+  });
+
+  // 4, 9 (buffer boundary — feasible)
+  it("4: a 60-minute gap between previous service end and candidate start (relocation 0) is exactly feasible", async () => {
+    seedReadyForAvailability({
+      pickup: "Malpensa",
+      destination: "Sondrio",
+      requestedDate: "2026-09-20",
+      requestedTime: "11:30",
+    });
+    calculateRoute.mockResolvedValueOnce(mapsOk(60)).mockResolvedValueOnce(mapsOk(0));
+
+    const previousService: PreviousService = {
+      startAt: new Date("2026-09-20T10:00:00"),
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      customerTripDurationMinutes: 30, // ends 10:30
+    };
+
+    const before = { ...fakeState.requests[0] };
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", previousService);
+
+    const breakdown = breakdownOf(result);
+    expect(breakdown.feasibility).toMatchObject({ feasible: true, marginMinutes: 0 });
+
+    // 9: every original field is untouched — only customerTripDurationMinutes/
+    // availabilityBreakdown/updatedAt change.
+    expect(result.pickup).toBe(before.pickup);
+    expect(result.destination).toBe(before.destination);
+    expect(result.requestedDate).toBe(before.requestedDate);
+    expect(result.requestedTime).toBe(before.requestedTime);
+    expect(result.passengers).toBe(before.passengers);
+    expect(result.pricingStatus).toBe(before.pricingStatus);
+    expect(result.calculatedAmountCents).toBe(before.calculatedAmountCents);
+    expect(result.status).toBe("ready_for_pricing"); // availability never advances status
+  });
+
+  // 5 (buffer boundary — not feasible, one minute short)
+  it("5: a 59-minute gap (one short of the 60-minute buffer) is NOT feasible", async () => {
+    seedReadyForAvailability({
+      pickup: "Malpensa",
+      destination: "Sondrio",
+      requestedDate: "2026-09-20",
+      requestedTime: "11:29",
+    });
+    calculateRoute.mockResolvedValueOnce(mapsOk(60)).mockResolvedValueOnce(mapsOk(0));
+
+    const previousService: PreviousService = {
+      startAt: new Date("2026-09-20T10:00:00"),
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      customerTripDurationMinutes: 30, // ends 10:30
+    };
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", previousService);
+
+    const breakdown = breakdownOf(result);
+    expect(breakdown.feasibility).toMatchObject({ feasible: false, marginMinutes: -1 });
+  });
+
+  // 6
+  it("6: a Maps failure for the customer trip duration is recorded structurally — never invented, never blocks feasibility", async () => {
+    seedReadyForAvailability();
+    calculateRoute.mockResolvedValueOnce({
+      status: "error",
+      provider: "google_routes_api",
+      distanceKm: null,
+      durationMinutes: null,
+      legs: [],
+      error: { code: "request_failed", message: "network down" },
+    });
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", null);
+
+    expect(result.customerTripDurationMinutes).toBeNull();
+    const breakdown = breakdownOf(result);
+    expect(breakdown.customerTripDuration).toMatchObject({ status: "error", errorCode: "request_failed" });
+    // No previous service -> feasibility doesn't depend on the candidate's
+    // own trip duration, so it is still verified and feasible.
+    expect(breakdown.status).toBe("verified");
+    expect(breakdown.feasibility).toMatchObject({ feasible: true, reason: "no_previous_service" });
+  });
+
+  // 7
+  it("7: a Maps failure for relocation leaves availability not_verified — no feasibility decision invented, no return-to-Sondrio guess", async () => {
+    seedReadyForAvailability({ pickup: "Milano", destination: "Sondrio", requestedTime: "12:00" });
+    calculateRoute
+      .mockResolvedValueOnce(mapsOk(90)) // customerTripDuration succeeds
+      .mockResolvedValueOnce({
+        status: "error",
+        provider: "google_routes_api",
+        distanceKm: null,
+        durationMinutes: null,
+        legs: [],
+        error: { code: "no_route_found", message: "no route" },
+      });
+
+    const previousService: PreviousService = {
+      startAt: new Date("2026-09-20T08:00:00"),
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      customerTripDurationMinutes: 30,
+    };
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", previousService);
+
+    const breakdown = breakdownOf(result);
+    expect(breakdown.status).toBe("not_verified");
+    expect(breakdown.feasibility).toBeNull();
+    expect(breakdown.relocation).toMatchObject({ status: "error", origin: "Malpensa", errorCode: "no_route_found" });
+    // customerTripDurationMinutes is unaffected by the relocation failure —
+    // the two Maps calls are independent.
+    expect(result.customerTripDurationMinutes).toBe(90);
+  });
+
+  it("is a no-op when the request is not ready_for_pricing", async () => {
+    seedReadyForAvailability({ status: "collecting_info" });
+
+    const result = await runAvailabilityForTransferRequest("tenant-1", "request-1", null);
+
+    expect(result.status).toBe("collecting_info");
+    expect(result.availabilityBreakdown).toBeNull();
+    expect(calculateRoute).not.toHaveBeenCalled();
+  });
+
+  it("throws when the transfer_request does not exist", async () => {
+    await expect(runAvailabilityForTransferRequest("tenant-1", "missing", null)).rejects.toThrow();
+  });
+});
+
+// 8, 12
+describe("Availability does not block pricing, and the two Maps calls stay independent", () => {
+  function seedClient(overrides: Partial<Record<string, unknown>> = {}) {
+    fakeState.clients.push({ id: "client-1", tenantId: "tenant-1", phone: "+999000000001", ...overrides });
+  }
+
+  // 8
+  it("8: a total Availability failure (Maps down for both calls) still reaches pending_admin_approval for a fixed fare", async () => {
+    seedMessage("msg-1");
+    seedClient();
+    // calculateRoute already defaults to defaultMapsError for every call in
+    // this file (see the vi.mock above) — deliberately never overridden
+    // here, to prove Availability failing completely does not stop pricing.
+
+    const result = await processTransferRequestForMessageAndPrice(
+      inputFor("msg-1", { pickup: "Sondrio", destination: "Malpensa", date: "2026-09-20", time: "10:00", passengers: 4 }),
+    );
+
+    expect(result.customerTripDurationMinutes).toBeNull();
+    expect((result.availabilityBreakdown as Record<string, unknown>).status).toBe("verified"); // no previous service -> still a real decision
+    expect(result.status).toBe("pending_admin_approval");
+    expect(result.pricingStatus).toBe("fixed");
+    expect(result.calculatedAmountCents).toBe(25000);
+  });
+
+  // 12
+  it("12: pricing's own round-trip Maps call (calculateGenericRouteRoundTrip) runs independently of Availability's one-way call", async () => {
+    seedMessage("msg-1");
+    seedClient();
+    calculateRoute.mockResolvedValueOnce({
+      status: "ok",
+      provider: "google_routes_api",
+      distanceKm: 42,
+      durationMinutes: 55, // one-way, Availability's number
+      legs: [],
+      error: null,
+    });
+    calculateGenericRouteRoundTrip.mockResolvedValueOnce({
+      status: "ok",
+      provider: "google_routes_api",
+      distanceKm: 84,
+      durationMinutes: 110, // round-trip total, pricing's own number — deliberately different
+      legs: [],
+      error: null,
+    });
+
+    const result = await processTransferRequestForMessageAndPrice(
+      inputFor("msg-1", { pickup: "Sondrio", destination: "Livigno", date: "2026-09-20", time: "09:00", passengers: 2 }),
+    );
+
+    expect(calculateRoute).toHaveBeenCalledWith(["Sondrio", "Livigno"]);
+    expect(calculateGenericRouteRoundTrip).toHaveBeenCalledWith("Sondrio", "Livigno");
+    // 11: the two numbers never mix — customerTripDurationMinutes is the
+    // one-way 55, pricing's distanceKmUsed comes from the round-trip 84km.
+    expect(result.customerTripDurationMinutes).toBe(55);
+    expect((result.pricingBreakdown as Record<string, unknown>).distanceKmUsed).toBe(84);
+    expect(result.pricingStatus).toBe("calculated_km");
+  });
+});
+
+describe("Admin decision — accept / reject / modifyPrice", () => {
+  const ADMIN_ID = "admin-profile-1";
+
+  function seedPendingApproval(overrides: Partial<Record<string, unknown>> = {}) {
+    fakeState.requests.push({
+      id: "request-1",
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      status: "pending_admin_approval",
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      requestedDate: "2026-09-15",
+      requestedTime: "10:00",
+      passengers: 4,
+      luggage: null,
+      flightNumber: null,
+      trainNumber: null,
+      hotel: null,
+      language: null,
+      intent: null,
+      missingInformation: [],
+      pricingStatus: "fixed",
+      calculatedAmountCents: 25000,
+      currency: "EUR",
+      pricingBreakdown: { matchedRule: "fixed_airport_malpensa" },
+      finalAmountCents: null,
+      priceOverrideReason: null,
+      adminApprovedAt: null,
+      adminApprovedBy: null,
+      cancelledReason: null,
+      // Booking Snapshot: pre-resolved by default (as if Availability had
+      // already run) so existing ACCEPT/MODIFY_PRICE tests — which now
+      // also create a booking as a side effect — never hit the Maps
+      // fallback path unless a test deliberately overrides this to null.
+      pickupAddress: null,
+      destinationAddress: null,
+      customerTripDurationMinutes: 45,
+      ...overrides,
+    });
+  }
+
+  const TRIP_FIELDS = ["pickup", "destination", "requestedDate", "requestedTime", "passengers"] as const;
+
+  function snapshotTripFields(row: Record<string, unknown>) {
+    return Object.fromEntries(TRIP_FIELDS.map((field) => [field, row[field]]));
+  }
+
+  // A
+  it("A: ACCEPT on pending_admin_approval moves to approved and sets the admin-decision fields", async () => {
+    seedPendingApproval();
+
+    const result = await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+    expect(result.status).toBe("approved");
+    expect(result.finalAmountCents).toBe(25000);
+    expect(result.priceOverrideReason).toBeNull(); // L
+    expect(result.adminApprovedAt).toBeInstanceOf(Date);
+    expect(result.adminApprovedBy).toBe(ADMIN_ID);
+  });
+
+  // B
+  it("B: REJECT on pending_admin_approval moves to cancelled with a rejected_by_admin reason", async () => {
+    seedPendingApproval();
+
+    const result = await rejectTransferRequest("tenant-1", "request-1");
+
+    expect(result.status).toBe("cancelled");
+    expect(result.cancelledReason).toBe("rejected_by_admin");
+    expect(result.finalAmountCents).toBeNull();
+  });
+
+  it("B2: REJECT with a note appends it after the fixed rejected_by_admin marker", async () => {
+    seedPendingApproval();
+
+    const result = await rejectTransferRequest("tenant-1", "request-1", "cliente non affidabile");
+
+    expect(result.cancelledReason).toBe("rejected_by_admin: cliente non affidabile");
+  });
+
+  // C, D, E, N
+  it("C/D/E/N: MODIFY PRICE on pending_admin_approval sets finalAmountCents to the admin's price, leaves calculatedAmountCents untouched, and persists", async () => {
+    seedPendingApproval(); // calculatedAmountCents: 25000
+
+    const result = await modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "sconto cliente abituale");
+
+    expect(result.status).toBe("approved");
+    expect(result.finalAmountCents).toBe(22000); // C
+    expect(result.calculatedAmountCents).toBe(25000); // D — engine output untouched
+    expect(result.finalAmountCents).not.toBe(result.calculatedAmountCents); // N
+    expect(result.priceOverrideReason).toBe("sconto cliente abituale");
+    expect(result.adminApprovedAt).toBeInstanceOf(Date);
+    expect(result.adminApprovedBy).toBe(ADMIN_ID);
+
+    // E/O — independent re-read confirms persistence, not just the returned object.
+    const reread = await getTransferRequest("tenant-1", "request-1");
+    expect(reread?.finalAmountCents).toBe(22000);
+    expect(reread?.calculatedAmountCents).toBe(25000);
+    expect(reread?.priceOverrideReason).toBe("sconto cliente abituale");
+  });
+
+  // F
+  describe("F: actions on a status other than pending_admin_approval throw", () => {
+    const INVALID_STATUSES = ["collecting_info", "ready_for_pricing", "converted_to_quote", "expired"] as const;
+
+    for (const status of INVALID_STATUSES) {
+      it(`accept on ${status} throws`, async () => {
+        seedPendingApproval({ status });
+        await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID)).rejects.toThrow(
+          new RegExp(status),
+        );
+      });
+
+      it(`reject on ${status} throws`, async () => {
+        seedPendingApproval({ status });
+        await expect(rejectTransferRequest("tenant-1", "request-1")).rejects.toThrow(new RegExp(status));
+      });
+
+      it(`modifyPrice on ${status} throws`, async () => {
+        seedPendingApproval({ status });
+        await expect(
+          modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 20000, "motivo"),
+        ).rejects.toThrow(new RegExp(status));
+      });
+    }
+  });
+
+  // G
+  it("G: a second identical ACCEPT is idempotent — no-op, same result", async () => {
+    seedPendingApproval();
+
+    const first = await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+    const second = await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+    expect(second).toEqual(first);
+  });
+
+  // H
+  it("H: a second identical REJECT is idempotent — no-op, same result", async () => {
+    seedPendingApproval();
+
+    const first = await rejectTransferRequest("tenant-1", "request-1", "nota");
+    const second = await rejectTransferRequest("tenant-1", "request-1");
+
+    expect(second).toEqual(first);
+  });
+
+  // I
+  it("I: MODIFY PRICE after the request is already approved throws — the window closes at the first decision", async () => {
+    seedPendingApproval();
+    await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+    await expect(
+      modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 21000, "secondo tentativo"),
+    ).rejects.toThrow(/approved/);
+  });
+
+  it("I2: MODIFY PRICE after a first MODIFY PRICE also throws — not just after a plain ACCEPT", async () => {
+    seedPendingApproval();
+    await modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "primo sconto");
+
+    await expect(
+      modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 21000, "secondo sconto"),
+    ).rejects.toThrow(/approved/);
+  });
+
+  // J
+  it("J: none of the three actions touch pickup/destination/date/time/passengers", async () => {
+    seedPendingApproval();
+    const before = snapshotTripFields(fakeState.requests[0]!);
+    const acceptResult = await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+    expect(snapshotTripFields(acceptResult)).toEqual(before);
+
+    fakeState.requests = [];
+    seedPendingApproval();
+    const rejectResult = await rejectTransferRequest("tenant-1", "request-1");
+    expect(snapshotTripFields(rejectResult)).toEqual(before);
+
+    fakeState.requests = [];
+    seedPendingApproval();
+    const modifyResult = await modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "motivo");
+    expect(snapshotTripFields(modifyResult)).toEqual(before);
+  });
+
+  // K
+  it("K: REJECT on a request already cancelled for a different reason (superseded_by_new_request) throws", async () => {
+    seedPendingApproval({ status: "cancelled", cancelledReason: "superseded_by_new_request" });
+
+    await expect(rejectTransferRequest("tenant-1", "request-1")).rejects.toThrow(/cancelled/);
+  });
+
+  // M
+  it("M: MODIFY PRICE with an empty reason throws", async () => {
+    seedPendingApproval();
+
+    await expect(modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "")).rejects.toThrow(
+      /reason/,
+    );
+    await expect(modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "   ")).rejects.toThrow(
+      /reason/,
+    );
+  });
+
+  it("throws when the transfer_request does not exist (accept/reject/modifyPrice)", async () => {
+    await expect(acceptTransferRequest("tenant-1", "missing", ADMIN_ID)).rejects.toThrow();
+    await expect(rejectTransferRequest("tenant-1", "missing")).rejects.toThrow();
+    await expect(modifyPriceForTransferRequest("tenant-1", "missing", ADMIN_ID, 20000, "motivo")).rejects.toThrow();
+  });
+
+  // ── Booking Snapshot (transfer_request approved -> confirmed booking) ──
+  describe("Booking Snapshot — ACCEPT/MODIFY_PRICE create a confirmed booking", () => {
+    function mapsOk(durationMinutes: number): RouteDistanceResult {
+      return { status: "ok", provider: "google_routes_api", distanceKm: 10, durationMinutes, legs: [], error: null };
+    }
+
+    function onlyBooking() {
+      expect(fakeState.bookings).toHaveLength(1);
+      return fakeState.bookings[0]!;
+    }
+
+    it("N1: ACCEPT creates a confirmed booking snapshot with every expected field", async () => {
+      seedPendingApproval({ pickupAddress: "Via Roma 1, Sondrio", destinationAddress: "Aeroporto di Malpensa" });
+
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+      const booking = onlyBooking();
+      expect(booking.transferRequestId).toBe("request-1");
+      expect(booking.tenantId).toBe("tenant-1");
+      expect(booking.clientId).toBe("client-1");
+      expect(booking.pickup).toBe("Sondrio");
+      expect(booking.destination).toBe("Malpensa");
+      expect(booking.pickupAddress).toBe("Via Roma 1, Sondrio");
+      expect(booking.destinationAddress).toBe("Aeroporto di Malpensa");
+      expect(booking.customerTripDurationMinutes).toBe(45);
+      expect(booking.finalAmountCents).toBe(25000); // calculatedAmountCents, plain ACCEPT
+      expect(booking.currency).toBe("EUR");
+      expect(booking.quoteId).toBeNull();
+      expect(booking.status).toBe("confirmed");
+      expect((booking.scheduledAt as Date).toISOString()).toBe("2026-09-15T08:00:00.000Z"); // CEST, +02:00
+    });
+
+    it("N2: MODIFY_PRICE creates a booking at the admin-overridden price, not the engine's own", async () => {
+      seedPendingApproval();
+
+      await modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "sconto cliente abituale");
+
+      const booking = onlyBooking();
+      expect(booking.finalAmountCents).toBe(22000);
+    });
+
+    it("N3: a second identical ACCEPT does not create a duplicate booking", async () => {
+      seedPendingApproval();
+
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+      onlyBooking();
+    });
+
+    it("N4: REJECT never creates a booking", async () => {
+      seedPendingApproval();
+
+      await rejectTransferRequest("tenant-1", "request-1");
+
+      expect(fakeState.bookings).toHaveLength(0);
+    });
+
+    it("N5: a null customerTripDurationMinutes falls back to a fresh Maps one-way call, whose result is used for the booking and persisted back onto the transfer_request", async () => {
+      seedPendingApproval({ customerTripDurationMinutes: null });
+      calculateRoute.mockResolvedValueOnce(mapsOk(55));
+
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+      expect(calculateRoute).toHaveBeenCalledWith(["Sondrio", "Malpensa"]);
+      expect(onlyBooking().customerTripDurationMinutes).toBe(55);
+
+      const reread = await getTransferRequest("tenant-1", "request-1");
+      expect(reread?.customerTripDurationMinutes).toBe(55);
+    });
+
+    it("N6: a Maps failure during the fallback never creates a booking and propagates an explicit error, leaving the transfer_request approved but unbooked", async () => {
+      seedPendingApproval({ customerTripDurationMinutes: null });
+      // calculateRoute defaults to defaultMapsError (no mockResolvedValueOnce set).
+
+      await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID)).rejects.toThrow(
+        /booking creation failed/,
+      );
+
+      expect(fakeState.bookings).toHaveLength(0);
+      const reread = await getTransferRequest("tenant-1", "request-1");
+      expect(reread?.status).toBe("approved"); // Opzione A: the approval already committed
+      expect(reread?.finalAmountCents).toBe(25000);
+    });
+
+    it("N7: retrying ACCEPT after a failed booking creation creates the missing booking, without re-running the approval", async () => {
+      seedPendingApproval({ customerTripDurationMinutes: null });
+      await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID)).rejects.toThrow();
+      expect(fakeState.bookings).toHaveLength(0);
+
+      calculateRoute.mockResolvedValueOnce(mapsOk(60));
+      const result = await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+      expect(result.finalAmountCents).toBe(25000);
+      expect(onlyBooking().customerTripDurationMinutes).toBe(60);
+    });
+
+    it("N8: retrying via ACCEPT after a MODIFY_PRICE-approved request with a missing booking creates it without touching the admin-chosen price", async () => {
+      seedPendingApproval({ customerTripDurationMinutes: null });
+      await expect(
+        modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 22000, "sconto"),
+      ).rejects.toThrow(/booking creation failed/);
+      expect(fakeState.bookings).toHaveLength(0);
+
+      calculateRoute.mockResolvedValueOnce(mapsOk(50));
+      const result = await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+      // Never silently reverted to calculatedAmountCents (25000) — the
+      // widened ACCEPT idempotent branch must never touch a price a
+      // MODIFY_PRICE call already set.
+      expect(result.finalAmountCents).toBe(22000);
+      expect(result.priceOverrideReason).toBe("sconto");
+      expect(onlyBooking().finalAmountCents).toBe(22000);
+    });
+
+    it("N9: scheduledAt is interpreted in Europe/Rome — CET in winter, CEST in summer", async () => {
+      seedPendingApproval({ requestedDate: "2026-01-15", requestedTime: "10:00" });
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+      expect((onlyBooking().scheduledAt as Date).toISOString()).toBe("2026-01-15T09:00:00.000Z"); // CET, +01:00
+
+      fakeState.requests = [];
+      fakeState.bookings = [];
+      seedPendingApproval({ requestedDate: "2026-07-15", requestedTime: "10:00" });
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+      expect((onlyBooking().scheduledAt as Date).toISOString()).toBe("2026-07-15T08:00:00.000Z"); // CEST, +02:00
+    });
+
+    it("N10: an invalid requestedTime never creates a booking — no invented fallback time", async () => {
+      seedPendingApproval({ requestedTime: "25:99" });
+
+      await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID)).rejects.toThrow(
+        /booking creation failed/,
+      );
+      expect(fakeState.bookings).toHaveLength(0);
+    });
   });
 });
