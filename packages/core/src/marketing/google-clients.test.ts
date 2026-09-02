@@ -1,10 +1,35 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+
+// Hoisted, mutable fake state so individual tests (see "invalid_grant
+// detection" below) can control the OAuth2 mock's getAccessToken behavior
+// and inspect what got written back to marketing_connections — same
+// pattern used elsewhere in this codebase's @bos/db mocks (e.g.
+// transfer-requests/service.test.ts) rather than inventing a new one.
+const { fakeState } = vi.hoisted(() => ({
+  fakeState: {
+    connectionStatus: "active" as string,
+    // Each captured as { status } — only field this module's update() call
+    // ever sets besides updatedAt, which isn't asserted on (timing-only).
+    updateCalls: [] as Array<{ status: string }>,
+    // Overridable per test; defaults to the pre-existing happy-path
+    // behavior so every test written before this one keeps passing
+    // unchanged.
+    getAccessTokenImpl: async () => ({ token: "fake-access-token" }),
+  },
+}));
 
 vi.mock("@bos/db", () => ({
   getDb: () => ({
     select: () => ({
       from: () => ({
-        where: async () => [{ status: "active", encryptedRefreshToken: "fake-encrypted-token" }],
+        where: async () => [{ status: fakeState.connectionStatus, encryptedRefreshToken: "fake-encrypted-token" }],
+      }),
+    }),
+    update: () => ({
+      set: (values: { status: string }) => ({
+        where: async () => {
+          fakeState.updateCalls.push({ status: values.status });
+        },
       }),
     }),
   }),
@@ -22,16 +47,26 @@ vi.mock("googleapis", () => ({
         setCredentials() {}
         on() {}
         async getAccessToken() {
-          return { token: "fake-access-token" };
+          return fakeState.getAccessTokenImpl();
         }
       },
     },
   },
 }));
 
-const { normalizeGoogleAdsCustomerId, queryGoogleAds, fetchGoogleAdsWeeklyPerformance } = await import(
-  "./google-clients"
-);
+const {
+  normalizeGoogleAdsCustomerId,
+  queryGoogleAds,
+  fetchGoogleAdsWeeklyPerformance,
+  getGoogleAdsAccessToken,
+  assertValidOAuthRedirectUri,
+} = await import("./google-clients");
+
+beforeEach(() => {
+  fakeState.connectionStatus = "active";
+  fakeState.updateCalls = [];
+  fakeState.getAccessTokenImpl = async () => ({ token: "fake-access-token" });
+});
 
 describe("normalizeGoogleAdsCustomerId", () => {
   it("strips dashes from a dashed customer id", () => {
@@ -254,5 +289,91 @@ describe("fetchGoogleAdsWeeklyPerformance GAQL", () => {
       global.fetch = originalFetch;
       process.env.GOOGLE_ADS_DEVELOPER_TOKEN = originalDeveloperToken;
     }
+  });
+});
+
+describe("invalid_grant detection", () => {
+  // Regression for the gap found auditing a real invalid_grant failure: a
+  // comment here previously promised a "catch-and-mark-needs-reauth
+  // pattern in run-check.ts" that never actually existed anywhere in the
+  // codebase — connections stayed "active" in the DB forever regardless of
+  // whether Google still honored the refresh token.
+  it("marks the connection needs_reauth and throws a clear error when Google's token endpoint returns invalid_grant", async () => {
+    fakeState.getAccessTokenImpl = async () => {
+      throw Object.assign(new Error("invalid_grant"), {
+        response: { data: { error: "invalid_grant", error_description: "Token has been expired or revoked." } },
+      });
+    };
+
+    await expect(getGoogleAdsAccessToken("tenant-1")).rejects.toThrow(/needs reauthorization \(invalid_grant\)/);
+
+    expect(fakeState.updateCalls).toEqual([{ status: "needs_reauth" }]);
+  });
+
+  it("does not mark the connection needs_reauth for an unrelated/transient error (e.g. network failure)", async () => {
+    fakeState.getAccessTokenImpl = async () => {
+      throw new Error("network error: ECONNRESET");
+    };
+
+    await expect(getGoogleAdsAccessToken("tenant-1")).rejects.toThrow("network error: ECONNRESET");
+
+    expect(fakeState.updateCalls).toEqual([]);
+  });
+
+  it("does not call getAccessToken again (no needs_reauth write) when the token is valid", async () => {
+    await expect(getGoogleAdsAccessToken("tenant-1")).resolves.toBe("fake-access-token");
+
+    expect(fakeState.updateCalls).toEqual([]);
+  });
+});
+
+describe("assertValidOAuthRedirectUri", () => {
+  // Regression for a real production incident: Google rejected reconnect
+  // attempts with "Error 400: invalid_request" because the Vercel
+  // Production environment's GOOGLE_OAUTH_REDIRECT_URI was left set to the
+  // local dev value (http://localhost:3001/...) instead of the real
+  // deployed origin. VERCEL_ENV is set automatically by Vercel itself
+  // (production/preview/development) and is never set for local `next dev`,
+  // so it's what distinguishes "this is genuinely the Production
+  // deployment" from local/preview without adding any new configuration.
+  const originalVercelEnv = process.env.VERCEL_ENV;
+
+  afterEach(() => {
+    if (originalVercelEnv === undefined) {
+      delete process.env.VERCEL_ENV;
+    } else {
+      process.env.VERCEL_ENV = originalVercelEnv;
+    }
+  });
+
+  it("throws when GOOGLE_OAUTH_REDIRECT_URI is unset", () => {
+    expect(() => assertValidOAuthRedirectUri(undefined)).toThrow("GOOGLE_OAUTH_REDIRECT_URI is not set.");
+  });
+
+  it("throws when running as the real Vercel Production deployment but the redirect URI still points at localhost", () => {
+    process.env.VERCEL_ENV = "production";
+
+    expect(() => assertValidOAuthRedirectUri("http://localhost:3001/api/marketing/oauth/callback")).toThrow(
+      /Production environment/,
+    );
+  });
+
+  it("allows a localhost redirect URI outside of the real Production deployment (local dev, preview, CI)", () => {
+    delete process.env.VERCEL_ENV;
+    expect(assertValidOAuthRedirectUri("http://localhost:3001/api/marketing/oauth/callback")).toBe(
+      "http://localhost:3001/api/marketing/oauth/callback",
+    );
+
+    process.env.VERCEL_ENV = "preview";
+    expect(assertValidOAuthRedirectUri("http://localhost:3001/api/marketing/oauth/callback")).toBe(
+      "http://localhost:3001/api/marketing/oauth/callback",
+    );
+  });
+
+  it("allows the real production origin in the real Production deployment", () => {
+    process.env.VERCEL_ENV = "production";
+
+    const url = "https://bonolini-operating-system-transfer.vercel.app/api/marketing/oauth/callback";
+    expect(assertValidOAuthRedirectUri(url)).toBe(url);
   });
 });

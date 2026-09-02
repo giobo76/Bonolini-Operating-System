@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSession } from "@bos/auth";
-import { captureException, log, upsertConnection } from "@bos/core";
+import { assertValidOAuthRedirectUri, captureException, log, upsertConnection } from "@bos/core";
 
 interface GoogleTokenResponse {
   refresh_token?: string;
@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
         code,
         client_id: process.env.GOOGLE_OAUTH_CLIENT_ID!,
         client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET!,
-        redirect_uri: process.env.GOOGLE_OAUTH_REDIRECT_URI!,
+        redirect_uri: assertValidOAuthRedirectUri(process.env.GOOGLE_OAUTH_REDIRECT_URI),
         grant_type: "authorization_code",
       }),
     });

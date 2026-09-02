@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { getSession } from "@bos/auth";
-import { log } from "@bos/core";
+import { assertValidOAuthRedirectUri, log } from "@bos/core";
 
 // Read-only scopes only. tagmanager.edit.containers (needed for the future
 // GTM auto-fix capability) is deliberately not requested here — least
@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
 
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_OAUTH_CLIENT_ID!,
-    redirect_uri: process.env.GOOGLE_OAUTH_REDIRECT_URI!,
+    redirect_uri: assertValidOAuthRedirectUri(process.env.GOOGLE_OAUTH_REDIRECT_URI),
     response_type: "code",
     access_type: "offline",
     // Forces Google to return a refresh_token even on a re-connect, not
