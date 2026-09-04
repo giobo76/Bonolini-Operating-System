@@ -316,6 +316,116 @@ export async function getTransferRequestFunnel(tenantId: string): Promise<Transf
   return counts;
 }
 
+// ── Real Conversion System (bookings.status is the source of truth) ─────
+// Google Ads/GCLID/UTM tracking alone under-counts real commercial results
+// today — this is the internal measurement of what actually happened,
+// independent of whether marketing attribution caught it. There is no
+// Google Calendar integration anywhere in this codebase (verified: no
+// Calendar OAuth scope, no event schema, no sync job) — `bookings.status`
+// (confirmed | completed | cancelled) is already the single, real,
+// already-idempotent source of truth for "was this service actually
+// confirmed/delivered," set either by the admin-manual path (createBooking)
+// or by ensureBookingForApprovedTransferRequest (unique on
+// transfer_request_id — a given transfer_request can never produce more
+// than one booking, see bookings/service.ts). Building a second,
+// calendar-derived path to the same fact would be exactly the kind of
+// fragile second source of truth this system deliberately avoids.
+//
+// REAL CONVERSION vs ATTRIBUTED CONVERSION — kept structurally separate,
+// never conflated:
+// - realConversions: every booking with status 'confirmed' or 'completed'
+//   counts as exactly one, regardless of whether we know where the client
+//   came from. A cancelled booking is never a real conversion.
+// - attributedConversions: the subset of real conversions whose client has
+//   ANY verifiable marketing signal (utmCampaign, utmSource, or gclid) —
+//   same three fields deriveSource() above already treats as "known",
+//   never invented here.
+// - googleAdsAttributedConversions: the strictly narrower subset with a
+//   real gclid specifically — the one signal Google Ads itself provides.
+//   A booking attributed to some other utm-tagged source (e.g.
+//   utm_source=newsletter) without a gclid is never counted here. This
+//   number is never sent to Google Ads as an offline conversion — no such
+//   upload path exists in this codebase, and this function doesn't add one
+//   (see marketing/README.md if that's ever built later).
+// - englishLanguageConversions: clients.preferredLanguage is real,
+//   AI-parsed data from actual WhatsApp messages (whatsapp/service.ts),
+//   never inferred from a name — matched only against real language codes
+//   ("en", "en-US", "English"), never turned into a nationality guess.
+//
+// Revenue: realRevenueCents only counts 'completed' bookings (a confirmed-
+// but-not-yet-delivered booking has no realized revenue yet, per the
+// founder-confirmed distinction between the two states) — using the exact
+// same paidAmountCents ?? finalAmountCents precedence getRevenueBySource
+// already uses above, never a new fallback invented for this function. A
+// completed booking with neither field set contributes 0, never a guessed
+// amount — see docs/domain for why finalAmountCents (not a calendar text
+// field) is the one column every consumer must read.
+
+export interface RealConversionSummary {
+  leads: number;
+  realConversions: number;
+  completedConversions: number;
+  realRevenueCents: number;
+  attributedConversions: number;
+  attributedRevenueCents: number;
+  googleAdsAttributedConversions: number;
+  googleAdsAttributedRevenueCents: number;
+  englishLanguageConversions: number;
+}
+
+function isEnglishLanguage(preferredLanguage: string | null): boolean {
+  if (!preferredLanguage) return false;
+  const normalized = preferredLanguage.trim().toLowerCase();
+  return normalized === "en" || normalized.startsWith("en-") || normalized === "english";
+}
+
+export async function getRealConversionSummary(tenantId: string): Promise<RealConversionSummary> {
+  const db = getDb();
+  const [allClients, allBookings] = await Promise.all([
+    db.select().from(clients).where(eq(clients.tenantId, tenantId)),
+    db.select().from(bookings).where(eq(bookings.tenantId, tenantId)),
+  ]);
+
+  const clientById = new Map(allClients.map((c) => [c.id, c]));
+
+  const summary: RealConversionSummary = {
+    leads: allClients.length,
+    realConversions: 0,
+    completedConversions: 0,
+    realRevenueCents: 0,
+    attributedConversions: 0,
+    attributedRevenueCents: 0,
+    googleAdsAttributedConversions: 0,
+    googleAdsAttributedRevenueCents: 0,
+    englishLanguageConversions: 0,
+  };
+
+  for (const booking of allBookings) {
+    if (booking.status === "cancelled") continue;
+
+    summary.realConversions += 1;
+
+    const client = clientById.get(booking.clientId);
+    const hasKnownSource = Boolean(client?.utmCampaign || client?.utmSource || client?.gclid);
+    const isGoogleAds = Boolean(client?.gclid);
+    const isEnglish = isEnglishLanguage(client?.preferredLanguage ?? null);
+
+    if (hasKnownSource) summary.attributedConversions += 1;
+    if (isGoogleAds) summary.googleAdsAttributedConversions += 1;
+    if (isEnglish) summary.englishLanguageConversions += 1;
+
+    if (booking.status === "completed") {
+      summary.completedConversions += 1;
+      const revenueCents = booking.paidAmountCents ?? booking.finalAmountCents ?? 0;
+      summary.realRevenueCents += revenueCents;
+      if (hasKnownSource) summary.attributedRevenueCents += revenueCents;
+      if (isGoogleAds) summary.googleAdsAttributedRevenueCents += revenueCents;
+    }
+  }
+
+  return summary;
+}
+
 // ── Cost-per-stage (NOT wired to tRPC yet) ───────────────────────────────
 // Real ad spend must come from the Google Ads API, which isn't integrated
 // yet (still pending from MIE-2's original monitoring scope). This

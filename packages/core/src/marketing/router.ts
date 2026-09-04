@@ -85,6 +85,14 @@ export const marketingRouter = router({
     businessKpis.getTransferRequestFunnel(ctx.session.profile.tenantId),
   ),
 
+  // Real Conversion System — internal measurement of actual commercial
+  // results (bookings.status), kept structurally separate from Google Ads
+  // attribution. See business-kpis.ts's getRealConversionSummary for the
+  // full rationale.
+  getRealConversionSummary: adminProcedure.query(({ ctx }) =>
+    businessKpis.getRealConversionSummary(ctx.session.profile.tenantId),
+  ),
+
   // "Analyze Now" — runs the same check pipeline the scheduled jobs use,
   // synchronously, awaited by the caller. Slower than a normal mutation
   // (calls out to GA4/GTM/Search Console/Claude in sequence) but avoids

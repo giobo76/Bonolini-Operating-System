@@ -60,7 +60,8 @@ export default async function MarketingOverviewPage({
     conversionRates,
     revenueBySource,
     ltvBySource,
-    transferRequestFunnel;
+    transferRequestFunnel,
+    realConversionSummary;
   try {
     [
       healthScore,
@@ -71,6 +72,7 @@ export default async function MarketingOverviewPage({
       revenueBySource,
       ltvBySource,
       transferRequestFunnel,
+      realConversionSummary,
     ] = await Promise.all([
       caller.marketing.getHealthScore(),
       caller.marketing.listHealthScoreHistory(),
@@ -80,6 +82,7 @@ export default async function MarketingOverviewPage({
       caller.marketing.getRevenueBySource(),
       caller.marketing.getLtvBySource(),
       caller.marketing.getTransferRequestFunnel(),
+      caller.marketing.getRealConversionSummary(),
     ]);
   } catch (error) {
     if (error instanceof TRPCError && error.code === "FORBIDDEN") {
@@ -273,6 +276,66 @@ export default async function MarketingOverviewPage({
             </div>
           </div>
         )}
+      </section>
+
+      <section className="rounded border p-4">
+        <h2 className="mb-1 text-sm font-medium text-neutral-500 dark:text-neutral-400">
+          Real Conversions
+        </h2>
+        <p className="mb-3 text-xs text-neutral-400">
+          Actual confirmed/completed bookings — the internal measurement of real commercial
+          results, independent of Google Ads/UTM tracking. Kept structurally separate from
+          attribution below: a real conversion never becomes a Google Ads conversion without a
+          verifiable gclid.
+        </p>
+        <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Leads</div>
+            <div className="text-lg font-medium">{realConversionSummary.leads}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Real conversions</div>
+            <div className="text-lg font-medium">{realConversionSummary.realConversions}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Completed services</div>
+            <div className="text-lg font-medium">{realConversionSummary.completedConversions}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Attributed conversions</div>
+            <div className="text-lg font-medium">{realConversionSummary.attributedConversions}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">
+              Google Ads attributed conversions
+            </div>
+            <div className="text-lg font-medium">{realConversionSummary.googleAdsAttributedConversions}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">
+              English-language conversions
+            </div>
+            <div className="text-lg font-medium">{realConversionSummary.englishLanguageConversions}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Real revenue</div>
+            <div className="text-lg font-medium">{formatCents(realConversionSummary.realRevenueCents)}</div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Attributed revenue</div>
+            <div className="text-lg font-medium">
+              {formatCents(realConversionSummary.attributedRevenueCents)}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">
+              Google Ads attributed revenue
+            </div>
+            <div className="text-lg font-medium">
+              {formatCents(realConversionSummary.googleAdsAttributedRevenueCents)}
+            </div>
+          </div>
+        </div>
       </section>
 
       <section className="rounded border p-4">
