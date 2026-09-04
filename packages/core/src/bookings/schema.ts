@@ -57,3 +57,28 @@ export const ensureBookingSnapshotSchema = z.object({
 });
 
 export type EnsureBookingSnapshotInput = z.infer<typeof ensureBookingSnapshotSchema>;
+
+// ── Calendar Sync (Google Calendar event -> booking) ─────────────────────
+// Input for ensureBookingFromCalendarEvent, called only from
+// packages/core/src/calendar's sync orchestrator. Every field here is
+// already resolved by the caller (extracted from the event, or resolved
+// via clients' findOrCreateClientByPhone) — this function never calls the
+// Google Calendar API and never parses event text itself, same separation
+// of concerns as ensureBookingForApprovedTransferRequest above.
+export const ensureBookingFromCalendarEventSchema = z.object({
+  calendarEventId: z.string().trim().min(1),
+  clientId: z.string().uuid(),
+  pickup: z.string().trim().min(1).nullable(),
+  destination: z.string().trim().min(1).nullable(),
+  scheduledAt: z.date().nullable(),
+  // Null when the event carried no confidently-extractable price — never
+  // invented by the caller, never defaulted here either.
+  finalAmountCents: z.number().int().nonnegative().nullable(),
+  currency: z.string().min(1).default("EUR"),
+});
+
+export type EnsureBookingFromCalendarEventInput = z.infer<typeof ensureBookingFromCalendarEventSchema>;
+
+export const cancelBookingByCalendarEventIdSchema = z.object({
+  calendarEventId: z.string().trim().min(1),
+});

@@ -51,6 +51,12 @@ vi.mock("googleapis", () => ({
         }
       },
     },
+    // Matches the real googleapis factory function shape (google.calendar({
+    // version, auth }) returns a client bound to that auth) closely enough
+    // for getCalendarClient's own tests below — it never calls the real
+    // Calendar API, only asserts this factory was reached via the same
+    // OAuth2Client path every other Google client here already uses.
+    calendar: (options: { version: string; auth: unknown }) => ({ __version: options.version, __auth: options.auth }),
   },
 }));
 
@@ -59,6 +65,7 @@ const {
   queryGoogleAds,
   fetchGoogleAdsWeeklyPerformance,
   getGoogleAdsAccessToken,
+  getCalendarClient,
   assertValidOAuthRedirectUri,
 } = await import("./google-clients");
 
@@ -375,5 +382,28 @@ describe("assertValidOAuthRedirectUri", () => {
 
     const url = "https://bonolini-operating-system-transfer.vercel.app/api/marketing/oauth/callback";
     expect(assertValidOAuthRedirectUri(url)).toBe(url);
+  });
+});
+
+// TEST 1 — Calendar OAuth: getCalendarClient reuses the exact same
+// getOAuth2Client path (and therefore the exact same invalid_grant/
+// needs_reauth detection already proven above) as every other Google
+// client in this file — no second OAuth system, per the founder's
+// explicit instruction for the Calendar Sync milestone.
+describe("getCalendarClient", () => {
+  it("reuses the shared OAuth2Client — never a second OAuth system", async () => {
+    const client = (await getCalendarClient("tenant-1")) as unknown as { __version: string };
+    expect(client.__version).toBe("v3");
+  });
+
+  it("surfaces the same needs_reauth handling as every other client when the refresh token is invalid", async () => {
+    fakeState.getAccessTokenImpl = async () => {
+      throw Object.assign(new Error("invalid_grant"), {
+        response: { data: { error: "invalid_grant" } },
+      });
+    };
+
+    await expect(getCalendarClient("tenant-1")).rejects.toThrow(/needs reauthorization \(invalid_grant\)/);
+    expect(fakeState.updateCalls).toEqual([{ status: "needs_reauth" }]);
   });
 });

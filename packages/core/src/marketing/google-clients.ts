@@ -146,6 +146,15 @@ export async function getSearchConsoleClient(tenantId: string) {
   return google.searchconsole({ version: "v1", auth });
 }
 
+// Read-only by construction: every caller in packages/core/src/calendar
+// only ever calls .list() on this client — see that module's README for
+// the "Calendar is never written to" guarantee. Reuses getOAuth2Client
+// exactly like every other Google client above; no second OAuth system.
+export async function getCalendarClient(tenantId: string) {
+  const auth = await getOAuth2Client(tenantId);
+  return google.calendar({ version: "v3", auth });
+}
+
 export async function getGoogleAdsAccessToken(tenantId: string) {
   const auth = await getOAuth2Client(tenantId);
   return getAccessToken(auth);

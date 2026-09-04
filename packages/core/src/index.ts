@@ -12,6 +12,7 @@ export * from "./transfer-requests";
 export * from "./pricing";
 export * from "./maps-distance";
 export * from "./availability";
+export * from "./calendar";
 
 // Boundary rule (ADR 0002): other modules/apps import only from here (or
 // from a module's own index.ts, e.g. "./clients") — never reach into a

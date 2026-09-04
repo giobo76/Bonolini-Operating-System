@@ -9,11 +9,21 @@ import { assertValidOAuthRedirectUri, log } from "@bos/core";
 // The Ads scope is requested because run-check.ts's google_ads_account
 // branch (checks/google-ads-checks.ts) actually calls the Ads API now — see
 // packages/core/src/marketing/README.md.
+//
+// calendar.readonly (not the full "calendar" scope, which grants write
+// access) added for the Real Conversion System's Calendar Sync — this
+// module only ever calls events.list()/calendarList.list(), never creates,
+// updates, or deletes a Google Calendar event. Adding a new scope here
+// means every existing connection needs a fresh consent (Google always
+// re-grants the full requested scope list on reconnect, via `prompt:
+// consent` below, already the existing behavior) — it does not silently
+// grant Calendar access to an already-connected account.
 const SCOPES = [
   "https://www.googleapis.com/auth/analytics.readonly",
   "https://www.googleapis.com/auth/tagmanager.readonly",
   "https://www.googleapis.com/auth/webmasters.readonly",
   "https://www.googleapis.com/auth/adwords",
+  "https://www.googleapis.com/auth/calendar.readonly",
 ];
 
 export async function GET(request: NextRequest) {

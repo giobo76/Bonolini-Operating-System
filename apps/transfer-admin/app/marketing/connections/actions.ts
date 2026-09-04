@@ -39,3 +39,36 @@ export async function disconnectConnectionAction() {
   revalidatePath("/marketing/connections");
   redirect("/marketing/connections");
 }
+
+// The <select> on the connections page encodes id/name/timezone together
+// (id|||name|||timezone) per <option> — every option value comes straight
+// from a real listAvailableCalendars() result rendered on that same page
+// request, so this can never submit an invented calendar id. A plain
+// three-field form (no client JS) can't otherwise keep a hidden
+// name/timezone field in sync with a <select>'s chosen option.
+export async function selectCalendarAction(formData: FormData) {
+  const raw = String(formData.get("calendarChoice") || "");
+  const [googleCalendarId, googleCalendarName, timezone] = raw.split("|||");
+
+  if (!googleCalendarId) {
+    redirect("/marketing/connections?error=" + encodeURIComponent("No calendar selected"));
+  }
+
+  const caller = await createServerCaller();
+  await caller.calendar.selectCalendar({
+    googleCalendarId,
+    googleCalendarName: googleCalendarName || null,
+    timezone: timezone || null,
+  });
+
+  revalidatePath("/marketing/connections");
+  redirect("/marketing/connections");
+}
+
+export async function syncCalendarNowAction() {
+  const caller = await createServerCaller();
+  await caller.calendar.syncNow();
+
+  revalidatePath("/marketing/connections");
+  redirect("/marketing/connections");
+}

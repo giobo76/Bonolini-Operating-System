@@ -1,11 +1,14 @@
 import Link from "next/link";
 import { TRPCError } from "@trpc/server";
 import { createServerCaller } from "@bos/core";
+import type { AvailableCalendar } from "@bos/core";
 import { PermissionDenied } from "../permission-denied";
 import {
   addLinkedResourceAction,
   disconnectConnectionAction,
   removeLinkedResourceAction,
+  selectCalendarAction,
+  syncCalendarNowAction,
 } from "./actions";
 
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
@@ -52,6 +55,25 @@ export default async function MarketingConnectionsPage({
   }
 
   const isActive = status.status === "active";
+
+  // Calendar is never required for the rest of BOS to work, and a missing
+  // calendar.readonly scope on an older connection (pre-dating this
+  // milestone) must never crash this whole page — kept in its own
+  // try/catch, deliberately separate from the FORBIDDEN handling above.
+  let calendarConfig = null;
+  let availableCalendars: AvailableCalendar[] = [];
+  let calendarError: string | null = null;
+  if (isActive) {
+    try {
+      calendarConfig = await caller.calendar.getConfig();
+      availableCalendars = await caller.calendar.listAvailableCalendars();
+    } catch (error) {
+      calendarError =
+        error instanceof Error
+          ? error.message
+          : "Could not load Google Calendar — reconnect above to grant Calendar access.";
+    }
+  }
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 p-8">
@@ -204,6 +226,102 @@ export default async function MarketingConnectionsPage({
               Add
             </button>
           </form>
+        </section>
+      ) : null}
+
+      {isActive ? (
+        <section className="rounded border p-4">
+          <h2 className="mb-1 text-sm font-medium text-neutral-500 dark:text-neutral-400">
+            Google Calendar
+          </h2>
+          <p className="mb-3 text-xs text-neutral-400">
+            Read-only — BOS only ever reads this calendar, never creates, edits, or deletes an
+            event. Optional: nothing else in BOS requires this to be configured.
+          </p>
+
+          {calendarError ? (
+            <p className="rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:border-yellow-800 dark:bg-yellow-950 dark:text-yellow-300">
+              {calendarError} Reconnect above to grant Calendar access.
+            </p>
+          ) : calendarConfig?.configured ? (
+            <div className="space-y-3 text-sm">
+              <div>
+                <div className="text-neutral-500 dark:text-neutral-400">Selected calendar</div>
+                <div className="font-medium">
+                  {calendarConfig.googleCalendarName ?? calendarConfig.googleCalendarId}
+                </div>
+                {calendarConfig.timezone ? (
+                  <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                    {calendarConfig.timezone}
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <span
+                  className={
+                    calendarConfig.lastSyncStatus === "error"
+                      ? "rounded bg-red-100 px-2 py-0.5 text-xs text-red-800 dark:bg-red-900 dark:text-red-300"
+                      : calendarConfig.lastSyncStatus === "ok"
+                        ? "rounded bg-green-100 px-2 py-0.5 text-xs text-green-800 dark:bg-green-900 dark:text-green-300"
+                        : "rounded bg-neutral-100 px-2 py-0.5 text-xs text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
+                  }
+                >
+                  {calendarConfig.lastSyncStatus ?? "never synced"}
+                </span>
+                {calendarConfig.lastSyncedAt ? <span>last synced {formatDate(calendarConfig.lastSyncedAt)}</span> : null}
+              </div>
+              {calendarConfig.lastSyncError ? (
+                <p className="text-xs text-red-600 dark:text-red-400">{calendarConfig.lastSyncError}</p>
+              ) : null}
+              <form action={syncCalendarNowAction}>
+                <button type="submit" className="rounded border px-3 py-1.5 text-sm">
+                  Sync now
+                </button>
+              </form>
+
+              {availableCalendars.length > 0 ? (
+                <details className="pt-1">
+                  <summary className="cursor-pointer text-xs text-neutral-500 dark:text-neutral-400">
+                    Change calendar
+                  </summary>
+                  <form action={selectCalendarAction} className="mt-2 flex flex-wrap items-end gap-3">
+                    <select name="calendarChoice" className="rounded border px-3 py-1.5 text-sm" required>
+                      {availableCalendars.map((cal) => (
+                        <option key={cal.id} value={`${cal.id}|||${cal.name}|||${cal.timezone ?? ""}`}>
+                          {cal.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button type="submit" className="rounded border px-4 py-1.5 text-sm">
+                      Select
+                    </button>
+                  </form>
+                </details>
+              ) : null}
+            </div>
+          ) : availableCalendars.length === 0 ? (
+            <p className="text-sm text-neutral-400">
+              No calendars found on the connected Google account.
+            </p>
+          ) : (
+            <form action={selectCalendarAction} className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium">
+                  Which calendar is the Bonolini Transfer services calendar?
+                </label>
+                <select name="calendarChoice" className="w-64 rounded border px-3 py-1.5 text-sm" required>
+                  {availableCalendars.map((cal) => (
+                    <option key={cal.id} value={`${cal.id}|||${cal.name}|||${cal.timezone ?? ""}`}>
+                      {cal.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button type="submit" className="rounded border px-4 py-1.5 text-sm">
+                Select calendar
+              </button>
+            </form>
+          )}
         </section>
       ) : null}
     </main>

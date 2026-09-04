@@ -1,6 +1,11 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, bookings, assertOne, type Booking } from "@bos/db";
-import type { CreateBookingInput, UpdateBookingInput, EnsureBookingSnapshotInput } from "./schema";
+import type {
+  CreateBookingInput,
+  UpdateBookingInput,
+  EnsureBookingSnapshotInput,
+  EnsureBookingFromCalendarEventInput,
+} from "./schema";
 
 export async function createBooking(tenantId: string, input: CreateBookingInput) {
   const db = getDb();
@@ -128,4 +133,115 @@ export async function ensureBookingForApprovedTransferRequest(
     );
   }
   return existing;
+}
+
+// ── Calendar Sync (Google Calendar event -> booking) ──────────────────────
+// Called only from packages/core/src/calendar's sync orchestrator, after
+// that module has already resolved the client (via clients'
+// findOrCreateClientByPhone) and parsed whatever the event reliably
+// carries — this function never calls the Google Calendar API and never
+// parses event text itself.
+//
+// Idempotency: bookings.calendar_event_id is unique (migration 0015). Same
+// INSERT ... ON CONFLICT technique as ensureBookingForApprovedTransferRequest
+// above, but here the conflict path is a real UPDATE, not DO NOTHING — a
+// re-synced event (edited on Google's side, or simply re-delivered by an
+// incremental sync) must update the existing booking's fields, never
+// create a second row and never silently drop the edit.
+//
+// Deliberately NEVER updates on conflict: `status` (creation always starts
+// 'confirmed' — see column default; every later status change is either
+// this same sync's own cancelBookingByCalendarEventId, or an explicit
+// separate action never invented here per the founder's "completed is
+// never automatic" rule) and `client_id` (re-attributing an existing
+// booking to a different client is a materially bigger, riskier change
+// than updating its price/route, and isn't asked for here — frozen after
+// creation). The `WHERE bookings.status != 'cancelled'` guard on the
+// UPDATE additionally means a re-sync of an event whose booking was
+// already cancelled is a safe no-op on the row's data, not a silent
+// "revival" of a historical, frozen record.
+export async function ensureBookingFromCalendarEvent(
+  tenantId: string,
+  input: EnsureBookingFromCalendarEventInput,
+): Promise<Booking> {
+  const db = getDb();
+
+  const upsertedRows = await db.execute<Booking>(sql`
+    insert into bookings (
+      tenant_id, client_id, calendar_event_id, pickup, destination,
+      scheduled_at, final_amount_cents, currency
+    ) values (
+      ${tenantId}, ${input.clientId}, ${input.calendarEventId}, ${input.pickup}, ${input.destination},
+      ${input.scheduledAt?.toISOString() ?? null}, ${input.finalAmountCents}, ${input.currency}
+    )
+    on conflict (calendar_event_id) do update set
+      pickup = excluded.pickup,
+      destination = excluded.destination,
+      scheduled_at = excluded.scheduled_at,
+      final_amount_cents = excluded.final_amount_cents,
+      currency = excluded.currency,
+      updated_at = now()
+    where bookings.status != 'cancelled'
+    returning *
+  `);
+
+  if (upsertedRows.length > 0) {
+    return assertOne(upsertedRows, "ensureBookingFromCalendarEvent");
+  }
+
+  // Either the WHERE guard suppressed the update (booking already
+  // cancelled — a safe, expected no-op) or a genuine race with another
+  // process. Either way, read back the current row rather than treating
+  // this as an error.
+  const [existing] = await db
+    .select()
+    .from(bookings)
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.calendarEventId, input.calendarEventId)));
+
+  if (!existing) {
+    throw new Error(
+      `ensureBookingFromCalendarEvent: insert conflicted but no existing booking was found for calendar event ${input.calendarEventId}`,
+    );
+  }
+  return existing;
+}
+
+export async function getBookingByCalendarEventId(
+  tenantId: string,
+  calendarEventId: string,
+): Promise<Booking | null> {
+  const db = getDb();
+  const [row] = await db
+    .select()
+    .from(bookings)
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.calendarEventId, calendarEventId)));
+  return row ?? null;
+}
+
+// A cancelled Google Calendar event never deletes the booking — it moves
+// the existing state machine to 'cancelled', preserving history (per the
+// founder's explicit rule: a cancelled real conversion must stay in the
+// historical record, just excluded from active real-conversion/revenue
+// counts — see business-kpis.ts's getRealConversionSummary, unchanged by
+// this milestone). Idempotent: the WHERE guard means calling this twice
+// for the same already-cancelled event is a safe no-op (returns null the
+// second time, same as "no booking found for this event" — the caller
+// doesn't need to distinguish the two, both mean "nothing left to do").
+export async function cancelBookingByCalendarEventId(
+  tenantId: string,
+  calendarEventId: string,
+): Promise<Booking | null> {
+  const db = getDb();
+  const [row] = await db
+    .update(bookings)
+    .set({ status: "cancelled", cancelledAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(bookings.tenantId, tenantId),
+        eq(bookings.calendarEventId, calendarEventId),
+        sql`${bookings.status} != 'cancelled'`,
+      ),
+    )
+    .returning();
+  return row ?? null;
 }

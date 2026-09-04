@@ -1,5 +1,5 @@
 export { clientsRouter } from "./router";
-export { getClient } from "./service";
+export { getClient, findClientByPhone, findOrCreateClientByPhone } from "./service";
 export * from "./schema";
 export * from "./constants";
 export { buildAttributionCookieValue, parseAttributionCookie, resolveAttribution } from "./attribution";

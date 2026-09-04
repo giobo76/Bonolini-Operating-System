@@ -1,5 +1,5 @@
-import { and, count, desc, eq, ilike, isNotNull, isNull, or } from "drizzle-orm";
-import { getDb, clients, tenants, assertOne } from "@bos/db";
+import { and, count, desc, eq, ilike, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { getDb, clients, tenants, assertOne, type Client } from "@bos/db";
 import type { CreateClientInput, LeadSubmissionInput, ListClientsInput, UpdateClientInput } from "./schema";
 
 // BOS is single-tenant in practice today (only "bonolini-transfer" is
@@ -139,4 +139,97 @@ export async function submitLead(input: LeadSubmissionInput) {
     })
     .returning();
   return assertOne(rows, "submitLead");
+}
+
+// ── Find-or-create by phone (atomic) ─────────────────────────────────────
+// A second, independent caller (packages/core/src/calendar's event sync)
+// needs the exact same "match a client by phone, or create one" primitive
+// packages/core/src/whatsapp/service.ts already implements privately as
+// findOrCreateClientByPhone. Deliberately NOT extracted from there and
+// reused (that would mean refactoring already-shipped, already-tested,
+// production-critical WhatsApp intake code under this milestone, for a
+// second caller's convenience — a real regression risk for zero benefit,
+// since the two call sites need different fallback fullName behavior:
+// WhatsApp defaults to the phone number itself when profileName is
+// unavailable, Calendar always has a real name from the event). Exported
+// here instead, in clients — the module that actually owns "what makes a
+// client" — as a clean, independently tested primitive for any future
+// caller, using the exact same atomic technique (same partial functional
+// unique index, 0009_clients_phone_unique_per_tenant.sql) so a concurrent
+// sync/webhook can never create two clients rows for the same phone.
+export function normalizeClientPhone(phone: string): string {
+  return phone.replace(/[^0-9]/g, "");
+}
+
+export async function findClientByPhone(tenantId: string, phone: string): Promise<Client | null> {
+  const normalizedPhone = normalizeClientPhone(phone);
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(clients)
+    .where(
+      and(
+        eq(clients.tenantId, tenantId),
+        isNull(clients.deletedAt),
+        sql`regexp_replace(${clients.phone}, '[^0-9]', '', 'g') = ${normalizedPhone}`,
+      ),
+    )
+    .orderBy(desc(clients.createdAt));
+  return rows[0] ?? null;
+}
+
+export interface NewClientAttribution {
+  gclid?: string | null;
+  utmSource?: string | null;
+  utmCampaign?: string | null;
+}
+
+export async function findOrCreateClientByPhone(
+  tenantId: string,
+  phone: string,
+  fullName: string,
+  firstTouchAt: Date,
+  attribution?: NewClientAttribution,
+): Promise<Client> {
+  const normalizedPhone = normalizeClientPhone(phone);
+  const db = getDb();
+
+  // Attribution values only ever apply to the INSERT branch (a brand-new
+  // client) — on conflict, the existing row's own first-touch data (or
+  // lack of it) is never touched, same "captured once, never overwritten"
+  // rule clients.gclid/utmSource already document at the schema level.
+  const insertedRows = await db.execute<Client>(sql`
+    insert into clients (
+      tenant_id, customer_type, full_name, phone, marketing_consent, first_touch_at,
+      gclid, utm_source, utm_campaign
+    )
+    values (
+      ${tenantId},
+      'private',
+      ${fullName},
+      ${normalizedPhone},
+      false,
+      ${firstTouchAt.toISOString()},
+      ${attribution?.gclid ?? null},
+      ${attribution?.utmSource ?? null},
+      ${attribution?.utmCampaign ?? null}
+    )
+    on conflict (tenant_id, (regexp_replace(phone, '[^0-9]', '', 'g'))) where deleted_at is null
+    do nothing
+    returning *
+  `);
+
+  if (insertedRows.length > 0) {
+    return insertedRows[0] as Client;
+  }
+
+  const existing = await findClientByPhone(tenantId, normalizedPhone);
+  if (!existing) {
+    // Unreachable in practice: a conflict on the partial unique index means
+    // a matching, non-deleted client row exists. Guarded rather than
+    // silently swallowed, same discipline as every other
+    // insert-then-conflict-fallback in this codebase.
+    throw new Error("findOrCreateClientByPhone: insert conflicted but no matching client was found");
+  }
+  return existing;
 }

@@ -50,6 +50,15 @@ export const bookings = pgTable("bookings", {
   // ensureBookingForApprovedTransferRequest (resolved via Maps fallback if
   // the transfer_request's own value was null).
   customerTripDurationMinutes: integer("customer_trip_duration_minutes"),
+  // Set only by ensureBookingFromCalendarEvent (Calendar Sync milestone) —
+  // null for every other creation path (createBooking,
+  // ensureBookingForApprovedTransferRequest). Unique so the same Google
+  // Calendar event can never produce more than one booking; a repeated
+  // sync of the same event converges on this one row instead of creating a
+  // duplicate. On delete set null (never cascade — Calendar has no delete
+  // path into this table at all, this is just schema-level safety
+  // consistent with transferRequestId's convention above).
+  calendarEventId: text("calendar_event_id").unique(),
   status: bookingStatusEnum("status").notNull().default("confirmed"),
   currency: text("currency").notNull().default("EUR"),
   depositAmountCents: integer("deposit_amount_cents"),

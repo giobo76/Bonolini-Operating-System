@@ -50,6 +50,13 @@
       "when": 1787328035847,
       "tag": "0014_drizzle_kit_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788521765249,
+      "tag": "0015_calendar_sync",
+      "breakpoints": true
     }
   ]
 }
