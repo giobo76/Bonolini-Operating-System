@@ -44,11 +44,20 @@ export interface CalendarSyncResult {
 // calendar event -> ignored, no conversion" requirement).
 
 export interface ParsedCalendarEvent {
-  // Route, from "Pickup → Destination" or "Pickup -> Destination" anywhere
-  // in the event summary — the one structural cue this module imposes,
-  // matching the founder's own suggested format. Both null if no arrow is
-  // found; never split on anything else (a comma, a dash without spacing,
-  // etc. — too ambiguous to trust).
+  // Route. Two recognized, mutually-exclusive formats, tried in order:
+  // (1) "Pickup → Destination" / "Pickup -> Destination" anywhere in the
+  //     summary — the founder's own originally-suggested format.
+  // (2) "(Pickup - Destination)" — a place name, a single space-hyphen-
+  //     space, another place name, inside parentheses — the format
+  //     actually already in use across the founder's real, pre-existing
+  //     calendar events (verified directly against real Production
+  //     events during the 2026-09-04 diagnosis: "Servizio Mario (Milano
+  //     Duomo - Tirano)", "(MXP T1 - Morbegno)", etc. — none of them used
+  //     the arrow). Guarded against a time range read as a route (e.g.
+  //     "(arrivo entro 09:00 - 09:15)") by rejecting either side if it
+  //     looks like a clock time (`H:MM` or `HH:MM`).
+  // Both null if neither format matches; never split on a bare comma or
+  // an unspaced dash — too ambiguous to trust.
   pickup: string | null;
   destination: string | null;
   // A bare "€<integer>" only (e.g. "€390", "€ 390") — deliberately does
@@ -58,29 +67,44 @@ export interface ParsedCalendarEvent {
   // invent revenue. Ambiguous formats simply extract as null, never a
   // best-effort guess.
   priceCents: number | null;
-  // From a "Phone: ..." / "Tel: ..." / "Telefono: ..." line in the
-  // description — never guessed from the summary.
+  // From "Phone:"/"Tel:"/"Telefono:" anywhere in the description (not
+  // anchored to the start of a line — verified against real Production
+  // events on 2026-09-04: the founder's actual format embeds it mid-
+  // sentence, e.g. "Cliente: Mario (Tel: +1 (909) 282-7598) Pick-up:
+  // ..." on one single line, never one field per line). Captures a
+  // phone-number-shaped token (digits/spaces/+/-/parens, 5-21 chars) so a
+  // US-style area-code paren inside the number itself doesn't truncate
+  // the match. When a description carries more than one phone (e.g. an
+  // intermediary's and the passenger's), the first one found wins — a
+  // documented, deterministic tie-break, never a semantic guess at which
+  // one is "the real customer."
   phone: string | null;
   email: string | null;
   gclid: string | null;
   utmSource: string | null;
   utmCampaign: string | null;
-  // The candidate client name, extracted only from the pipe-delimited
-  // format ("TRANSFER | Mario Rossi | Milano → Tirano | €390") — the one
-  // segment that isn't the literal "TRANSFER" keyword, isn't the route
-  // segment, and isn't the price segment. Null for any other summary
-  // shape: a free-text title is not reliably splittable into "a name"
-  // without guessing.
+  // The candidate client name — from the pipe-delimited format
+  // ("TRANSFER | Mario Rossi | Milano → Tirano | €390"), or from a
+  // "Passeggero:"/"Cliente:"/"Passenger:"/"Client:" label in the
+  // description (verified against real Production events: "Passeggero:
+  // ALESSANDRO VOLA (Tel: ...)" — deliberately not "Commitgente:", which
+  // in the founder's real events names an intermediary/booking agent,
+  // not the actual customer). Null for any other summary/description
+  // shape: free text is not reliably splittable into "a name" without
+  // guessing.
   clientName: string | null;
 }
 
-const ROUTE_PATTERN = /(.+?)\s*(?:→|->)\s*(.+)/;
+const ARROW_ROUTE_PATTERN = /(.+?)\s*(?:→|->)\s*(.+)/;
+const PAREN_ROUTE_PATTERN = /\(([^()]+?)\s-\s([^()]+?)\)/;
+const TIME_LIKE_PATTERN = /^\d{1,2}:\d{2}/;
 const PRICE_PATTERN = /€\s*(\d+)(?!\d*[.,]\d)/;
-const PHONE_LINE_PATTERN = /^(?:phone|tel|telefono)\s*:\s*(.+)$/im;
-const EMAIL_LINE_PATTERN = /^email\s*:\s*(.+)$/im;
-const GCLID_LINE_PATTERN = /^gclid\s*:\s*(.+)$/im;
-const UTM_SOURCE_LINE_PATTERN = /^utm[_ ]?source\s*:\s*(.+)$/im;
-const UTM_CAMPAIGN_LINE_PATTERN = /^utm[_ ]?campaign\s*:\s*(.+)$/im;
+const PHONE_PATTERN = /(?:phone|tel|telefono)\s*:\s*([+\d][\d\s\-()]{3,19}\d)/i;
+const EMAIL_PATTERN = /email\s*:\s*(\S+@\S+)/i;
+const GCLID_PATTERN = /gclid\s*:\s*(\S+)/i;
+const UTM_SOURCE_PATTERN = /utm[_ ]?source\s*:\s*(\S+)/i;
+const UTM_CAMPAIGN_PATTERN = /utm[_ ]?campaign\s*:\s*(\S+)/i;
+const NAME_LABEL_PATTERN = /(?:passeggero|cliente|passenger|client)\s*:\s*([A-Za-zÀ-ÖØ-öø-ÿ' ]+?)(?=\s*[(\n]|\s*$|,\s*\d)/i;
 
 function extractRoute(summary: string): { pickup: string | null; destination: string | null } {
   // Pipe-delimited summaries must isolate just the segment carrying the
@@ -91,20 +115,30 @@ function extractRoute(summary: string): { pickup: string | null; destination: st
     ? (summary.split("|").find((segment) => /(?:→|->)/.test(segment)) ?? summary)
     : summary;
 
-  const match = routeSegment.match(ROUTE_PATTERN);
-  if (!match) return { pickup: null, destination: null };
-  const pickup = match[1]?.trim();
-  // The destination side may still carry a trailing "€390" remainder when
-  // the summary isn't pipe-delimited at all (e.g. "Milano → Tirano €390")
-  // — strip a trailing price rather than treat it as part of the place name.
-  const destination = match[2]
-    ?.trim()
-    .replace(/€.*$/, "")
-    .trim();
-  return {
-    pickup: pickup || null,
-    destination: destination || null,
-  };
+  const arrowMatch = routeSegment.match(ARROW_ROUTE_PATTERN);
+  if (arrowMatch) {
+    const pickup = arrowMatch[1]?.trim();
+    // The destination side may still carry a trailing "€390" remainder
+    // when the summary isn't pipe-delimited at all (e.g. "Milano →
+    // Tirano €390") — strip a trailing price rather than treat it as
+    // part of the place name.
+    const destination = arrowMatch[2]
+      ?.trim()
+      .replace(/€.*$/, "")
+      .trim();
+    if (pickup && destination) return { pickup, destination };
+  }
+
+  const parenMatch = summary.match(PAREN_ROUTE_PATTERN);
+  if (parenMatch) {
+    const left = parenMatch[1]!.trim();
+    const right = parenMatch[2]!.trim();
+    if (left && right && !TIME_LIKE_PATTERN.test(left) && !TIME_LIKE_PATTERN.test(right)) {
+      return { pickup: left, destination: right };
+    }
+  }
+
+  return { pickup: null, destination: null };
 }
 
 function extractPriceCents(text: string): number | null {
@@ -115,13 +149,21 @@ function extractPriceCents(text: string): number | null {
   return amount * 100;
 }
 
-function extractLine(text: string, pattern: RegExp): string | null {
+function extractFirst(text: string, pattern: RegExp): string | null {
   const match = text.match(pattern);
   const value = match?.[1]?.trim();
   return value ? value : null;
 }
 
-function extractClientName(summary: string, pickup: string | null, destination: string | null): string | null {
+function extractClientName(
+  summary: string,
+  description: string,
+  pickup: string | null,
+  destination: string | null,
+): string | null {
+  const fromDescription = extractFirst(description, NAME_LABEL_PATTERN);
+  if (fromDescription) return fromDescription;
+
   if (!summary.includes("|")) return null;
 
   const segments = summary
@@ -146,17 +188,17 @@ export function parseCalendarEvent(summary: string, description: string | null):
 
   const { pickup, destination } = extractRoute(safeSummary);
   const priceCents = extractPriceCents(safeSummary) ?? extractPriceCents(safeDescription);
-  const clientName = extractClientName(safeSummary, pickup, destination);
+  const clientName = extractClientName(safeSummary, safeDescription, pickup, destination);
 
   return {
     pickup,
     destination,
     priceCents,
-    phone: extractLine(safeDescription, PHONE_LINE_PATTERN),
-    email: extractLine(safeDescription, EMAIL_LINE_PATTERN),
-    gclid: extractLine(safeDescription, GCLID_LINE_PATTERN),
-    utmSource: extractLine(safeDescription, UTM_SOURCE_LINE_PATTERN),
-    utmCampaign: extractLine(safeDescription, UTM_CAMPAIGN_LINE_PATTERN),
+    phone: extractFirst(safeDescription, PHONE_PATTERN),
+    email: extractFirst(safeDescription, EMAIL_PATTERN),
+    gclid: extractFirst(safeDescription, GCLID_PATTERN),
+    utmSource: extractFirst(safeDescription, UTM_SOURCE_PATTERN),
+    utmCampaign: extractFirst(safeDescription, UTM_CAMPAIGN_PATTERN),
     clientName,
   };
 }

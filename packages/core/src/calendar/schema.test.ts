@@ -93,6 +93,91 @@ describe("parseCalendarEvent", () => {
   });
 });
 
+// Regression suite for the 2026-09-04 live diagnosis: real events fetched
+// directly from the founder's actual Production Google Calendar (via
+// events.list, no mocking) proved every real, pre-existing event title
+// uses "(Place - Place)" in parentheses, never the "→"/"->" arrow this
+// parser originally required exclusively — and real descriptions embed
+// "Tel:"/"Cliente:"/"Passeggero:" mid-sentence, never as a standalone
+// "Key: value" line. These exact strings are the real Production data
+// (titles/descriptions), not synthesized examples.
+describe("parseCalendarEvent — real Production event formats (2026-09-04 diagnosis)", () => {
+  it("recognizes the parenthetical '(Pickup - Destination)' format actually in use", () => {
+    const parsed = parseCalendarEvent("Servizio Mario (Milano Duomo - Tirano)", null);
+    expect(parsed.pickup).toBe("Milano Duomo");
+    expect(parsed.destination).toBe("Tirano");
+  });
+
+  it("recognizes it inside a bracketed/prefixed real title too", () => {
+    const parsed = parseCalendarEvent("[SERVIZIO PER CRISTIAN] Alessandro (MXP T1 - Morbegno)", null);
+    expect(parsed.pickup).toBe("MXP T1");
+    expect(parsed.destination).toBe("Morbegno");
+  });
+
+  it("never mistakes a parenthetical time range for a route", () => {
+    const parsed = parseCalendarEvent("Dentist appointment (09:00 - 09:15)", null);
+    expect(parsed.pickup).toBeNull();
+    expect(parsed.destination).toBeNull();
+  });
+
+  it("still ignores a title with no route at all, in either format", () => {
+    const parsed = parseCalendarEvent("Florida x centrale io x cristian.", null);
+    expect(isRecognizableService(parsed)).toBe(false);
+  });
+
+  it("still prefers the arrow format when both the arrow and a parenthetical dash are present", () => {
+    // Guards against the parenthetical fallback accidentally taking over
+    // the originally-suggested, unambiguous arrow format.
+    const parsed = parseCalendarEvent("TRANSFER | Mario Rossi | Milano → Tirano | €390 (nota: solo andata)", null);
+    expect(parsed.pickup).toBe("Milano");
+    expect(parsed.destination).toBe("Tirano");
+  });
+
+  it("extracts a phone embedded mid-sentence, not just on its own line", () => {
+    const description =
+      "Cliente: Mario (Tel: +1 (909) 282-7598) Pick-up: The Square Milano Duomo (ore 06:30 AM) Drop-off: Stazione di Tirano";
+    const parsed = parseCalendarEvent("Servizio Mario (Milano Duomo - Tirano)", description);
+    // Normalizes safely downstream via clients.findOrCreateClientByPhone's
+    // own digit-stripping — the exact surrounding punctuation captured
+    // here doesn't need to be pixel-perfect, only to contain every digit.
+    expect(parsed.phone?.replace(/[^0-9]/g, "")).toBe("19092827598");
+  });
+
+  it("picks the first phone, deterministically, when a description carries more than one", () => {
+    const description =
+      "Commitgente: BLACK TAXI DI GAMBETTA CRISTIAN (Tel: 3319056500) Passeggero: ALESSANDRO VOLA (Tel: 339 7888797) Pick-up: MORBEGNO VIA PRETORIO";
+    const parsed = parseCalendarEvent("Servizio Cristian per Giovanni - Alessandro Vola (Morbegno - MXP T1)", description);
+    expect(parsed.phone?.replace(/[^0-9]/g, "")).toBe("3319056500");
+  });
+
+  it("extracts the client name from a 'Passeggero:' label in the description, not the intermediary's 'Commitgente:'", () => {
+    const description =
+      "Commitgente: BLACK TAXI DI GAMBETTA CRISTIAN (Tel: 3319056500) Passeggero: ALESSANDRO VOLA (Tel: 339 7888797) Pick-up: MORBEGNO VIA PRETORIO";
+    const parsed = parseCalendarEvent("Servizio Cristian per Giovanni - Alessandro Vola (Morbegno - MXP T1)", description);
+    expect(parsed.clientName).toBe("ALESSANDRO VOLA");
+  });
+
+  it("extracts the client name from a 'Cliente:' label too", () => {
+    const parsed = parseCalendarEvent(
+      "Servizio Mario (Milano Duomo - Tirano)",
+      "Cliente: Mario (Tel: +1 (909) 282-7598) Pick-up: The Square Milano Duomo",
+    );
+    expect(parsed.clientName).toBe("Mario");
+  });
+
+  // The exact original bug report: a real event with this exact title and
+  // NO description at all. The parser correctly recognizes the route (this
+  // was never the actual bug) — the real root cause is downstream, in
+  // orchestration (see service.test.ts's matching regression test).
+  it("recognizes 'Sondrio → Malpensa' (the exact real event from the bug report) as a valid route, with no phone since there's no description", () => {
+    const parsed = parseCalendarEvent("Sondrio → Malpensa", null);
+    expect(parsed.pickup).toBe("Sondrio");
+    expect(parsed.destination).toBe("Malpensa");
+    expect(isRecognizableService(parsed)).toBe(true);
+    expect(parsed.phone).toBeNull();
+  });
+});
+
 describe("isRecognizableService", () => {
   it("is true only when both pickup and destination were extracted", () => {
     expect(isRecognizableService(parseCalendarEvent("Milano → Tirano", null))).toBe(true);

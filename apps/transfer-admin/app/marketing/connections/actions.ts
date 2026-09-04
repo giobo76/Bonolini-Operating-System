@@ -65,10 +65,25 @@ export async function selectCalendarAction(formData: FormData) {
   redirect("/marketing/connections");
 }
 
+// Surfaces the sync result on the page via query params (same pattern as
+// connected=1/error=... above) — a real gap found during the 2026-09-04
+// live diagnosis: "Sync now" always reported lastSyncStatus 'ok' even when
+// every event was skipped for missing client data, with nothing on the
+// page explaining why. Without this, "0 bookings created" and "a bug"
+// look identical from the dashboard.
 export async function syncCalendarNowAction() {
   const caller = await createServerCaller();
-  await caller.calendar.syncNow();
+  const result = await caller.calendar.syncNow();
 
   revalidatePath("/marketing/connections");
-  redirect("/marketing/connections");
+  const params = new URLSearchParams({
+    synced: "1",
+    eventsSeen: String(result.eventsSeen),
+    bookingsCreated: String(result.bookingsCreated),
+    bookingsUpdated: String(result.bookingsUpdated),
+    bookingsCancelled: String(result.bookingsCancelled),
+    eventsSkippedNoClientData: String(result.eventsSkippedNoClientData),
+    eventsIgnoredNotAService: String(result.eventsIgnoredNotAService),
+  });
+  redirect(`/marketing/connections?${params.toString()}`);
 }

@@ -55,20 +55,25 @@ vi.mock("@bos/db", () => ({
 }));
 
 vi.mock("../marketing", () => ({
-  getCalendarClient: async () => ({
-    calendarList: {
-      list: async () => ({ data: fakeState.calendarListResponse }),
-    },
-    events: {
-      list: async (params: Record<string, unknown>) => {
-        fakeState.eventsListCalls.push(params);
-        const next = fakeState.eventsListQueue.shift();
-        if (!next) return { data: { items: [] } };
-        if ("throw" in next) throw next.throw;
-        return { data: next };
+  getCalendarClient: async () => {
+    if (getCalendarClientFailure.shouldThrow) {
+      throw new Error("invalid_grant");
+    }
+    return {
+      calendarList: {
+        list: async () => ({ data: fakeState.calendarListResponse }),
       },
-    },
-  }),
+      events: {
+        list: async (params: Record<string, unknown>) => {
+          fakeState.eventsListCalls.push(params);
+          const next = fakeState.eventsListQueue.shift();
+          if (!next) return { data: { items: [] } };
+          if ("throw" in next) throw next.throw;
+          return { data: next };
+        },
+      },
+    };
+  },
 }));
 
 const clientsMock = vi.hoisted(() => ({
@@ -83,6 +88,13 @@ const bookingsMock = vi.hoisted(() => ({
   cancelBookingByCalendarEventId: vi.fn(),
 }));
 vi.mock("../bookings", () => bookingsMock);
+
+// getCalendarClient itself is mocked above (via ../marketing) as an async
+// factory that always succeeds — this hoisted flag lets one specific
+// regression test make it throw instead, to reproduce the exact 2026-09-04
+// bug (getCalendarClient failing OUTSIDE syncCalendarEvents' try block,
+// so calendar_connections' error status was never recorded).
+const getCalendarClientFailure = vi.hoisted(() => ({ shouldThrow: false }));
 
 const { listAvailableCalendars, getCalendarConfig, selectCalendar, syncCalendarEvents } = await import("./service");
 
@@ -132,6 +144,7 @@ beforeEach(() => {
   fakeState.calendarListResponse = { items: [] };
   fakeState.eventsListQueue = [];
   fakeState.eventsListCalls = [];
+  getCalendarClientFailure.shouldThrow = false;
   clientsMock.findClientByPhone.mockReset();
   clientsMock.findOrCreateClientByPhone.mockReset();
   bookingsMock.ensureBookingFromCalendarEvent.mockReset().mockResolvedValue(fakeBooking());
@@ -399,5 +412,40 @@ describe("syncCalendarEvents — configured", () => {
 
     expect(fakeState.connections[0]?.lastSyncStatus).toBe("error");
     expect(fakeState.connections[0]?.lastSyncError).toBe("invalid_grant");
+  });
+
+  // Regression for the real 2026-09-04 bug: getCalendarClient() used to be
+  // called OUTSIDE the try block, so a failure acquiring the client (e.g.
+  // an OAuth issue) skipped error handling entirely and left
+  // calendar_connections permanently un-updated, with no error ever
+  // recorded and the dashboard stuck showing "never synced" forever.
+  it("records the error on calendar_connections even when the failure happens acquiring the Calendar client itself, not just during events.list", async () => {
+    getCalendarClientFailure.shouldThrow = true;
+
+    await expect(syncCalendarEvents("tenant-1")).rejects.toThrow("invalid_grant");
+
+    expect(fakeState.connections[0]?.lastSyncStatus).toBe("error");
+    expect(fakeState.connections[0]?.lastSyncError).toBe("invalid_grant");
+    expect(fakeState.eventsListCalls).toHaveLength(0);
+  });
+
+  // End-to-end regression for the exact real-world bug report: the event
+  // is correctly recognized (route parsed fine — that was never the
+  // actual bug) but, having genuinely no description at all, is correctly
+  // skipped for missing client data rather than silently dropped or
+  // fabricated — this is the true, demonstrated root cause, not a parser
+  // failure.
+  it("reproduces the real bug report end-to-end: 'Sondrio → Malpensa' with no description is recognized but skipped, never silently dropped", async () => {
+    fakeState.eventsListQueue = [
+      { items: [{ id: "real-event-id", summary: "Sondrio → Malpensa", description: null, start: { dateTime: "2026-09-23T10:00:00+02:00" } }] },
+    ];
+
+    const result = await syncCalendarEvents("tenant-1");
+
+    expect(result.eventsSeen).toBe(1);
+    expect(result.eventsIgnoredNotAService).toBe(0); // the route WAS recognized
+    expect(result.eventsSkippedNoClientData).toBe(1); // skipped for the real reason: no phone
+    expect(result.bookingsCreated).toBe(0);
+    expect(clientsMock.findClientByPhone).not.toHaveBeenCalled(); // no phone to even look up
   });
 });

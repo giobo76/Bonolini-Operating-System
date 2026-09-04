@@ -37,6 +37,17 @@ export default async function MarketingConnectionsPage({
   const sp = await searchParams;
   const connected = sp.connected === "1";
   const errorParam = Array.isArray(sp.error) ? sp.error[0] : sp.error;
+  const syncResult =
+    sp.synced === "1"
+      ? {
+          eventsSeen: Number(sp.eventsSeen) || 0,
+          bookingsCreated: Number(sp.bookingsCreated) || 0,
+          bookingsUpdated: Number(sp.bookingsUpdated) || 0,
+          bookingsCancelled: Number(sp.bookingsCancelled) || 0,
+          eventsSkippedNoClientData: Number(sp.eventsSkippedNoClientData) || 0,
+          eventsIgnoredNotAService: Number(sp.eventsIgnoredNotAService) || 0,
+        }
+      : null;
 
   const caller = await createServerCaller();
 
@@ -97,6 +108,29 @@ export default async function MarketingConnectionsPage({
         <p className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-400">
           Connection error: {errorParam}
         </p>
+      ) : null}
+      {syncResult ? (
+        <div className="rounded border border-blue-300 bg-blue-50 px-3 py-2 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-300">
+          <p className="font-medium">
+            Sync complete: {syncResult.eventsSeen} event{syncResult.eventsSeen === 1 ? "" : "s"} seen —{" "}
+            {syncResult.bookingsCreated} created, {syncResult.bookingsUpdated} updated,{" "}
+            {syncResult.bookingsCancelled} cancelled.
+          </p>
+          {syncResult.eventsSkippedNoClientData > 0 ? (
+            <p className="mt-1">
+              {syncResult.eventsSkippedNoClientData} event{syncResult.eventsSkippedNoClientData === 1 ? "" : "s"}{" "}
+              skipped — recognized as a service (a route was found) but no phone number could be read from the
+              event description, so no client could be identified or created. Add a &quot;Tel: ...&quot; or
+              &quot;Phone: ...&quot; to the event description to fix this.
+            </p>
+          ) : null}
+          {syncResult.eventsIgnoredNotAService > 0 ? (
+            <p className="mt-1">
+              {syncResult.eventsIgnoredNotAService} event{syncResult.eventsIgnoredNotAService === 1 ? "" : "s"}{" "}
+              ignored — no recognizable pickup/destination route in the title.
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       <section className="rounded border p-4">

@@ -249,11 +249,22 @@ export async function syncCalendarEvents(tenantId: string): Promise<CalendarSync
   }
 
   const db = getDb();
-  const calendarApi = await getCalendarClient(tenantId);
   const result = emptyResult();
   result.fullResync = !config.syncToken;
 
   try {
+    // getCalendarClient (OAuth2Client construction + eager token
+    // validation) deliberately runs INSIDE this try block, not before it —
+    // a bug found during the 2026-09-04 live diagnosis: with it outside,
+    // any failure here (an expired/invalid Google token, a transient
+    // error) skipped the catch block entirely and left calendar_connections
+    // permanently un-updated (sync_token/last_synced_at/last_sync_status
+    // all still null forever), with no error ever recorded — the dashboard
+    // would show "never synced" indefinitely with no explanation. See the
+    // regression test "records the error on calendar_connections ... even
+    // when the failure happens acquiring the Calendar client".
+    const calendarApi = await getCalendarClient(tenantId);
+
     let nextSyncToken: string | null | undefined;
     try {
       nextSyncToken = await runSingleSyncPass(
