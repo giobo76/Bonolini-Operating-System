@@ -57,6 +57,13 @@
       "when": 1788521765249,
       "tag": "0015_calendar_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788623242167,
+      "tag": "0016_social_publishing",
+      "breakpoints": true
     }
   ]
 }

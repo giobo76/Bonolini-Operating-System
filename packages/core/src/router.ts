@@ -5,6 +5,7 @@ import { quotesRouter } from "./quotes";
 import { bookingsRouter } from "./bookings";
 import { transferRequestsRouter } from "./transfer-requests";
 import { calendarRouter } from "./calendar";
+import { socialPublishingRouter } from "./social-publishing";
 
 // dispatch, drivers, billing, notifications routers merge in here as each
 // module is built — see docs/domain/13-api-contracts.md for the intended
@@ -16,6 +17,7 @@ export const appRouter = router({
   bookings: bookingsRouter,
   transferRequests: transferRequestsRouter,
   calendar: calendarRouter,
+  socialPublishing: socialPublishingRouter,
 });
 
 export type AppRouter = typeof appRouter;
