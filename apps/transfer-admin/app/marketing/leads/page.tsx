@@ -75,7 +75,15 @@ export default async function MarketingLeadsPage({
       ? await caller.clients.list({ search: search.trim(), status: "active", pageSize: 10 })
       : null;
 
-  const filterHref = (targetChannel: string) => (targetChannel ? `?channel=${encodeURIComponent(targetChannel)}` : "?");
+  // Builds a single, correctly-formed query string (never a double "?") —
+  // channel is only included when actually set, exactly like paramsFor in
+  // apps/transfer-admin/app/customers/page.tsx.
+  function linkingHref(targetChannel: string, leadId: string): string {
+    const params = new URLSearchParams();
+    if (targetChannel) params.set("channel", targetChannel);
+    params.set("linking", leadId);
+    return `?${params.toString()}`;
+  }
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 p-8">
@@ -148,7 +156,7 @@ export default async function MarketingLeadsPage({
                 <td className="max-w-xs truncate py-2 pr-4">{lead.landingPage ?? "—"}</td>
                 <td className="py-2 pr-4">{formatDate(lead.createdAt)}</td>
                 <td className="py-2 pr-4">
-                  <a href={`${filterHref(channel)}${channel ? "&" : "?"}linking=${lead.id}`} className="text-sm underline">
+                  <a href={linkingHref(channel, lead.id)} className="text-sm underline">
                     {linking === lead.id ? "Linking…" : "Link to client →"}
                   </a>
                 </td>
