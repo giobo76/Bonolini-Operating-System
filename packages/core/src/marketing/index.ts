@@ -44,6 +44,7 @@ export type {
   Finding,
   MarketingHealthScore,
   Report,
+  MarketingLead,
 } from "@bos/db";
 
 // upsertConnection is exported directly (not only via the router) because

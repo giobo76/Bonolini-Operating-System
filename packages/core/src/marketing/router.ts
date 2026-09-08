@@ -5,6 +5,8 @@ import {
   findingIdSchema,
   listFindingsSchema,
   updateFindingStatusSchema,
+  listUnlinkedLeadsSchema,
+  linkLeadToClientSchema,
 } from "./schema";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -109,5 +111,29 @@ export const marketingRouter = router({
       const report = await marketingService.getReport(ctx.session.profile.tenantId, input.id);
       if (!report) throw new TRPCError({ code: "NOT_FOUND" });
       return report;
+    }),
+
+  // ── Manual, deterministic lead -> client linking ─────────────────────
+  // adminProcedure only (same as every other procedure in this router —
+  // ad spend and account credentials aren't the only sensitive thing here,
+  // client PII is too). tenantId always comes from ctx.session, never from
+  // the input, so listUnlinkedLeads/linkLeadToClient (marketing/service.ts)
+  // can never be pointed at another tenant's leads or clients — see that
+  // module's own tenant-isolation tests (service.test.ts).
+  listUnlinkedLeads: adminProcedure
+    .input(listUnlinkedLeadsSchema)
+    .query(({ ctx, input }) => marketingService.listUnlinkedLeads(ctx.session.profile.tenantId, input)),
+
+  // linkLeadToClient (service.ts) returns null — never throws — when either
+  // the lead or the client doesn't exist in the caller's own tenant (e.g. a
+  // stale/tampered id from a different tenant). Translated to NOT_FOUND
+  // here, same convention as getReport above, rather than silently
+  // succeeding or leaking whether the id exists in some other tenant.
+  linkLeadToClient: adminProcedure
+    .input(linkLeadToClientSchema)
+    .mutation(async ({ ctx, input }) => {
+      const linked = await marketingService.linkLeadToClient(ctx.session.profile.tenantId, input);
+      if (!linked) throw new TRPCError({ code: "NOT_FOUND" });
+      return linked;
     }),
 });

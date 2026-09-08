@@ -61,7 +61,8 @@ export default async function MarketingOverviewPage({
     revenueBySource,
     ltvBySource,
     transferRequestFunnel,
-    realConversionSummary;
+    realConversionSummary,
+    unlinkedLeads;
   try {
     [
       healthScore,
@@ -73,6 +74,7 @@ export default async function MarketingOverviewPage({
       ltvBySource,
       transferRequestFunnel,
       realConversionSummary,
+      unlinkedLeads,
     ] = await Promise.all([
       caller.marketing.getHealthScore(),
       caller.marketing.listHealthScoreHistory(),
@@ -83,6 +85,7 @@ export default async function MarketingOverviewPage({
       caller.marketing.getLtvBySource(),
       caller.marketing.getTransferRequestFunnel(),
       caller.marketing.getRealConversionSummary(),
+      caller.marketing.listUnlinkedLeads({ limit: 100 }),
     ]);
   } catch (error) {
     if (error instanceof TRPCError && error.code === "FORBIDDEN") {
@@ -108,6 +111,9 @@ export default async function MarketingOverviewPage({
           <h1 className="text-2xl font-semibold">Marketing Intelligence</h1>
         </div>
         <div className="flex gap-2">
+          <Link href="/marketing/leads" className="rounded border px-3 py-1.5 text-sm">
+            Leads{unlinkedLeads.length > 0 ? ` (${unlinkedLeads.length}${unlinkedLeads.length === 100 ? "+" : ""})` : ""}
+          </Link>
           <Link href="/marketing/reports" className="rounded border px-3 py-1.5 text-sm">
             Reports
           </Link>
