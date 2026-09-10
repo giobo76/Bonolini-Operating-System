@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, ne } from "drizzle-orm";
 import {
   getDb,
   marketingConnections,
@@ -6,14 +6,21 @@ import {
   findings,
   marketingHealthScores,
   marketingLeads,
+  leadMatchCandidates,
+  whatsappMessages,
   reports,
   clients,
   tenants,
   assertOne,
   type Finding,
+  type Client,
+  type MarketingLead,
 } from "@bos/db";
 import { encryptToken } from "./encryption";
 import { computeHealthScore } from "./health-score";
+import { generateContactToken, extractContactToken } from "./contact-token";
+import { findTimeProximityCandidates } from "./lead-matching";
+import { log, captureException } from "../observability";
 
 import type {
   AddLinkedResourceInput,
@@ -291,9 +298,44 @@ async function getDefaultTenantId(): Promise<string> {
 // tenantId from the caller. Every new lead starts status "new" and
 // clientId null — linking to a real client only ever happens through
 // linkLeadToClient, by a staff member, never automatically here.
+// 5 consecutive collisions against ~40 bits of entropy each is
+// astronomically unlikely — this loop exists for defense-in-depth, not
+// because a real collision is expected.
+const MAX_CONTACT_TOKEN_ATTEMPTS = 5;
+
+async function generateUniqueContactToken(tenantId: string): Promise<string | null> {
+  const db = getDb();
+  for (let attempt = 0; attempt < MAX_CONTACT_TOKEN_ATTEMPTS; attempt++) {
+    const candidate = generateContactToken();
+    const existing = await db
+      .select({ id: marketingLeads.id })
+      .from(marketingLeads)
+      .where(and(eq(marketingLeads.tenantId, tenantId), eq(marketingLeads.contactToken, candidate)));
+    if (existing.length === 0) return candidate;
+  }
+  return null;
+}
+
 export async function recordLeadIntent(input: RecordLeadIntentInput) {
   const db = getDb();
   const tenantId = await getDefaultTenantId();
+
+  // Only whatsapp/email can carry a token back to BOS in the actual reply
+  // text — a phone call and a form submission have no equivalent "reply"
+  // BOS ever reads, so generating one for them would be dead weight. See
+  // marketing/contact-token.ts.
+  let contactToken: string | null = null;
+  if (input.channel === "whatsapp" || input.channel === "email") {
+    try {
+      contactToken = await generateUniqueContactToken(tenantId);
+    } catch (error) {
+      // Fail soft: a DB hiccup while minting a token must never block
+      // recording the lead itself, or the visitor's real contact attempt
+      // that depends on this call returning promptly.
+      captureException(error, "marketing.lead_intent.token_generation_failed", { channel: input.channel });
+      contactToken = null;
+    }
+  }
 
   const rows = await db
     .insert(marketingLeads)
@@ -311,6 +353,7 @@ export async function recordLeadIntent(input: RecordLeadIntentInput) {
       utmContent: input.utmContent,
       gclid: input.gclid,
       visitorId: input.visitorId,
+      contactToken,
     })
     .returning();
   return assertOne(rows, "recordLeadIntent");
@@ -347,6 +390,17 @@ export async function listUnlinkedLeads(tenantId: string, input: ListUnlinkedLea
 // that's the router's job, same convention as updateFindingStatus/
 // removeLinkedResource above) if the lead or the client don't both exist
 // in the caller's own tenant.
+//
+// An explicit human confirmation is one of exactly three things that ever
+// produce attribution_confidence='certain' (the other two: a matched
+// contact_token, a matched visitor_id — see confirmLeadByContactToken
+// below). This function NEVER writes to `clients` — acquisition
+// attribution is write-once, set only at the moment a client is first
+// created, never touched by any later lead-linking activity. Linking a
+// 2026-09 ChatGPT-sourced lead to a client who was actually acquired via
+// Google Ads in 2026-08 must never make it look like ChatGPT acquired
+// them — this function structurally cannot do that, since it has no code
+// path that writes a client column at all.
 export async function linkLeadToClient(
   tenantId: string,
   input: { marketingLeadId: string; clientId: string },
@@ -367,8 +421,176 @@ export async function linkLeadToClient(
 
   const rows = await db
     .update(marketingLeads)
-    .set({ clientId: input.clientId, status: "converted" })
+    .set({
+      clientId: input.clientId,
+      status: "converted",
+      attributionConfidence: "certain",
+      attributionMethod: "manual_admin",
+    })
     .where(and(eq(marketingLeads.tenantId, tenantId), eq(marketingLeads.id, input.marketingLeadId)))
     .returning();
   return assertOne(rows, "linkLeadToClient");
+}
+
+// ── Deterministic reconciliation via contact_token ───────────────────────
+// Called from the whatsapp module (packages/core/src/whatsapp/service.ts,
+// a legitimate cross-module call through this module's public boundary —
+// same pattern calendar already uses to reach ../marketing) once an
+// inbound message's client has been resolved. Never called for a message
+// whose text carries no recognizable token — extractContactToken returns
+// null immediately, no DB round-trip wasted.
+//
+// Acquisition write-once, enforced here structurally: `clientIsNew` must
+// be true (this client row was created in this exact call, not found by
+// phone) before this function ever touches a `clients` column. A returning
+// customer's contact_token match still links the lead (so lead-based
+// funnel reporting works), but their existing acquisition fields are never
+// touched — they were acquired whenever they first showed up, not now.
+export interface ConfirmLeadByContactTokenResult {
+  linked: boolean;
+  marketingLeadId?: string;
+}
+
+async function backfillClientAcquisitionFromLead(client: Client, lead: MarketingLead): Promise<void> {
+  const updates: Partial<Client> = {};
+  if (!client.utmSource && lead.utmSource) updates.utmSource = lead.utmSource;
+  if (!client.utmMedium && lead.utmMedium) updates.utmMedium = lead.utmMedium;
+  if (!client.utmCampaign && lead.utmCampaign) updates.utmCampaign = lead.utmCampaign;
+  if (!client.utmTerm && lead.utmTerm) updates.utmTerm = lead.utmTerm;
+  if (!client.utmContent && lead.utmContent) updates.utmContent = lead.utmContent;
+  if (!client.gclid && lead.gclid) updates.gclid = lead.gclid;
+  if (!client.landingPage && lead.landingPage) updates.landingPage = lead.landingPage;
+  if (!client.referrer && lead.referrer) updates.referrer = lead.referrer;
+
+  if (Object.keys(updates).length === 0) return;
+
+  const db = getDb();
+  await db.update(clients).set(updates).where(eq(clients.id, client.id));
+}
+
+export async function confirmLeadByContactToken(
+  tenantId: string,
+  input: { rawText: string; client: Client; clientIsNew: boolean },
+): Promise<ConfirmLeadByContactTokenResult> {
+  const token = extractContactToken(input.rawText);
+  if (!token) return { linked: false };
+
+  const db = getDb();
+
+  // Only an unlinked lead is eligible — a token string reappearing after
+  // its lead is already resolved (e.g. a customer replies twice) must
+  // never re-target or duplicate a link.
+  const [lead] = await db
+    .select()
+    .from(marketingLeads)
+    .where(
+      and(
+        eq(marketingLeads.tenantId, tenantId),
+        eq(marketingLeads.contactToken, token),
+        isNull(marketingLeads.clientId),
+      ),
+    );
+  if (!lead) return { linked: false };
+
+  await db
+    .update(marketingLeads)
+    .set({
+      clientId: input.client.id,
+      status: "converted",
+      attributionConfidence: "certain",
+      attributionMethod: "contact_token",
+    })
+    .where(eq(marketingLeads.id, lead.id));
+
+  if (input.clientIsNew) {
+    await backfillClientAcquisitionFromLead(input.client, lead);
+  }
+
+  log("marketing.lead_intent.confirmed_by_token", {
+    tenantId,
+    marketingLeadId: lead.id,
+    clientIsNew: input.clientIsNew,
+  });
+
+  return { linked: true, marketingLeadId: lead.id };
+}
+
+// ── Ambiguous candidate detection (time-proximity only) ──────────────────
+// Manually triggered (via marketing.detectAmbiguousLeadCandidates,
+// adminProcedure) — no cron wires this up yet, a deliberate scope
+// decision, not an oversight. Idempotent: re-running never duplicates a
+// candidate row (unique on marketing_lead_id+client_id) and never
+// downgrades a lead that became "certain" in the meantime.
+export interface RecordAmbiguousLeadCandidatesResult {
+  candidatesRecorded: number;
+  leadsMarkedAmbiguous: number;
+}
+
+export async function recordAmbiguousLeadCandidates(tenantId: string): Promise<RecordAmbiguousLeadCandidatesResult> {
+  const db = getDb();
+
+  const [candidateLeads, messages] = await Promise.all([
+    db
+      .select()
+      .from(marketingLeads)
+      .where(
+        and(
+          eq(marketingLeads.tenantId, tenantId),
+          isNull(marketingLeads.clientId),
+          ne(marketingLeads.attributionConfidence, "certain"),
+        ),
+      ),
+    db
+      .select({ clientId: whatsappMessages.clientId, receivedAt: whatsappMessages.receivedAt })
+      .from(whatsappMessages)
+      .where(and(eq(whatsappMessages.tenantId, tenantId))),
+  ]);
+
+  const pairs = findTimeProximityCandidates(candidateLeads, messages);
+
+  let candidatesRecorded = 0;
+  const leadsToMarkAmbiguous = new Set<string>();
+
+  for (const pair of pairs) {
+    const inserted = await db
+      .insert(leadMatchCandidates)
+      .values({
+        tenantId,
+        marketingLeadId: pair.marketingLeadId,
+        clientId: pair.clientId,
+        method: "whatsapp_time_proximity",
+        note: `${pair.deltaMinutes.toFixed(1)} min after lead creation`,
+      })
+      .onConflictDoNothing({ target: [leadMatchCandidates.marketingLeadId, leadMatchCandidates.clientId] })
+      .returning();
+    if (inserted.length > 0) candidatesRecorded += 1;
+    leadsToMarkAmbiguous.add(pair.marketingLeadId);
+  }
+
+  let leadsMarkedAmbiguous = 0;
+  for (const leadId of leadsToMarkAmbiguous) {
+    const updated = await db
+      .update(marketingLeads)
+      .set({ attributionConfidence: "ambiguous" })
+      .where(
+        and(
+          eq(marketingLeads.id, leadId),
+          eq(marketingLeads.tenantId, tenantId),
+          eq(marketingLeads.attributionConfidence, "unknown"),
+        ),
+      )
+      .returning({ id: marketingLeads.id });
+    if (updated.length > 0) leadsMarkedAmbiguous += 1;
+  }
+
+  return { candidatesRecorded, leadsMarkedAmbiguous };
+}
+
+export async function listLeadMatchCandidates(tenantId: string) {
+  const db = getDb();
+  return db
+    .select()
+    .from(leadMatchCandidates)
+    .where(eq(leadMatchCandidates.tenantId, tenantId))
+    .orderBy(desc(leadMatchCandidates.createdAt));
 }

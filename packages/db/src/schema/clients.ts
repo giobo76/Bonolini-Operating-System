@@ -36,6 +36,13 @@ export const clients = pgTable("clients", {
   landingPage: text("landing_page"),
   referrer: text("referrer"),
   firstTouchAt: timestamp("first_touch_at", { withTimezone: true }),
+  // First-party browser id, mirrors marketing_leads.visitorId — the
+  // deterministic bridge for channel=form: when a client's visitor_id
+  // matches a lead's, that lead was created by the same browser session
+  // that produced this client, a real fact rather than a guess. Never set
+  // retroactively — only ever written at client-creation time by whatever
+  // code path already has the visitor's id available in that same request.
+  visitorId: text("visitor_id"),
   // Soft delete: never hard-delete a client (booking history integrity).
   // Queries filter this out by default — see packages/core/src/clients/service.ts.
   deletedAt: timestamp("deleted_at", { withTimezone: true }),

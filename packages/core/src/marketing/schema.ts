@@ -112,6 +112,11 @@ export type FinancialImpact = z.infer<typeof financialImpactSchema>;
 export const marketingLeadChannelSchema = z.enum(["whatsapp", "phone", "email", "form"]);
 export const marketingLeadStatusSchema = z.enum(["new", "contacted", "converted", "discarded"]);
 
+// See packages/db/migrations/0017_lead_attribution.sql's header for the
+// full rationale — "certain" is never produced by time proximity alone.
+export const leadAttributionConfidenceSchema = z.enum(["certain", "ambiguous", "unknown"]);
+export const leadAttributionMethodSchema = z.enum(["contact_token", "visitor_id", "manual_admin", "none"]);
+
 // .strict() (added in Phase 3, for the public HTTP endpoint): a plain
 // z.object() silently strips unrecognized keys instead of rejecting them —
 // wrong here, since the endpoint must actively reject a payload carrying

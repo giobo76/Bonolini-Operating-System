@@ -9,8 +9,13 @@ import { TRPCError } from "@trpc/server";
 const serviceMock = vi.hoisted(() => ({
   listUnlinkedLeads: vi.fn(),
   linkLeadToClient: vi.fn(),
+  recordAmbiguousLeadCandidates: vi.fn(),
+  listLeadMatchCandidates: vi.fn(),
 }));
 vi.mock("./service", () => serviceMock);
+
+const businessKpisMock = vi.hoisted(() => ({ getLeadConversionBySource: vi.fn() }));
+vi.mock("./business-kpis", () => businessKpisMock);
 
 const { marketingRouter } = await import("./router");
 
@@ -29,6 +34,9 @@ const VALID_LINK_INPUT = { marketingLeadId: "11111111-1111-1111-1111-11111111111
 beforeEach(() => {
   serviceMock.listUnlinkedLeads.mockReset();
   serviceMock.linkLeadToClient.mockReset();
+  serviceMock.recordAmbiguousLeadCandidates.mockReset();
+  serviceMock.listLeadMatchCandidates.mockReset();
+  businessKpisMock.getLeadConversionBySource.mockReset();
 });
 
 describe("marketingRouter.listUnlinkedLeads — authorization", () => {
@@ -108,5 +116,56 @@ describe("marketingRouter.linkLeadToClient — input validation", () => {
       callerWithSession("admin").linkLeadToClient({ marketingLeadId: "not-a-uuid", clientId: "also-not-a-uuid" }),
     ).rejects.toThrow();
     expect(serviceMock.linkLeadToClient).not.toHaveBeenCalled();
+  });
+});
+
+describe("marketingRouter.detectAmbiguousLeadCandidates — authorization + tenant scoping", () => {
+  it("rejects a dispatcher with FORBIDDEN, never reaching the service", async () => {
+    await expect(callerWithSession("dispatcher").detectAmbiguousLeadCandidates()).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(serviceMock.recordAmbiguousLeadCandidates).not.toHaveBeenCalled();
+  });
+
+  it("allows an admin, passing exactly ctx.session.profile.tenantId", async () => {
+    serviceMock.recordAmbiguousLeadCandidates.mockResolvedValue({ candidatesRecorded: 0, leadsMarkedAmbiguous: 0 });
+
+    await callerWithSession("admin", "tenant-real").detectAmbiguousLeadCandidates();
+
+    expect(serviceMock.recordAmbiguousLeadCandidates).toHaveBeenCalledWith("tenant-real");
+  });
+});
+
+describe("marketingRouter.listLeadMatchCandidates — authorization + tenant scoping", () => {
+  it("rejects a dispatcher with FORBIDDEN, never reaching the service", async () => {
+    await expect(callerWithSession("dispatcher").listLeadMatchCandidates()).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(serviceMock.listLeadMatchCandidates).not.toHaveBeenCalled();
+  });
+
+  it("allows an admin, passing exactly ctx.session.profile.tenantId", async () => {
+    serviceMock.listLeadMatchCandidates.mockResolvedValue([]);
+
+    await callerWithSession("admin", "tenant-real").listLeadMatchCandidates();
+
+    expect(serviceMock.listLeadMatchCandidates).toHaveBeenCalledWith("tenant-real");
+  });
+});
+
+describe("marketingRouter.getLeadConversionBySource — authorization + tenant scoping", () => {
+  it("rejects a dispatcher with FORBIDDEN, never reaching business-kpis", async () => {
+    await expect(callerWithSession("dispatcher").getLeadConversionBySource()).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(businessKpisMock.getLeadConversionBySource).not.toHaveBeenCalled();
+  });
+
+  it("allows an admin, passing exactly ctx.session.profile.tenantId", async () => {
+    businessKpisMock.getLeadConversionBySource.mockResolvedValue({ bySource: [], ambiguousLeads: 0, unknownLeads: 0 });
+
+    await callerWithSession("admin", "tenant-real").getLeadConversionBySource();
+
+    expect(businessKpisMock.getLeadConversionBySource).toHaveBeenCalledWith("tenant-real");
   });
 });

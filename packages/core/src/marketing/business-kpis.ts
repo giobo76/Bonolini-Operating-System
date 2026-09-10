@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { getDb, clients, quotes, bookings, transferRequests, type Client } from "@bos/db";
+import { getDb, clients, quotes, bookings, transferRequests, marketingLeads, type Client } from "@bos/db";
 
 // Deliberate, narrow exception to the module-boundary rule in ADR 0002:
 // this file runs read-only analytical queries directly against clients/
@@ -463,4 +463,104 @@ export async function getCostPerStageBySource(
       costPerCompletedServiceCents: perUnit(spendCents, entry.bookingsCompleted),
     };
   });
+}
+
+// ── Lead Conversion by Source — deliberately separate from revenue-by- ──
+// source above, never merged into one number. That function answers "what
+// channel originally acquired this client" (clients.utmSource/gclid,
+// write-once at client creation). This one answers a different question:
+// "of the CERTAIN-linked contact events from source X, how many produced a
+// real booking" — a touch-based measure that can legitimately include
+// leads from clients who were acquired through a completely different
+// channel long ago (see marketing/service.ts's confirmLeadByContactToken
+// for why that's correct, not a bug). Mixing the two into a single
+// "revenue by source" figure would be exactly the conflation the founder
+// explicitly ruled out (2026-09).
+//
+// AMBIGUOUS and UNKNOWN leads are counted and returned separately —
+// never folded into any source bucket, never estimated into a revenue
+// figure. A source bucket only ever exists here for a lead whose
+// attribution_confidence is 'certain'.
+
+export interface LeadConversionSourceEntry {
+  source: string;
+  certainLeads: number;
+  certainLeadsWithBooking: number;
+  // Only ever summed from 'completed' bookings' real amounts
+  // (paidAmountCents ?? finalAmountCents ?? 0) — same precedence
+  // getRevenueBySource already uses, never a new fallback invented here.
+  // A 'confirmed'-but-not-yet-delivered booking contributes 0, same
+  // distinction getRealConversionSummary already draws.
+  revenueCents: number;
+}
+
+export interface LeadConversionBySource {
+  bySource: LeadConversionSourceEntry[];
+  // Counted, never attributed to any source and never included in
+  // revenueCents anywhere in bySource — these leads simply don't have
+  // enough evidence, and no code path here estimates around that gap.
+  ambiguousLeads: number;
+  unknownLeads: number;
+}
+
+export async function getLeadConversionBySource(tenantId: string): Promise<LeadConversionBySource> {
+  const db = getDb();
+  const [allLeads, allBookings] = await Promise.all([
+    db.select().from(marketingLeads).where(eq(marketingLeads.tenantId, tenantId)),
+    db.select().from(bookings).where(eq(bookings.tenantId, tenantId)),
+  ]);
+
+  const bookingsByClientId = new Map<string, typeof allBookings>();
+  for (const booking of allBookings) {
+    if (booking.status === "cancelled") continue;
+    const existing = bookingsByClientId.get(booking.clientId) ?? [];
+    existing.push(booking);
+    bookingsByClientId.set(booking.clientId, existing);
+  }
+
+  const bucket = new Map<string, LeadConversionSourceEntry>();
+  let ambiguousLeads = 0;
+  let unknownLeads = 0;
+
+  for (const lead of allLeads) {
+    if (lead.attributionConfidence === "ambiguous") {
+      ambiguousLeads += 1;
+      continue;
+    }
+    if (lead.attributionConfidence === "unknown") {
+      unknownLeads += 1;
+      continue;
+    }
+
+    // "certain" from here on — the only tier ever allowed to touch a
+    // source bucket or a revenue figure.
+    const source = deriveSource(lead);
+    let entry = bucket.get(source);
+    if (!entry) {
+      entry = { source, certainLeads: 0, certainLeadsWithBooking: 0, revenueCents: 0 };
+      bucket.set(source, entry);
+    }
+    entry.certainLeads += 1;
+
+    // Defensive only: a 'certain' lead always has clientId set by every
+    // real code path that produces 'certain' (linkLeadToClient,
+    // confirmLeadByContactToken) — never expected to be null here.
+    if (!lead.clientId) continue;
+
+    const clientBookings = bookingsByClientId.get(lead.clientId) ?? [];
+    const realBookings = clientBookings.filter((b) => b.status === "confirmed" || b.status === "completed");
+    if (realBookings.length === 0) continue;
+
+    entry.certainLeadsWithBooking += 1;
+    for (const booking of realBookings) {
+      if (booking.status !== "completed") continue;
+      entry.revenueCents += booking.paidAmountCents ?? booking.finalAmountCents ?? 0;
+    }
+  }
+
+  return {
+    bySource: Array.from(bucket.values()).sort((a, b) => b.certainLeads - a.certainLeads),
+    ambiguousLeads,
+    unknownLeads,
+  };
 }

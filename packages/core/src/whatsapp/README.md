@@ -44,3 +44,7 @@ These were genuine judgment calls not fully specified by the approved design —
 - Never invents data: every field the parser doesn't find in the message is omitted, not guessed.
 - Never overwrites existing client data with null/undefined, and never merges multiple messages into a new lead — one client per phone number.
 - Idempotency is real (DB unique constraint), not best-effort.
+
+## Lead attribution reconciliation (2026-09)
+
+`processInboundMessage` calls `confirmLeadByContactToken` (`../marketing`, the one legitimate cross-module call in this file, same pattern calendar uses to reach marketing's OAuth client) after resolving the client, for real text messages only. It looks for BOS's own unguessable `contact_token` in the message's real `raw_text` — never a name/phone/proximity guess — and, only when found, links the matching unlinked `marketing_leads` row with `attribution_confidence = 'certain'`. `findOrCreateClientByPhone`'s return now carries `isNew`, passed straight through: a brand-new client's acquisition fields (`utmSource`/`gclid`/etc.) get backfilled from the lead's own captured data at that exact moment; a returning client's never do. Fully fail-soft — any error here is caught and logged, and never blocks processing the real inbound message or its response to Meta. See `marketing/README.md`'s "Lead attribution" section for the full design.

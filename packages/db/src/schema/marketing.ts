@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, pgEnum, boolean, smallint, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, pgEnum, boolean, smallint, jsonb, unique } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
 import { profiles } from "./profiles";
 import { clients } from "./clients";
@@ -242,6 +242,31 @@ export const marketingLeadStatusEnum = pgEnum("marketing_lead_status", [
   "discarded",
 ]);
 
+// ── Lead attribution confidence ──────────────────────────────────────────
+// Deliberately separate from `status` above (workflow state) — this tracks
+// how sure BOS is that `clientId` (once set) actually identifies the real
+// person behind this lead. Per the founder's explicit, binding rule: time
+// proximity alone — even a single, non-competing candidate — is NEVER
+// sufficient for "certain". Only three things ever produce "certain":
+// (1) a contact_token found verbatim in a real inbound message/reply,
+// (2) a shared visitor_id between this lead and a client, (3) an explicit
+// human confirmation via the admin UI (linkLeadToClient). Anything found
+// only by time-proximity heuristics is recorded in `lead_match_candidates`
+// below and marked "ambiguous" here — never promoted automatically,
+// regardless of how few (or how single) the competing candidates are.
+export const leadAttributionConfidenceEnum = pgEnum("lead_attribution_confidence", [
+  "certain",
+  "ambiguous",
+  "unknown",
+]);
+
+export const leadAttributionMethodEnum = pgEnum("lead_attribution_method", [
+  "contact_token",
+  "visitor_id",
+  "manual_admin",
+  "none",
+]);
+
 export const marketingLeads = pgTable("marketing_leads", {
   id: uuid("id").defaultRandom().primaryKey(),
   tenantId: uuid("tenant_id")
@@ -259,10 +284,64 @@ export const marketingLeads = pgTable("marketing_leads", {
   utmContent: text("utm_content"),
   gclid: text("gclid"),
   // First-party, browser-generated id (not a cross-site cookie) — groups
-  // multiple intents from the same visitor before conversion.
+  // multiple intents from the same visitor before conversion. Also the
+  // deterministic bridge for channel=form: a client row carrying the same
+  // visitor_id (see clients.visitorId) was created by the same browser
+  // session as this lead, which is a real fact, not a guess.
   visitorId: text("visitor_id"),
+  // Generated only for channel in (whatsapp, email) — see
+  // marketing/contact-token.ts. Returned to the caller of the public
+  // lead-intent endpoint so the external site can embed it in the
+  // resulting wa.me text= / mailto: subject=, giving BOS a real,
+  // unguessable string to look for in the actual reply. The partial
+  // unique index (tenant_id, contact_token) WHERE contact_token IS NOT
+  // NULL lives in the SQL migration, not here — same convention as
+  // clients' phone partial unique index (see clients/service.ts's own
+  // note on this), since drizzle-kit's schema builder can't express a
+  // partial WHERE.
+  contactToken: text("contact_token"),
+  attributionConfidence: leadAttributionConfidenceEnum("attribution_confidence").notNull().default("unknown"),
+  attributionMethod: leadAttributionMethodEnum("attribution_method").notNull().default("none"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export type MarketingLead = typeof marketingLeads.$inferSelect;
 export type NewMarketingLead = typeof marketingLeads.$inferInsert;
+
+// ── Ambiguous match candidates — never auto-promoted ─────────────────────
+// The only home for a time-proximity heuristic finding (see
+// marketing/lead-matching.ts's findTimeProximityCandidates). Recording a
+// row here is the entire effect of running that heuristic — it never
+// writes marketing_leads.client_id, never touches a client's acquisition
+// fields, and a human reviewing this table is the only path to an actual
+// link (via the existing manual linkLeadToClient flow, from whichever
+// client_id they judge correct).
+export const leadMatchMethodEnum = pgEnum("lead_match_method", ["whatsapp_time_proximity"]);
+
+export const leadMatchCandidates = pgTable(
+  "lead_match_candidates",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    marketingLeadId: uuid("marketing_lead_id")
+      .notNull()
+      .references(() => marketingLeads.id, { onDelete: "cascade" }),
+    clientId: uuid("client_id")
+      .notNull()
+      .references(() => clients.id, { onDelete: "cascade" }),
+    method: leadMatchMethodEnum("method").notNull(),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    leadClientUnique: unique("lead_match_candidates_lead_client_unique").on(
+      table.marketingLeadId,
+      table.clientId,
+    ),
+  }),
+);
+
+export type LeadMatchCandidate = typeof leadMatchCandidates.$inferSelect;
+export type NewLeadMatchCandidate = typeof leadMatchCandidates.$inferInsert;

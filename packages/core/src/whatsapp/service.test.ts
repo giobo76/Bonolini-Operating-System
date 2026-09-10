@@ -132,6 +132,17 @@ vi.mock("@bos/db", () => {
 const parseWhatsappMessage = vi.fn();
 vi.mock("./parser", () => ({ parseWhatsappMessage: (...args: unknown[]) => parseWhatsappMessage(...args) }));
 
+// ../marketing mocked at the module boundary — same convention
+// calendar/service.test.ts already uses for this exact cross-module import
+// (see whatsapp/service.ts's own comment on why this call exists). Proves
+// this file tests whatsapp/service.ts's own wiring (is it called, with
+// what, does a failure here stay contained), not marketing's token-lookup
+// logic, which has its own tests in marketing/service.test.ts.
+const confirmLeadByContactTokenMock = vi.hoisted(() => vi.fn());
+vi.mock("../marketing", () => ({
+  confirmLeadByContactToken: (...args: unknown[]) => confirmLeadByContactTokenMock(...args),
+}));
+
 const { processInboundMessage, normalizePhone } = await import("./service");
 
 function inboundMessage(overrides: Partial<ExtractedWhatsappMessage> = {}): ExtractedWhatsappMessage {
@@ -164,6 +175,8 @@ describe("processInboundMessage", () => {
     fakeState.nextMessageId = 1;
     parseWhatsappMessage.mockReset();
     parseWhatsappMessage.mockResolvedValue({});
+    confirmLeadByContactTokenMock.mockReset();
+    confirmLeadByContactTokenMock.mockResolvedValue({ linked: false });
   });
 
   // 1 / 8. duplicate whatsapp_message_id -> a single row, nothing new written
@@ -306,5 +319,60 @@ describe("processInboundMessage", () => {
     const clientUpdate = fakeState.updateCalls.find((c) => c.table === clientsTable);
     expect(clientUpdate?.values.email).toBeUndefined();
     expect(clientUpdate?.values.preferredLanguage).toBe("it");
+  });
+
+  describe("contact_token reconciliation (deterministic, via ../marketing)", () => {
+    it("calls confirmLeadByContactToken with the raw text and clientIsNew=true for a brand-new client", async () => {
+      await processInboundMessage(inboundMessage({ rawText: "Hi! Ref: REF-ABCD1234" }));
+
+      expect(confirmLeadByContactTokenMock).toHaveBeenCalledTimes(1);
+      const call = confirmLeadByContactTokenMock.mock.calls[0]![1] as {
+        rawText: string;
+        client: { id: string };
+        clientIsNew: boolean;
+      };
+      expect(call.rawText).toBe("Hi! Ref: REF-ABCD1234");
+      expect(call.clientIsNew).toBe(true);
+      expect(call.client.id).toBe(fakeState.insertedClients[0]!.id);
+    });
+
+    it("passes clientIsNew=false when the phone already matched an existing client", async () => {
+      fakeState.clients = [
+        { id: "client-existing", tenantId: "tenant-1", phone: "393281234567", email: null, preferredLanguage: null, deletedAt: null },
+      ];
+
+      await processInboundMessage(inboundMessage());
+
+      const call = confirmLeadByContactTokenMock.mock.calls[0]![1] as { clientIsNew: boolean };
+      expect(call.clientIsNew).toBe(false);
+    });
+
+    it("never calls confirmLeadByContactToken for a non-text message", async () => {
+      await processInboundMessage(inboundMessage({ type: "image", rawText: null }));
+
+      expect(confirmLeadByContactTokenMock).not.toHaveBeenCalled();
+    });
+
+    it("never calls confirmLeadByContactToken on a duplicate message delivery", async () => {
+      fakeState.whatsappMessages = [
+        { id: "msg-existing", tenantId: "tenant-1", whatsappMessageId: "wamid.ABC123", clientId: "client-existing", parsed: {}, rawText: "orig" },
+      ];
+
+      await processInboundMessage(inboundMessage());
+
+      expect(confirmLeadByContactTokenMock).not.toHaveBeenCalled();
+    });
+
+    it("a confirmLeadByContactToken failure never blocks message processing (fail-soft)", async () => {
+      confirmLeadByContactTokenMock.mockRejectedValue(new Error("db exploded"));
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const result = await processInboundMessage(inboundMessage());
+
+      expect(result.status).toBe("processed");
+      expect(result.clientId).not.toBeNull();
+      expect(consoleErrorSpy).toHaveBeenCalled();
+      consoleErrorSpy.mockRestore();
+    });
   });
 });

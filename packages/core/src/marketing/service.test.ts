@@ -105,6 +105,13 @@ describe("recordLeadIntent", () => {
   beforeEach(() => {
     fakeState.tenant = { id: "tenant-1" };
     fakeState.insertedValues = undefined;
+    // Reused (not re-purposed): generateUniqueContactToken's own
+    // collision-check also selects from marketingLeadsTable — false here
+    // means "no existing row uses this candidate token", i.e. the common,
+    // expected case, so these tests observe a real generated token rather
+    // than the fail-soft null-after-5-collisions path (covered in its own
+    // dedicated test below).
+    fakeState.leadExistsInTenant = false;
   });
 
   it("resolves the tenant server-side and forces status=new, clientId=null", async () => {
@@ -144,6 +151,38 @@ describe("recordLeadIntent", () => {
     fakeState.tenant = undefined;
     await expect(recordLeadIntent({ channel: "email" })).rejects.toThrow(/tenant/i);
   });
+
+  it("generates a contact_token for a whatsapp-channel lead", async () => {
+    await recordLeadIntent({ channel: "whatsapp" });
+    const inserted = fakeState.insertedValues as { contactToken: string | null };
+    expect(inserted.contactToken).toMatch(/^REF-[A-Z0-9]{8}$/);
+  });
+
+  it("generates a contact_token for an email-channel lead", async () => {
+    await recordLeadIntent({ channel: "email" });
+    const inserted = fakeState.insertedValues as { contactToken: string | null };
+    expect(inserted.contactToken).toMatch(/^REF-[A-Z0-9]{8}$/);
+  });
+
+  it("never generates a contact_token for a phone-channel lead — no reply BOS ever reads exists for that channel", async () => {
+    await recordLeadIntent({ channel: "phone" });
+    const inserted = fakeState.insertedValues as { contactToken: string | null };
+    expect(inserted.contactToken).toBeNull();
+  });
+
+  it("never generates a contact_token for a form-channel lead — visitor_id is that channel's bridge instead", async () => {
+    await recordLeadIntent({ channel: "form" });
+    const inserted = fakeState.insertedValues as { contactToken: string | null };
+    expect(inserted.contactToken).toBeNull();
+  });
+
+  it("fails soft to contactToken:null (never throws) when every generated candidate collides", async () => {
+    fakeState.leadExistsInTenant = true; // every uniqueness check "finds" a row -> every attempt "collides"
+
+    const result = await recordLeadIntent({ channel: "whatsapp" });
+
+    expect(result).toMatchObject({ contactToken: null });
+  });
 });
 
 describe("listUnlinkedLeads", () => {
@@ -175,9 +214,14 @@ describe("linkLeadToClient", () => {
     expect(fakeState.updateSetValues).toBeUndefined();
   });
 
-  it("links the lead to the client and sets status=converted when both exist in the tenant", async () => {
+  it("links the lead to the client and sets status=converted + attribution certain/manual_admin when both exist in the tenant", async () => {
     const result = await linkLeadToClient("tenant-1", { marketingLeadId: "lead-1", clientId: "client-1" });
-    expect(fakeState.updateSetValues).toEqual({ clientId: "client-1", status: "converted" });
+    expect(fakeState.updateSetValues).toEqual({
+      clientId: "client-1",
+      status: "converted",
+      attributionConfidence: "certain",
+      attributionMethod: "manual_admin",
+    });
     expect(result).toMatchObject({ clientId: "client-1", status: "converted" });
   });
 });

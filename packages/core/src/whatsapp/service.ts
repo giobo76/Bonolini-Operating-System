@@ -2,6 +2,10 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { getDb, clients, whatsappMessages, tenants, assertOne, type Client } from "@bos/db";
 import { parseWhatsappMessage } from "./parser";
 import type { ExtractedWhatsappMessage, ParsedWhatsappMessage } from "./schema";
+// Legitimate cross-module call through marketing's public boundary (../marketing),
+// same pattern calendar already uses to reach marketing's OAuth client — see
+// ADR 0002. This is the one place whatsapp reaches outside its own module.
+import { confirmLeadByContactToken } from "../marketing";
 
 // Same pattern as clients/service.ts's getDefaultTenantId — BOS is
 // single-tenant in practice today (see ADR 0004), and the WhatsApp webhook
@@ -65,12 +69,22 @@ async function findClientByPhone(tenantId: string, normalizedPhone: string): Pro
 // query-builder .onConflictDoNothing(), because Drizzle's conflict target
 // only accepts plain columns, not the expression + partial-WHERE target
 // this index requires.
+export interface FindOrCreateClientResult {
+  client: Client;
+  // True only when this exact call inserted the row — never true for a
+  // phone number that already had a client, even if this is that client's
+  // very first WhatsApp message. Existence, not "first message," is what
+  // acquisition write-once cares about — see confirmLeadByContactToken's
+  // own doc comment in packages/core/src/marketing/service.ts.
+  isNew: boolean;
+}
+
 async function findOrCreateClientByPhone(
   tenantId: string,
   normalizedPhone: string,
   profileName: string | null,
   receivedAt: Date,
-): Promise<Client> {
+): Promise<FindOrCreateClientResult> {
   const db = getDb();
 
   const insertedRows = await db.execute<Client>(sql`
@@ -89,7 +103,7 @@ async function findOrCreateClientByPhone(
   `);
 
   if (insertedRows.length > 0) {
-    return insertedRows[0] as Client;
+    return { client: insertedRows[0] as Client, isNew: true };
   }
 
   // Conflict: another row (created just now by a concurrent invocation, or
@@ -103,7 +117,7 @@ async function findOrCreateClientByPhone(
     // producing a client-less message.
     throw new Error("findOrCreateClientByPhone: insert conflicted but no matching client was found");
   }
-  return existing;
+  return { client: existing, isNew: false };
 }
 
 // Only fills fields that are currently empty on the client — never
@@ -184,10 +198,29 @@ export async function processInboundMessage(
 
   const row = assertOne(inserted, "processInboundMessage");
 
-  const client = await findOrCreateClientByPhone(tenantId, normalizedPhone, message.profileName, message.receivedAt);
+  const { client, isNew: clientIsNew } = await findOrCreateClientByPhone(
+    tenantId,
+    normalizedPhone,
+    message.profileName,
+    message.receivedAt,
+  );
 
   const parsed: ParsedWhatsappMessage =
     message.type === "text" && message.rawText ? await parseWhatsappMessage(message.rawText, message.receivedAt) : {};
+
+  // Deterministic lead reconciliation: only ever runs for a real text
+  // message, only ever looks for BOS's own unguessable contact_token (see
+  // marketing/contact-token.ts) — never a name/phone/proximity guess. Fail
+  // soft, same discipline as the Claude parsing call above: a problem here
+  // must never block processing the real inbound message itself, and
+  // WhatsApp must still receive its normal delivery response either way.
+  if (message.type === "text" && message.rawText) {
+    try {
+      await confirmLeadByContactToken(tenantId, { rawText: message.rawText, client, clientIsNew });
+    } catch (error) {
+      console.error("confirmLeadByContactToken failed — message processing continues", error);
+    }
+  }
 
   // KNOWN LIMITATION, deliberately not hidden (pre-commit review, Problema
   // 4): if findOrCreateClientByPhone or this update throw (e.g. a

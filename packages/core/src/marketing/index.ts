@@ -6,7 +6,14 @@ export {
   recordHealthScoreSnapshot,
   listReports,
   getReport,
+  confirmLeadByContactToken,
+  recordAmbiguousLeadCandidates,
+  listLeadMatchCandidates,
 } from "./service";
+export type { ConfirmLeadByContactTokenResult, RecordAmbiguousLeadCandidatesResult } from "./service";
+export { generateContactToken, extractContactToken } from "./contact-token";
+export { findTimeProximityCandidates } from "./lead-matching";
+export type { CandidateLeadInput, CandidateMessageInput, CandidatePair } from "./lead-matching";
 export { runCheck } from "./run-check";
 export { assertValidOAuthRedirectUri, getCalendarClient } from "./google-clients";
 export { trackLeadConversion, sendGa4ConversionEvent, resolveGa4ClientId } from "./measurement-protocol";
@@ -28,6 +35,7 @@ export {
   getRevenueBySource,
   getLtvBySource,
   getCostPerStageBySource,
+  getLeadConversionBySource,
 } from "./business-kpis";
 export type {
   FunnelSummary,
@@ -36,6 +44,8 @@ export type {
   RevenueSourceEntry,
   LtvSourceEntry,
   CostPerStageEntry,
+  LeadConversionBySource,
+  LeadConversionSourceEntry,
 } from "./business-kpis";
 export type {
   MarketingConnection,
@@ -45,6 +55,7 @@ export type {
   MarketingHealthScore,
   Report,
   MarketingLead,
+  LeadMatchCandidate,
 } from "@bos/db";
 
 // upsertConnection is exported directly (not only via the router) because

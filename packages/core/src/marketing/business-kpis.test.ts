@@ -5,36 +5,41 @@ import { describe, expect, it, vi } from "vitest";
 // proves these functions are structurally read-only, not just read-only by
 // convention — no request/booking/client is ever written by any function
 // under test here.
-const { fakeState, transferRequestsTable, clientsTable, bookingsTable, quotesTable } = vi.hoisted(() => {
-  return {
-    fakeState: {
-      transferRequestRows: [] as Array<{ status: string }>,
-      clientRows: [] as Array<{
-        id: string;
-        utmCampaign?: string | null;
-        utmSource?: string | null;
-        gclid?: string | null;
-        preferredLanguage?: string | null;
-      }>,
-      bookingRows: [] as Array<{
-        clientId: string;
-        status: string;
-        paidAmountCents?: number | null;
-        finalAmountCents?: number | null;
-      }>,
-    },
-    transferRequestsTable: { __name: "transferRequests" },
-    clientsTable: { __name: "clients" },
-    bookingsTable: { __name: "bookings" },
-    quotesTable: { __name: "quotes" },
-  };
-});
+const { fakeState, transferRequestsTable, clientsTable, bookingsTable, quotesTable, marketingLeadsTable } = vi.hoisted(
+  () => {
+    return {
+      fakeState: {
+        transferRequestRows: [] as Array<{ status: string }>,
+        clientRows: [] as Array<{
+          id: string;
+          utmCampaign?: string | null;
+          utmSource?: string | null;
+          gclid?: string | null;
+          preferredLanguage?: string | null;
+        }>,
+        bookingRows: [] as Array<{
+          clientId: string;
+          status: string;
+          paidAmountCents?: number | null;
+          finalAmountCents?: number | null;
+        }>,
+        marketingLeadRows: [] as Array<Record<string, unknown>>,
+      },
+      transferRequestsTable: { __name: "transferRequests" },
+      clientsTable: { __name: "clients" },
+      bookingsTable: { __name: "bookings" },
+      quotesTable: { __name: "quotes" },
+      marketingLeadsTable: { __name: "marketingLeads" },
+    };
+  },
+);
 
 vi.mock("@bos/db", () => ({
   transferRequests: transferRequestsTable,
   clients: clientsTable,
   quotes: quotesTable,
   bookings: bookingsTable,
+  marketingLeads: marketingLeadsTable,
   getDb: () => ({
     select: () => ({
       from: (table: unknown) => ({
@@ -42,6 +47,7 @@ vi.mock("@bos/db", () => ({
           if (table === transferRequestsTable) return Promise.resolve(fakeState.transferRequestRows);
           if (table === clientsTable) return Promise.resolve(fakeState.clientRows);
           if (table === bookingsTable) return Promise.resolve(fakeState.bookingRows);
+          if (table === marketingLeadsTable) return Promise.resolve(fakeState.marketingLeadRows);
           return Promise.resolve([]);
         },
       }),
@@ -52,7 +58,9 @@ vi.mock("@bos/db", () => ({
   }),
 }));
 
-const { getTransferRequestFunnel, getRealConversionSummary } = await import("./business-kpis");
+const { getTransferRequestFunnel, getRealConversionSummary, getLeadConversionBySource } = await import(
+  "./business-kpis"
+);
 
 function request(status: string) {
   return { status };
@@ -331,5 +339,113 @@ describe("getRealConversionSummary", () => {
     const result = await getRealConversionSummary("tenant-1");
 
     expect(result.realRevenueCents).toBe(39000);
+  });
+});
+
+// ── Lead Conversion by Source ──────────────────────────────────────────────
+// Deliberately separate suite: the founder's binding rules under direct
+// test here — certain-only counting, ambiguous/unknown reported but never
+// folded into any bucket or revenue figure, no invented Google Ads
+// attribution without a real gclid.
+function lead(overrides: {
+  clientId?: string | null;
+  attributionConfidence: "certain" | "ambiguous" | "unknown";
+  utmCampaign?: string | null;
+  utmSource?: string | null;
+  gclid?: string | null;
+}) {
+  return {
+    clientId: null,
+    utmCampaign: null,
+    utmSource: null,
+    gclid: null,
+    ...overrides,
+  };
+}
+
+describe("getLeadConversionBySource", () => {
+  it("counts a certain lead under its source, with no booking yet", async () => {
+    fakeState.marketingLeadRows = [lead({ clientId: "c1", attributionConfidence: "certain", utmSource: "chatgpt.com" })];
+    fakeState.bookingRows = [];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource).toEqual([{ source: "chatgpt.com", certainLeads: 1, certainLeadsWithBooking: 0, revenueCents: 0 }]);
+    expect(result.ambiguousLeads).toBe(0);
+    expect(result.unknownLeads).toBe(0);
+  });
+
+  it("never counts an ambiguous or unknown lead under any source bucket", async () => {
+    fakeState.marketingLeadRows = [
+      lead({ attributionConfidence: "ambiguous", utmSource: "chatgpt.com" }),
+      lead({ attributionConfidence: "unknown", utmSource: "chatgpt.com" }),
+    ];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource).toEqual([]);
+    expect(result.ambiguousLeads).toBe(1);
+    expect(result.unknownLeads).toBe(1);
+  });
+
+  it("counts revenue only from a completed booking belonging to a certain lead's client", async () => {
+    fakeState.marketingLeadRows = [lead({ clientId: "c1", attributionConfidence: "certain", utmSource: "chatgpt.com" })];
+    fakeState.bookingRows = [booking({ clientId: "c1", status: "completed", finalAmountCents: 34000 })];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource[0]).toEqual({
+      source: "chatgpt.com",
+      certainLeads: 1,
+      certainLeadsWithBooking: 1,
+      revenueCents: 34000,
+    });
+  });
+
+  it("counts certainLeadsWithBooking for a confirmed (not yet completed) booking, but never counts its revenue", async () => {
+    fakeState.marketingLeadRows = [lead({ clientId: "c1", attributionConfidence: "certain", utmSource: "chatgpt.com" })];
+    fakeState.bookingRows = [booking({ clientId: "c1", status: "confirmed", finalAmountCents: 34000 })];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource[0]).toMatchObject({ certainLeadsWithBooking: 1, revenueCents: 0 });
+  });
+
+  it("never counts a cancelled booking as a real conversion for a lead", async () => {
+    fakeState.marketingLeadRows = [lead({ clientId: "c1", attributionConfidence: "certain", utmSource: "chatgpt.com" })];
+    fakeState.bookingRows = [booking({ clientId: "c1", status: "cancelled", finalAmountCents: 34000 })];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource[0]).toMatchObject({ certainLeadsWithBooking: 0, revenueCents: 0 });
+  });
+
+  // The founder's explicit rule: Google Ads attribution only with a real,
+  // verifiable gclid — never invented, never inferred from anything else.
+  it("attributes to google_ads_untagged only when the certain lead actually carries a real gclid", async () => {
+    fakeState.marketingLeadRows = [lead({ clientId: "c1", attributionConfidence: "certain", gclid: "Cj0KEQjw" })];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource[0]!.source).toBe("google_ads_untagged");
+  });
+
+  it("never attributes to Google Ads when no gclid is present, even with other source signals absent", async () => {
+    fakeState.marketingLeadRows = [lead({ clientId: "c1", attributionConfidence: "certain" })];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource[0]!.source).toBe("organic_or_direct");
+  });
+
+  it("groups multiple certain leads from the same source together", async () => {
+    fakeState.marketingLeadRows = [
+      lead({ clientId: "c1", attributionConfidence: "certain", utmSource: "chatgpt.com" }),
+      lead({ clientId: "c2", attributionConfidence: "certain", utmSource: "chatgpt.com" }),
+    ];
+
+    const result = await getLeadConversionBySource("tenant-1");
+
+    expect(result.bySource).toEqual([{ source: "chatgpt.com", certainLeads: 2, certainLeadsWithBooking: 0, revenueCents: 0 }]);
   });
 });

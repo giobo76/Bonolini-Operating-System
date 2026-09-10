@@ -136,4 +136,23 @@ export const marketingRouter = router({
       if (!linked) throw new TRPCError({ code: "NOT_FOUND" });
       return linked;
     }),
+
+  // Manual trigger for the time-proximity heuristic detector — no cron
+  // wires this up (deliberate scope decision, see service.ts). Never
+  // writes marketing_leads.client_id; only ever records rows in
+  // lead_match_candidates and marks a lead "ambiguous", for human review.
+  detectAmbiguousLeadCandidates: adminProcedure.mutation(({ ctx }) =>
+    marketingService.recordAmbiguousLeadCandidates(ctx.session.profile.tenantId),
+  ),
+
+  listLeadMatchCandidates: adminProcedure.query(({ ctx }) =>
+    marketingService.listLeadMatchCandidates(ctx.session.profile.tenantId),
+  ),
+
+  // Lead Conversion by Source — deliberately separate from
+  // getRevenueBySource above, never merged. See business-kpis.ts's own
+  // header comment on getLeadConversionBySource for why.
+  getLeadConversionBySource: adminProcedure.query(({ ctx }) =>
+    businessKpis.getLeadConversionBySource(ctx.session.profile.tenantId),
+  ),
 });

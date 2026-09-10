@@ -51,7 +51,14 @@ export interface LeadIntentRequestInput {
 
 export interface LeadIntentResult {
   status: number;
-  body: { ok: boolean; error?: string };
+  // contactToken is present only on a successful whatsapp/email-channel
+  // recording (see recordLeadIntent) — null for phone/form, or whenever
+  // token generation itself failed (fail-soft: a tracking problem must
+  // never turn a real lead-intent request into an error response). The
+  // caller (bonolinitransfer.com's own script) is expected to embed this
+  // in the resulting wa.me text=/mailto: subject= before redirecting the
+  // visitor — see packages/core/src/marketing/README.md.
+  body: { ok: boolean; error?: string; contactToken?: string | null };
   // Access-Control-Allow-Origin value to send, or null to send no CORS
   // header at all (disallowed-origin responses must not have one).
   corsOrigin: string | null;
@@ -98,10 +105,13 @@ export async function handleLeadIntentRequest(input: LeadIntentRequestInput): Pr
   try {
     // Log only the channel — never landingPage/referrer/utm*/gclid/
     // visitorId, per the explicit instruction not to log attribution
-    // values even at "diagnostic" granularity.
-    await recordLeadIntent(parsed.data);
+    // values even at "diagnostic" granularity. contactToken itself is not
+    // an attribution value (it carries no marketing signal on its own,
+    // only an opaque reference), but it's still omitted from the log line
+    // — no reason to put it there either.
+    const lead = await recordLeadIntent(parsed.data);
     log("marketing.lead_intent.recorded", { channel: parsed.data.channel });
-    return { status: 201, body: { ok: true }, corsOrigin: ALLOWED_ORIGIN };
+    return { status: 201, body: { ok: true, contactToken: lead.contactToken }, corsOrigin: ALLOWED_ORIGIN };
   } catch (error) {
     captureException(error, "marketing.lead_intent.failed", { channel: parsed.data.channel });
     return { status: 500, body: { ok: false, error: "internal_error" }, corsOrigin: ALLOWED_ORIGIN };

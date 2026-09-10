@@ -43,3 +43,22 @@ BOS's #1 priority as of 2026-08-06. Purpose: continuously protect and improve Bo
 ## Module boundary
 
 Same rule as every other module (ADR 0002): other code imports only from `./index.ts`. `upsertConnection` is exported directly for the OAuth callback route, same documented exception as before. `marketingInngestFunctions` is exported for `apps/transfer-admin/app/api/inngest/route.ts` to register.
+
+## Lead attribution (2026-09) — CERTAIN / AMBIGUOUS / UNKNOWN, source vs. acquisition
+
+Answers a different question than everything above: not "is our ad tracking broken" but "can we actually trace source → lead → client → booking → revenue for a specific contact." See `packages/db/migrations/0017_lead_attribution.sql`'s header for the full rationale; summarized here.
+
+**Two attribution concepts, kept structurally separate, never merged:**
+- **Acquisition attribution** (`clients.utm*/gclid/landingPage/referrer/firstTouchAt`) — how a client was *first* acquired, ever. Write-once: set only at the exact moment a brand-new client row is created, never touched again by anything.
+- **Lead attribution** (`marketing_leads.attributionConfidence/attributionMethod`) — where *this specific* contact event came from, and whether BOS actually knows which real client it was. A returning client can generate many leads over time from different sources without any of them rewriting their original acquisition.
+
+**`attribution_confidence` is only ever "certain" via:**
+1. `contactToken` (`contact-token.ts`) — an unguessable token BOS mints for whatsapp/email-channel leads, returned to the caller of the public lead-intent endpoint for the external site to embed in the resulting `wa.me` `text=`/`mailto:` `subject=`. Matched deterministically against the real inbound WhatsApp reply's text (`confirmLeadByContactToken`, called from `whatsapp/service.ts`'s `processInboundMessage`).
+2. `visitorId` — shared between a lead and a client created in the same browser session (`form` channel's deterministic bridge).
+3. `manual_admin` — explicit human confirmation via `/marketing/leads` (`linkLeadToClient`).
+
+**Never "certain":** time proximity alone, even with a single non-competing candidate — this is an explicit, binding founder rule (2026-09). `lead-matching.ts`'s `findTimeProximityCandidates` is the one place that heuristic lives; its entire output feeds `lead_match_candidates` (via `recordAmbiguousLeadCandidates`, manually triggered — no cron wires this up) and marks a lead `ambiguous`, never `client_id` directly.
+
+**`getLeadConversionBySource`** (`business-kpis.ts`) is deliberately a second, separate report from `getRevenueBySource` — the former is touch-based (certain leads only, ambiguous/unknown always reported separately, never estimated into a revenue figure), the latter is acquisition-based. Mixing them was the exact conflation the founder ruled out.
+
+**What's real, what isn't:** the WhatsApp token round-trip only works once `bonolinitransfer.com`'s own tracking script (outside this repository) is updated to read `contactToken` from the lead-intent response and embed it before redirecting the visitor — not yet done as of this pass. Phone-channel leads have no possible identifier capture in this architecture without a real call-tracking product (not built, a separate infrastructure decision). Nothing here touches historical/already-existing leads.

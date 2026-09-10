@@ -46,6 +46,30 @@ describe("handleLeadIntentRequest", () => {
     );
   });
 
+  it("1b. the recorded lead's contactToken is forwarded verbatim in the response body, for the caller to embed in wa.me/mailto:", async () => {
+    recordLeadIntent.mockResolvedValueOnce({ id: "lead-1", contactToken: "REF-ABCD1234" });
+
+    const result = await handleLeadIntentRequest({
+      origin: ALLOWED_ORIGIN,
+      rawBody: validBody,
+      rateLimitKey: "ip-1b",
+    });
+
+    expect(result.body).toEqual({ ok: true, contactToken: "REF-ABCD1234" });
+  });
+
+  it("1c. a null contactToken (phone/form channel, or fail-soft token generation) is forwarded as null, never omitted or invented", async () => {
+    recordLeadIntent.mockResolvedValueOnce({ id: "lead-2", contactToken: null });
+
+    const result = await handleLeadIntentRequest({
+      origin: ALLOWED_ORIGIN,
+      rawBody: validBody,
+      rateLimitKey: "ip-1c",
+    });
+
+    expect(result.body).toEqual({ ok: true, contactToken: null });
+  });
+
   it("2. invalid channel -> 400, no write attempted", async () => {
     const body = JSON.stringify({ channel: "carrier_pigeon" });
 
