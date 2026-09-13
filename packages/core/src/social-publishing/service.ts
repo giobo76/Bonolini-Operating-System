@@ -2,9 +2,71 @@ import { and, desc, eq } from "drizzle-orm";
 import { getDb, socialPosts, assertOne, type SocialPost } from "@bos/db";
 import { getRealPostDataSnapshot, hasEnoughDataForPost, type RealPostDataSnapshot } from "./content-source";
 import { generatePostContent } from "./content-generator";
-import { validatePost } from "./validator";
-import { publishTextPost } from "./meta-client";
+import { validatePost, validateInstagramCaptionLength } from "./validator";
+import { publishTextPost, publishInstagramPost } from "./meta-client";
 import { captureException, log } from "../observability";
+
+// ── Instagram, alongside Facebook ────────────────────────────────────────
+// Instagram publishes the exact same generated/validated content as
+// Facebook (never a second Claude call, never separately validated for
+// CTA/forbidden-content/language — validatePost() already gated that above;
+// only the caption-length limit differs per platform, see validator.ts) as
+// an image post — Instagram has no text-only feed post type, so an image is
+// mandatory. Deliberately independent of Facebook's own outcome in both
+// directions: a Facebook Graph API failure must never block Instagram, and
+// vice versa, per the founder's explicit requirement to keep Facebook
+// working while adding Instagram. "skipped" (not "failed") is used when
+// Instagram simply isn't configured yet — mirrors FACEBOOK_PAGE_ID/
+// FACEBOOK_PAGE_ACCESS_TOKEN's own "not yet configured, not an error" state
+// (see README.md).
+interface InstagramOutcome {
+  instagramStatus: SocialPost["instagramStatus"];
+  instagramMediaId: string | null;
+  instagramError: string | null;
+  instagramPublishedAt: Date | null;
+}
+
+async function publishToInstagram(content: string, tenantId: string, weekStartDate: string): Promise<InstagramOutcome> {
+  const imageUrl = process.env.INSTAGRAM_POST_IMAGE_URL;
+  const igUserId = process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
+
+  if (!igUserId || !imageUrl) {
+    log("social_publishing.weekly_post.instagram_skipped_not_configured", { tenantId, weekStartDate });
+    return { instagramStatus: "skipped", instagramMediaId: null, instagramError: null, instagramPublishedAt: null };
+  }
+
+  const captionError = validateInstagramCaptionLength(content);
+  if (captionError) {
+    captureException(new Error(captionError), "social_publishing.weekly_post.instagram_validation_failed", {
+      tenantId,
+      weekStartDate,
+    });
+    return { instagramStatus: "failed", instagramMediaId: null, instagramError: captionError, instagramPublishedAt: null };
+  }
+
+  const result = await publishInstagramPost(content, imageUrl);
+
+  if (!result.ok) {
+    captureException(new Error(result.error ?? "Instagram Graph API publish failed"), "social_publishing.weekly_post.instagram_publish_failed", {
+      tenantId,
+      weekStartDate,
+    });
+    return {
+      instagramStatus: "failed",
+      instagramMediaId: null,
+      instagramError: result.error ?? "unknown Graph API error",
+      instagramPublishedAt: null,
+    };
+  }
+
+  log("social_publishing.weekly_post.instagram_published", { tenantId, weekStartDate, instagramMediaId: result.mediaId });
+  return {
+    instagramStatus: "published",
+    instagramMediaId: result.mediaId ?? null,
+    instagramError: null,
+    instagramPublishedAt: new Date(),
+  };
+}
 
 // ── Idempotency ───────────────────────────────────────────────────────────
 // The real boundary is the DB: UNIQUE(tenant_id, week_start_date) on
@@ -95,12 +157,17 @@ export async function runWeeklySocialPost(tenantId: string, referenceDate: Date 
 
   const db = getDb();
 
+  // Defaults instagramStatus to "failed" with the same reason too: every
+  // call site below this point is a shared upstream failure (no real data,
+  // no generated content, failed validation, or an unexpected exception) —
+  // neither platform ever had a post to publish that week. The one branch
+  // where Facebook and Instagram genuinely diverge (each platform's own
+  // Graph API call) sets instagramStatus itself via publishToInstagram's
+  // own result, passed through `extra`.
   async function markFailed(metaError: string, extra: Partial<SocialPost> = {}): Promise<SocialPost> {
-    await db
-      .update(socialPosts)
-      .set({ status: "failed", metaError, updatedAt: new Date(), ...extra })
-      .where(eq(socialPosts.id, row.id));
-    return { ...row, status: "failed", metaError, ...extra };
+    const update = { status: "failed" as const, metaError, instagramStatus: "failed" as const, instagramError: metaError, updatedAt: new Date(), ...extra };
+    await db.update(socialPosts).set(update).where(eq(socialPosts.id, row.id));
+    return { ...row, ...update };
   }
 
   try {
@@ -138,6 +205,12 @@ export async function runWeeklySocialPost(tenantId: string, referenceDate: Date 
       .set({ status: "validated", content, dataSnapshot: snapshot, generatedAt: new Date(), updatedAt: new Date() })
       .where(eq(socialPosts.id, row.id));
 
+    // Facebook and Instagram are each other's independent concern from here
+    // on — a Graph API failure on one platform is recorded and never
+    // prevents attempting, or reports on, the other (see publishToInstagram's
+    // own header comment). Sequential, not parallel, only so the log lines
+    // for each stay easy to read in order; there is no dependency between
+    // the two calls.
     const publishResult = await publishTextPost(content);
 
     if (!publishResult.ok) {
@@ -145,23 +218,32 @@ export async function runWeeklySocialPost(tenantId: string, referenceDate: Date 
         tenantId,
         weekStartDate,
       });
-      return await markFailed(publishResult.error ?? "unknown Graph API error");
+    } else {
+      log("social_publishing.weekly_post.published", { tenantId, weekStartDate, metaPostId: publishResult.postId });
     }
 
-    await db
-      .update(socialPosts)
-      .set({ status: "published", metaPostId: publishResult.postId, publishedAt: new Date(), updatedAt: new Date() })
-      .where(eq(socialPosts.id, row.id));
+    const instagram = await publishToInstagram(content, tenantId, weekStartDate);
 
-    log("social_publishing.weekly_post.published", { tenantId, weekStartDate, metaPostId: publishResult.postId });
+    const update: Partial<SocialPost> = {
+      status: publishResult.ok ? "published" : "failed",
+      metaPostId: publishResult.ok ? (publishResult.postId ?? null) : null,
+      metaError: publishResult.ok ? null : (publishResult.error ?? "unknown Graph API error"),
+      publishedAt: publishResult.ok ? new Date() : null,
+      instagramStatus: instagram.instagramStatus,
+      instagramMediaId: instagram.instagramMediaId,
+      instagramError: instagram.instagramError,
+      instagramPublishedAt: instagram.instagramPublishedAt,
+      updatedAt: new Date(),
+    };
+
+    await db.update(socialPosts).set(update).where(eq(socialPosts.id, row.id));
 
     return {
       ...row,
-      status: "published",
       content,
       dataSnapshot: snapshot as unknown as SocialPost["dataSnapshot"],
-      metaPostId: publishResult.postId ?? null,
-    };
+      ...update,
+    } as SocialPost;
   } catch (error) {
     captureException(error, "social_publishing.weekly_post.unexpected_error", { tenantId, weekStartDate });
     await markFailed(error instanceof Error ? error.message : String(error));

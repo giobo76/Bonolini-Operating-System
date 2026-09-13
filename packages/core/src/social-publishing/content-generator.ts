@@ -6,7 +6,11 @@ import type { RealPostDataSnapshot } from "./content-source";
 // concerns separate. This never writes to social_posts or calls the Graph
 // API; service.ts is the only orchestrator that does both.
 
-const SYSTEM_PROMPT = `You are writing a single Facebook Page post in English for Bonolini Transfer, a premium chauffeur/NCC (private car with driver) service based in Italy.
+// Written once, published as-is to both the Bonolini Transfer Facebook Page
+// and Instagram account (see service.ts's runWeeklySocialPost) — the prompt
+// says so explicitly so the post never reads as Facebook-specific (e.g. "as
+// always on our Page") in a way that would look out of place on Instagram.
+const SYSTEM_PROMPT = `You are writing a single social media post in English for Bonolini Transfer, a premium chauffeur/NCC (private car with driver) service based in Italy. It will be published as-is to both the company's Facebook Page and Instagram account — do not write anything specific to one platform only.
 
 Hard rules, never violate them:
 - Only use the real data provided below (served routes, transfer types, service area places). Never invent a fact, number, statistic, testimonial, review, price, or business volume/customer-count figure not present in the data.

@@ -1,18 +1,18 @@
-# social-publishing — automated weekly Facebook Page post
+# social-publishing — automated weekly Facebook + Instagram post
 
-**Status:** v1 — real Meta Graph API integration, generation/validation/publishing/idempotency kept as separate concerns, **written but never executed against a live Page** (no `FACEBOOK_PAGE_ID`/`FACEBOOK_PAGE_ACCESS_TOKEN` configured yet — see below). Expect the first live run to surface real bugs, same honest caveat every other externally-integrated module in this codebase carries (see `marketing/README.md`).
+**Status:** v1.1 — real Meta Graph API integration (Facebook Page feed + Instagram Business content publishing), generation/validation/publishing/idempotency kept as separate concerns, **written but never executed against a live Page or Instagram account** (no `FACEBOOK_PAGE_ID`/`FACEBOOK_PAGE_ACCESS_TOKEN`/`INSTAGRAM_BUSINESS_ACCOUNT_ID`/`INSTAGRAM_POST_IMAGE_URL` configured yet — see below). Expect the first live run to surface real bugs, same honest caveat every other externally-integrated module in this codebase carries (see `marketing/README.md`).
 
 ## Purpose
 
-Publishes exactly one English-language post to the Bonolini Transfer Facebook Page per week (Monday 09:00 Europe/Rome), grounded only in real BOS data — never an invented fact, statistic, testimonial, review, price, or business-volume figure.
+Publishes exactly one English-language post per week (Monday 09:00 Europe/Rome) to both the Bonolini Transfer Facebook Page and Instagram account, grounded only in real BOS data — never an invented fact, statistic, testimonial, review, price, or business-volume figure. One generated text, published as-is to both platforms; on Instagram, always as an image post using a real, founder-provided official brand photo (`INSTAGRAM_POST_IMAGE_URL`) — Instagram has no text-only feed post type. Facebook and Instagram publish independently: a failure or missing configuration on one platform never blocks or is conflated with the other's own outcome (`status` tracks Facebook, `instagramStatus` tracks Instagram, on the same row).
 
 ## Owns
 
-The `social_posts` table — one row per tenant per calendar week (`UNIQUE(tenant_id, week_start_date)`, the real idempotency boundary), tracking status (`draft → validated → published`, or `failed`), the generated content, the exact data snapshot it was generated from, and the resulting Meta post id or error.
+The `social_posts` table — one row per tenant per calendar week (`UNIQUE(tenant_id, week_start_date)`, the real idempotency boundary), tracking the generated content and the exact data snapshot it was generated from once, plus **two independent outcome tracks on the same row**: Facebook's `status` (`draft → validated → published`, or `failed`) with `metaPostId`/`metaError`/`publishedAt`, and Instagram's `instagramStatus` (`skipped → validated → published`, or `failed`; `skipped` is the default/rest state, not an error) with `instagramMediaId`/`instagramError`/`instagramPublishedAt`.
 
 ## Exposes
 
-`runWeeklySocialPost`, `listSocialPosts`, `getWeekStartDateEuropeRome` (`service.ts`); `getRealPostDataSnapshot`, `hasEnoughDataForPost`, `classifyTransferType` (`content-source.ts`); `validatePost` (`validator.ts`); `socialPublishingRouter` (a minimal admin-only tRPC surface: `listPosts`, `runNow`); `socialPublishingInngestFunctions`.
+`runWeeklySocialPost`, `listSocialPosts`, `getWeekStartDateEuropeRome` (`service.ts`); `getRealPostDataSnapshot`, `hasEnoughDataForPost`, `classifyTransferType` (`content-source.ts`); `validatePost`, `validateInstagramCaptionLength` (`validator.ts`); `socialPublishingRouter` (a minimal admin-only tRPC surface: `listPosts`, `runNow`); `socialPublishingInngestFunctions`. `meta-client.ts`'s `publishTextPost`/`publishInstagramPost` stay internal to the module, called only from `service.ts` — same as before Instagram was added.
 
 ## Emits/Listens to
 
@@ -24,10 +24,10 @@ See [ADR 0002](../../../../docs/adr/0002-modular-monolith-not-microservices.md) 
 
 Per the founder's explicit instruction:
 
-1. **Generation** (`content-generator.ts`) — one Claude call, given only an aggregated, anonymized data snapshot. Returns `null` (never a placeholder string) if `ANTHROPIC_API_KEY` is unset or Claude returns no text.
-2. **Validation** (`validator.ts`) — pure, network-free functions checking length, presence of a call-to-action, absence of forbidden content categories (emails, phone-like numbers, currency amounts, placeholder markers, invented testimonial/rating/business-volume claims), and a light English-language heuristic.
-3. **Publishing** (`meta-client.ts`) — the one function that calls the Graph API. Never reads a data snapshot, never validates; only ever sends the exact string it's given.
-4. **Idempotency** (`service.ts`'s `ensureWeeklyPostRow`) — a DB-level `UNIQUE(tenant_id, week_start_date)` constraint plus `INSERT ... ON CONFLICT DO NOTHING`, checked before generation is even attempted.
+1. **Generation** (`content-generator.ts`) — one Claude call, given only an aggregated, anonymized data snapshot, writing one platform-neutral post reused for both Facebook and Instagram. Returns `null` (never a placeholder string) if `ANTHROPIC_API_KEY` is unset or Claude returns no text.
+2. **Validation** (`validator.ts`) — pure, network-free functions checking length, presence of a call-to-action, absence of forbidden content categories (emails, phone-like numbers, currency amounts, placeholder markers, invented testimonial/rating/business-volume claims), and a light English-language heuristic — all shared by both platforms — plus `validateInstagramCaptionLength`, the one Instagram-specific check (Instagram's 2200-character caption limit is narrower than Facebook's 3000).
+3. **Publishing** (`meta-client.ts`) — `publishTextPost` (Facebook) and `publishInstagramPost` (Instagram's two-step media-container-then-publish flow), each calling only the Graph API. Neither reads a data snapshot nor validates; each only ever sends the exact text/image it's given.
+4. **Idempotency** (`service.ts`'s `ensureWeeklyPostRow`) — a DB-level `UNIQUE(tenant_id, week_start_date)` constraint plus `INSERT ... ON CONFLICT DO NOTHING`, checked before generation is even attempted. One row covers both platforms for the week.
 
 Logging goes through the existing `packages/core/src/observability.ts` (`log`/`captureException`) — no new logging mechanism was introduced. Its `redact()` already strips any context key matching `/token|secret|password|apikey|api_key|credential/i` before it reaches a log line, which is the backstop behind the harder rule below.
 
@@ -47,14 +47,14 @@ No `drivers`/vehicle module exists yet (see `packages/core/src/drivers/README.md
 
 Two layers:
 
-1. **DB**: `UNIQUE(tenant_id, week_start_date)` on `social_posts` (migration `0016_social_publishing.sql`).
+1. **DB**: `UNIQUE(tenant_id, week_start_date)` on `social_posts` (migration `0016_social_publishing.sql`; Instagram's own columns were added additively in `0018_social_publishing_instagram.sql`, same constraint).
 2. **Application**: `ensureWeeklyPostRow` does `INSERT ... ON CONFLICT (tenant_id, week_start_date) DO NOTHING` *before* any data is read or any Claude/Graph API call is made. A retry within the same week either finds no row to insert (conflict) and, if that existing row is already `validated`/`published`/`failed`, is a pure no-op — or, if it inserted the row itself, proceeds exactly once.
 
 `week_start_date` is the Monday of the ISO week containing the cron's own trigger instant, computed in Europe/Rome (`getWeekStartDateEuropeRome`) — never re-derived from "now" at publish time, so a delayed retry still targets the intended week.
 
 ## Meta Graph API version
 
-Verified directly against Meta's official changelog (`developers.facebook.com/docs/graph-api/changelog` and `.../guides/versioning`) on 2026-09-05: **v26.0** is the current released version (July 29, 2026); each version stays available for at least two years from release, and v23.0 and earlier have already reached end of life. v26.0's own changes (blocked commerce endpoints, ad-placement changes) do not affect `POST /{page-id}/feed`, the only endpoint this module calls. The version is a single named constant in `meta-client.ts` (`GRAPH_API_VERSION`), not a literal scattered across files — update it there, next time it's re-verified, not reflexively.
+Verified directly against Meta's official changelog (`developers.facebook.com/docs/graph-api/changelog` and `.../guides/versioning`) on 2026-09-05: **v26.0** is the current released version (July 29, 2026); each version stays available for at least two years from release, and v23.0 and earlier have already reached end of life. v26.0's own changes (blocked commerce endpoints, ad-placement changes) do not affect `POST /{page-id}/feed` or the Instagram Content Publishing endpoints (`/{ig-user-id}/media`, `/{ig-user-id}/media_publish`) this module calls. The version is a single named constant in `meta-client.ts` (`GRAPH_API_VERSION`), shared by Facebook and Instagram — not a literal scattered across files — update it there, next time it's re-verified, not reflexively.
 
 ## Credential model — deliberately simpler than MIE's OAuth flow
 
@@ -62,10 +62,21 @@ Unlike `marketing`'s Google OAuth connection (a per-tenant refresh token stored 
 
 `FACEBOOK_PAGE_ID`/`FACEBOOK_PAGE_ACCESS_TOKEN` are intentionally **not yet set** anywhere (not even `.env.local`) — see `.env.example`'s own comments for how to obtain a long-lived Page Access Token from the existing Meta App (the one already used for WhatsApp — see `packages/core/src/whatsapp/README.md`), pending the founder's review of this code first.
 
+### Instagram — no second token, two new non-secret values
+
+Instagram Graph API content publishing is authenticated with the same `FACEBOOK_PAGE_ACCESS_TOKEN` above, once `instagram_basic` + `instagram_content_publish` are also granted on the same Page/Meta App — there is no separate Instagram access token to store or configure. Two new environment variables were added instead, neither of them a secret:
+
+- `INSTAGRAM_BUSINESS_ACCOUNT_ID` — the Instagram Business Account's id, found via `GET /{FACEBOOK_PAGE_ID}?fields=instagram_business_account` once the Instagram account is linked to the Page.
+- `INSTAGRAM_POST_IMAGE_URL` — a permanent, publicly reachable URL to a real, official Bonolini Transfer photo. Deliberately **not** chosen or fetched automatically by this module's code (e.g. the Page's current profile picture) — the founder picks the exact real photo, exactly as they will pick the Page Access Token above, rather than code guessing what counts as "official." Instagram has no text-only post type, so this is mandatory for every Instagram publish; when unset, Instagram publishing is skipped, not treated as an error (see `service.ts`'s `publishToInstagram`).
+
+Both are intentionally **not yet set** anywhere, pending the founder's review of this code first — see `.env.example`'s own comments.
+
 ## Hard constraints (do not relax without the founder reopening this decision)
 
 - Never publishes client names, phone numbers, emails, individual prices, or any personal data — none of it is ever read into a data snapshot in the first place.
 - Never publishes aggregate revenue or business-volume/booking-count figures.
 - Never invents a testimonial, review, rating, or statistic.
-- At most one post per tenant per week — enforced at the DB level, not just in application logic.
+- At most one post per tenant per week, per platform — enforced at the DB level, not just in application logic.
+- Instagram is never published without a real image (`INSTAGRAM_POST_IMAGE_URL`), and that image is always a real, founder-chosen official brand photo — never a stock photo, placeholder, or AI-generated image.
+- A failure, or missing configuration, on one platform (Facebook or Instagram) never blocks or overwrites the other platform's own outcome on the same row.
 - No automated test in this module's test suite ever calls the real Meta Graph API or the real Anthropic API — both are mocked at the module boundary (see `meta-client.test.ts`/`content-generator.test.ts`).

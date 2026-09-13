@@ -67,10 +67,10 @@ vi.mock("./content-source", () => contentSourceMock);
 const contentGeneratorMock = vi.hoisted(() => ({ generatePostContent: vi.fn() }));
 vi.mock("./content-generator", () => contentGeneratorMock);
 
-const validatorMock = vi.hoisted(() => ({ validatePost: vi.fn() }));
+const validatorMock = vi.hoisted(() => ({ validatePost: vi.fn(), validateInstagramCaptionLength: vi.fn() }));
 vi.mock("./validator", () => validatorMock);
 
-const metaClientMock = vi.hoisted(() => ({ publishTextPost: vi.fn() }));
+const metaClientMock = vi.hoisted(() => ({ publishTextPost: vi.fn(), publishInstagramPost: vi.fn() }));
 vi.mock("./meta-client", () => metaClientMock);
 
 const { runWeeklySocialPost, getWeekStartDateEuropeRome } = await import("./service");
@@ -89,7 +89,11 @@ beforeEach(() => {
   contentSourceMock.hasEnoughDataForPost.mockReset().mockReturnValue(true);
   contentGeneratorMock.generatePostContent.mockReset().mockResolvedValue("A real, grounded post about our routes.");
   validatorMock.validatePost.mockReset().mockReturnValue({ valid: true, errors: [] });
+  validatorMock.validateInstagramCaptionLength.mockReset().mockReturnValue(null);
   metaClientMock.publishTextPost.mockReset().mockResolvedValue({ ok: true, postId: "page_123" });
+  metaClientMock.publishInstagramPost.mockReset().mockResolvedValue({ ok: true, mediaId: "ig_123" });
+  delete process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
+  delete process.env.INSTAGRAM_POST_IMAGE_URL;
 });
 
 describe("getWeekStartDateEuropeRome", () => {
@@ -215,5 +219,76 @@ describe("runWeeklySocialPost — unexpected error", () => {
     await expect(runWeeklySocialPost("tenant-1", MONDAY)).rejects.toThrow("db exploded");
     expect(fakeState.posts[0]?.status).toBe("failed");
     expect(fakeState.posts[0]?.metaError).toBe("db exploded");
+  });
+
+  it("also marks Instagram failed with the same reason — neither platform had a post to publish", async () => {
+    contentSourceMock.getRealPostDataSnapshot.mockRejectedValue(new Error("db exploded"));
+
+    await expect(runWeeklySocialPost("tenant-1", MONDAY)).rejects.toThrow("db exploded");
+    expect(fakeState.posts[0]?.instagramStatus).toBe("failed");
+    expect(fakeState.posts[0]?.instagramError).toBe("db exploded");
+  });
+});
+
+describe("runWeeklySocialPost — Instagram not configured", () => {
+  it("still publishes to Facebook and marks Instagram 'skipped', not 'failed'", async () => {
+    const result = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(result.status).toBe("published");
+    expect(result.instagramStatus).toBe("skipped");
+    expect(result.instagramMediaId).toBeNull();
+    expect(metaClientMock.publishInstagramPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("runWeeklySocialPost — Instagram configured", () => {
+  beforeEach(() => {
+    process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID = "ig-123";
+    process.env.INSTAGRAM_POST_IMAGE_URL = "https://example.com/brand-photo.jpg";
+  });
+
+  it("publishes to both Facebook and Instagram from the same generated content", async () => {
+    const result = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(result.status).toBe("published");
+    expect(result.instagramStatus).toBe("published");
+    expect(result.instagramMediaId).toBe("ig_123");
+    expect(metaClientMock.publishInstagramPost).toHaveBeenCalledWith(
+      "A real, grounded post about our routes.",
+      "https://example.com/brand-photo.jpg",
+    );
+  });
+
+  it("a Facebook Graph API failure never blocks a successful Instagram publish", async () => {
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: false, error: "Invalid OAuth access token." });
+
+    const result = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(result.status).toBe("failed");
+    expect(result.metaError).toBe("Invalid OAuth access token.");
+    expect(result.instagramStatus).toBe("published");
+    expect(result.instagramMediaId).toBe("ig_123");
+  });
+
+  it("an Instagram Graph API failure never blocks a successful Facebook publish", async () => {
+    metaClientMock.publishInstagramPost.mockResolvedValue({ ok: false, error: "Invalid image URL." });
+
+    const result = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(result.status).toBe("published");
+    expect(result.metaPostId).toBe("page_123");
+    expect(result.instagramStatus).toBe("failed");
+    expect(result.instagramError).toBe("Invalid image URL.");
+  });
+
+  it("fails Instagram without calling its Graph API when the caption is too long for Instagram", async () => {
+    validatorMock.validateInstagramCaptionLength.mockReturnValue("caption is too long for Instagram (2201 chars, maximum 2200)");
+
+    const result = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(result.status).toBe("published");
+    expect(result.instagramStatus).toBe("failed");
+    expect(result.instagramError).toContain("too long for Instagram");
+    expect(metaClientMock.publishInstagramPost).not.toHaveBeenCalled();
   });
 });

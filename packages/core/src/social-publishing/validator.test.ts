@@ -5,6 +5,7 @@ import {
   validatePostHasCta,
   validatePostLanguage,
   validatePostLength,
+  validateInstagramCaptionLength,
 } from "./validator";
 import type { RealPostDataSnapshot } from "./content-source";
 
@@ -103,6 +104,17 @@ describe("validatePostLanguage", () => {
 
   it("does not flag genuine English content", () => {
     expect(validatePostLanguage(VALID_POST)).toBeNull();
+  });
+});
+
+describe("validateInstagramCaptionLength", () => {
+  it("accepts a caption within Instagram's 2200-character limit", () => {
+    expect(validateInstagramCaptionLength(VALID_POST)).toBeNull();
+  });
+
+  it("rejects a caption longer than Instagram's limit, even though it would fit Facebook's", () => {
+    const tooLongForInstagram = "a".repeat(2201);
+    expect(validateInstagramCaptionLength(tooLongForInstagram)).toMatch(/too long for Instagram/);
   });
 });
 

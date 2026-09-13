@@ -9,6 +9,12 @@ import type { RealPostDataSnapshot } from "./content-source";
 const MIN_LENGTH = 40;
 const MAX_LENGTH = 3000;
 
+// Instagram's own caption limit (developers.facebook.com/docs/instagram-platform/
+// instagram-graph-api/content-publishing#caption) is narrower than a Facebook
+// Page post's — checked separately, against the same generated text, rather
+// than lowering MAX_LENGTH for both platforms.
+const INSTAGRAM_MAX_LENGTH = 2200;
+
 const CTA_KEYWORDS = ["contact", "book", "whatsapp", "reach out", "get in touch", "message us"];
 
 // Every one of these patterns targets a category of fact this module never
@@ -65,6 +71,16 @@ export function validatePostForbiddenContent(text: string): string[] {
 export function validatePostLanguage(text: string): string | null {
   const matches = text.match(ITALIAN_TELLS);
   return (matches?.length ?? 0) >= ITALIAN_TELL_THRESHOLD ? "post appears to be written in Italian, not English" : null;
+}
+
+// Only the length gate is platform-specific — CTA/forbidden-content/language
+// checks already ran against this same text in validatePost() before it was
+// ever considered for publishing anywhere, so they are never re-run here.
+export function validateInstagramCaptionLength(text: string): string | null {
+  if (text.length > INSTAGRAM_MAX_LENGTH) {
+    return `caption is too long for Instagram (${text.length} chars, maximum ${INSTAGRAM_MAX_LENGTH})`;
+  }
+  return null;
 }
 
 export function validatePost(text: string, snapshot: RealPostDataSnapshot): PostValidationResult {

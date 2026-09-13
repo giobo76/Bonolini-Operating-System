@@ -62,3 +62,73 @@ export async function publishTextPost(message: string): Promise<PublishPostResul
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
+
+export interface PublishInstagramPostResult {
+  ok: boolean;
+  mediaId?: string;
+  error?: string;
+}
+
+// Instagram Content Publishing (developers.facebook.com/docs/instagram-platform/
+// instagram-graph-api/content-publishing), verified against Meta's docs
+// alongside GRAPH_API_VERSION above on the same date: a two-step flow against
+// the Instagram Business Account (create a media container, then publish it)
+// — there is no single-call equivalent of publishTextPost's feed endpoint,
+// and an image is mandatory (Instagram has no text-only feed post type, unlike
+// a Facebook Page). Authenticated with FACEBOOK_PAGE_ACCESS_TOKEN, not a
+// separate Instagram token: once instagram_basic + instagram_content_publish
+// are granted on the same Meta App/Page (see README's Instagram section),
+// Meta authenticates Instagram Graph API calls with the linked Page's own
+// Page Access Token — no second secret exists to configure.
+export async function publishInstagramPost(caption: string, imageUrl: string): Promise<PublishInstagramPostResult> {
+  const igUserId = process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
+  const accessToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+
+  if (!igUserId || !accessToken) {
+    return { ok: false, error: "INSTAGRAM_BUSINESS_ACCOUNT_ID or FACEBOOK_PAGE_ACCESS_TOKEN is not set" };
+  }
+
+  try {
+    const containerResponse = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${igUserId}/media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_url: imageUrl, caption, access_token: accessToken }),
+    });
+    const containerBody = (await containerResponse.json().catch(() => null)) as
+      | (GraphApiSuccessBody & GraphApiErrorBody)
+      | null;
+
+    if (!containerResponse.ok || !containerBody?.id) {
+      return {
+        ok: false,
+        error:
+          containerBody?.error?.message ??
+          `Graph API returned HTTP ${containerResponse.status} while creating the media container`,
+      };
+    }
+
+    // The container id (creation_id) is single-use and short-lived — publish
+    // it immediately, never store or reuse it across requests.
+    const publishResponse = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${igUserId}/media_publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ creation_id: containerBody.id, access_token: accessToken }),
+    });
+    const publishBody = (await publishResponse.json().catch(() => null)) as
+      | (GraphApiSuccessBody & GraphApiErrorBody)
+      | null;
+
+    if (!publishResponse.ok || !publishBody?.id) {
+      return {
+        ok: false,
+        error:
+          publishBody?.error?.message ??
+          `Graph API returned HTTP ${publishResponse.status} while publishing the media container`,
+      };
+    }
+
+    return { ok: true, mediaId: publishBody.id };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
