@@ -14,6 +14,20 @@ export const socialPostStatusEnum = pgEnum("social_post_status", [
   "failed",
 ]);
 
+// Independent of socialPostStatusEnum (which continues to track the
+// Facebook pipeline only, for backward compatibility with rows/queries that
+// predate Instagram support) — Facebook and Instagram publish independently
+// from the same generated content, so one platform failing must never be
+// conflated with, or block, the other's own status. "skipped" (not
+// "failed") is the default/rest state: an unconfigured or not-yet-reviewed
+// Instagram integration is not an error.
+export const socialPostInstagramStatusEnum = pgEnum("social_post_instagram_status", [
+  "skipped",
+  "validated",
+  "published",
+  "failed",
+]);
+
 export const socialPosts = pgTable(
   "social_posts",
   {
@@ -35,6 +49,15 @@ export const socialPosts = pgTable(
     metaError: text("meta_error"),
     generatedAt: timestamp("generated_at", { withTimezone: true }),
     publishedAt: timestamp("published_at", { withTimezone: true }),
+    // Instagram publishes the same generated content (reused, never
+    // regenerated per platform) as an image post — see
+    // packages/core/src/social-publishing/meta-client.ts's
+    // publishInstagramPost. instagramMediaId is the published media's id,
+    // distinct from metaPostId (a Facebook Page feed post id).
+    instagramStatus: socialPostInstagramStatusEnum("instagram_status").notNull().default("skipped"),
+    instagramMediaId: text("instagram_media_id"),
+    instagramError: text("instagram_error"),
+    instagramPublishedAt: timestamp("instagram_published_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
