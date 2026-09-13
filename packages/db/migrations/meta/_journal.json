@@ -71,6 +71,13 @@
       "when": 1788980922335,
       "tag": "0017_lead_attribution",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789303200000,
+      "tag": "0018_social_publishing_instagram",
+      "breakpoints": true
     }
   ]
 }
