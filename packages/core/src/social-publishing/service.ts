@@ -1,10 +1,33 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb, socialPosts, assertOne, type SocialPost } from "@bos/db";
+import { inngest, emitDomainEvent } from "@bos/jobs";
 import { getRealPostDataSnapshot, hasEnoughDataForPost, type RealPostDataSnapshot } from "./content-source";
 import { generatePostContent } from "./content-generator";
 import { validatePost, validateInstagramCaptionLength } from "./validator";
 import { publishTextPost, publishInstagramPost } from "./meta-client";
 import { captureException, log } from "../observability";
+
+// Fire-and-forget, fail-soft domain event for the BOS Agent's own social
+// listener (packages/core/src/bos-agent) — emitDomainEvent already never
+// throws (see @bos/jobs's own header comment), so this can never affect
+// the Facebook/Instagram outcome it's reporting on, win or lose.
+function emitSocialPostOutcome(tenantId: string, post: SocialPost): void {
+  if (post.status === "published") {
+    void emitDomainEvent(inngest, "social_post.published", {
+      tenantId,
+      postId: post.id,
+      weekStartDate: post.weekStartDate,
+      facebookPostId: post.metaPostId,
+    });
+  } else if (post.status === "failed") {
+    void emitDomainEvent(inngest, "social_post.failed", {
+      tenantId,
+      postId: post.id,
+      weekStartDate: post.weekStartDate,
+      reason: post.metaError ?? "unknown error",
+    });
+  }
+}
 
 // ── Instagram, alongside Facebook ────────────────────────────────────────
 // Instagram publishes the exact same generated/validated content as
@@ -167,7 +190,9 @@ export async function runWeeklySocialPost(tenantId: string, referenceDate: Date 
   async function markFailed(metaError: string, extra: Partial<SocialPost> = {}): Promise<SocialPost> {
     const update = { status: "failed" as const, metaError, instagramStatus: "failed" as const, instagramError: metaError, updatedAt: new Date(), ...extra };
     await db.update(socialPosts).set(update).where(eq(socialPosts.id, row.id));
-    return { ...row, ...update };
+    const failedPost = { ...row, ...update };
+    emitSocialPostOutcome(tenantId, failedPost);
+    return failedPost;
   }
 
   try {
@@ -238,12 +263,14 @@ export async function runWeeklySocialPost(tenantId: string, referenceDate: Date 
 
     await db.update(socialPosts).set(update).where(eq(socialPosts.id, row.id));
 
-    return {
+    const finalPost = {
       ...row,
       content,
       dataSnapshot: snapshot as unknown as SocialPost["dataSnapshot"],
       ...update,
     } as SocialPost;
+    emitSocialPostOutcome(tenantId, finalPost);
+    return finalPost;
   } catch (error) {
     captureException(error, "social_publishing.weekly_post.unexpected_error", { tenantId, weekStartDate });
     await markFailed(error instanceof Error ? error.message : String(error));
@@ -325,12 +352,15 @@ export async function retryFacebookOnly(tenantId: string, postId: string): Promi
     log("social_publishing.retry_facebook_only.published", { tenantId, postId, metaPostId: publishResult.postId });
   }
 
+  const updatedPost = { ...row, ...update };
+  emitSocialPostOutcome(tenantId, updatedPost);
+
   return {
     ok: publishResult.ok,
     alreadyPublished: false,
     facebookPostId: publishResult.ok ? (publishResult.postId ?? null) : null,
     error: publishResult.ok ? null : (publishResult.error ?? "unknown Graph API error"),
-    post: { ...row, ...update },
+    post: updatedPost,
   };
 }
 

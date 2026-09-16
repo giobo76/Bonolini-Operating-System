@@ -73,6 +73,12 @@ vi.mock("./validator", () => validatorMock);
 const metaClientMock = vi.hoisted(() => ({ publishTextPost: vi.fn(), publishInstagramPost: vi.fn() }));
 vi.mock("./meta-client", () => metaClientMock);
 
+// @bos/jobs mocked too — emitDomainEvent is fire-and-forget/fail-soft in
+// production, but this suite must never make a real network call any more
+// than it calls the real Graph API, per this file's own documented rule.
+const jobsMock = vi.hoisted(() => ({ inngest: {}, emitDomainEvent: vi.fn() }));
+vi.mock("@bos/jobs", () => jobsMock);
+
 const { runWeeklySocialPost, getWeekStartDateEuropeRome, retryFacebookOnly } = await import("./service");
 
 const SNAPSHOT = {
@@ -92,6 +98,7 @@ beforeEach(() => {
   validatorMock.validateInstagramCaptionLength.mockReset().mockReturnValue(null);
   metaClientMock.publishTextPost.mockReset().mockResolvedValue({ ok: true, postId: "page_123" });
   metaClientMock.publishInstagramPost.mockReset().mockResolvedValue({ ok: true, mediaId: "ig_123" });
+  jobsMock.emitDomainEvent.mockReset().mockResolvedValue(undefined);
   delete process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
   delete process.env.INSTAGRAM_POST_IMAGE_URL;
 });
@@ -200,6 +207,18 @@ describe("runWeeklySocialPost — Graph API publish failure", () => {
     expect(result.status).toBe("failed");
     expect(result.metaError).toBe("Invalid OAuth access token.");
   });
+
+  it("emits social_post.failed with the real reason", async () => {
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: false, error: "Invalid OAuth access token." });
+
+    await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "social_post.failed",
+      expect.objectContaining({ tenantId: "tenant-1", reason: "Invalid OAuth access token." }),
+    );
+  });
 });
 
 describe("runWeeklySocialPost — success", () => {
@@ -209,6 +228,16 @@ describe("runWeeklySocialPost — success", () => {
     expect(result.status).toBe("published");
     expect(result.metaPostId).toBe("page_123");
     expect(metaClientMock.publishTextPost).toHaveBeenCalledWith("A real, grounded post about our routes.");
+  });
+
+  it("emits social_post.published with the real post id — never a real network call, just the mocked emitDomainEvent", async () => {
+    await runWeeklySocialPost("tenant-1", MONDAY);
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "social_post.published",
+      expect.objectContaining({ tenantId: "tenant-1", facebookPostId: "page_123" }),
+    );
   });
 });
 
@@ -372,5 +401,20 @@ describe("retryFacebookOnly", () => {
     expect(result?.ok).toBe(false);
     expect(result?.error).toContain("no content saved");
     expect(metaClientMock.publishTextPost).not.toHaveBeenCalled();
+  });
+
+  it("emits social_post.published on a successful retry", async () => {
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: false, error: "Invalid OAuth access token." });
+    const initial = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    jobsMock.emitDomainEvent.mockClear();
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: true, postId: "page_456" });
+    await retryFacebookOnly("tenant-1", initial.id);
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "social_post.published",
+      expect.objectContaining({ tenantId: "tenant-1", facebookPostId: "page_456" }),
+    );
   });
 });
