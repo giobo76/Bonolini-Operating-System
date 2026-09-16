@@ -340,6 +340,13 @@ export async function getTransferRequestFunnel(tenantId: string): Promise<Transf
 //   ANY verifiable marketing signal (utmCampaign, utmSource, or gclid) —
 //   same three fields deriveSource() above already treats as "known",
 //   never invented here.
+// - unattributedConversions: the complementary subset — every real
+//   conversion whose client has none of those three signals. Computed from
+//   the exact same hasKnownSource check as attributedConversions (mutually
+//   exclusive, exhaustive over every non-cancelled booking), so
+//   attributedConversions + unattributedConversions === realConversions
+//   always holds by construction, never by a separate derived subtraction
+//   that could silently drift out of sync.
 // - googleAdsAttributedConversions: the strictly narrower subset with a
 //   real gclid specifically — the one signal Google Ads itself provides.
 //   A booking attributed to some other utm-tagged source (e.g.
@@ -367,6 +374,7 @@ export interface RealConversionSummary {
   completedConversions: number;
   realRevenueCents: number;
   attributedConversions: number;
+  unattributedConversions: number;
   attributedRevenueCents: number;
   googleAdsAttributedConversions: number;
   googleAdsAttributedRevenueCents: number;
@@ -394,6 +402,7 @@ export async function getRealConversionSummary(tenantId: string): Promise<RealCo
     completedConversions: 0,
     realRevenueCents: 0,
     attributedConversions: 0,
+    unattributedConversions: 0,
     attributedRevenueCents: 0,
     googleAdsAttributedConversions: 0,
     googleAdsAttributedRevenueCents: 0,
@@ -410,7 +419,11 @@ export async function getRealConversionSummary(tenantId: string): Promise<RealCo
     const isGoogleAds = Boolean(client?.gclid);
     const isEnglish = isEnglishLanguage(client?.preferredLanguage ?? null);
 
-    if (hasKnownSource) summary.attributedConversions += 1;
+    if (hasKnownSource) {
+      summary.attributedConversions += 1;
+    } else {
+      summary.unattributedConversions += 1;
+    }
     if (isGoogleAds) summary.googleAdsAttributedConversions += 1;
     if (isEnglish) summary.englishLanguageConversions += 1;
 

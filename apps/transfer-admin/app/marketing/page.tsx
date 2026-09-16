@@ -312,6 +312,10 @@ export default async function MarketingOverviewPage({
             <div className="text-lg font-medium">{realConversionSummary.attributedConversions}</div>
           </div>
           <div>
+            <div className="text-xs text-neutral-500 dark:text-neutral-400">Unattributed conversions</div>
+            <div className="text-lg font-medium">{realConversionSummary.unattributedConversions}</div>
+          </div>
+          <div>
             <div className="text-xs text-neutral-500 dark:text-neutral-400">
               Google Ads attributed conversions
             </div>

@@ -258,6 +258,7 @@ describe("getRealConversionSummary", () => {
 
     expect(result.realConversions).toBe(1);
     expect(result.attributedConversions).toBe(1);
+    expect(result.unattributedConversions).toBe(0);
     expect(result.googleAdsAttributedConversions).toBe(1);
     expect(result.attributedRevenueCents).toBe(39000);
     expect(result.googleAdsAttributedRevenueCents).toBe(39000);
@@ -272,6 +273,7 @@ describe("getRealConversionSummary", () => {
 
     expect(result.realConversions).toBe(1);
     expect(result.attributedConversions).toBe(0);
+    expect(result.unattributedConversions).toBe(1);
     expect(result.googleAdsAttributedConversions).toBe(0);
     expect(result.attributedRevenueCents).toBe(0);
     expect(result.googleAdsAttributedRevenueCents).toBe(0);
@@ -339,6 +341,33 @@ describe("getRealConversionSummary", () => {
     const result = await getRealConversionSummary("tenant-1");
 
     expect(result.realRevenueCents).toBe(39000);
+  });
+
+  // TEST 11 — Invariante strutturale: ogni real conversion finisce in
+  // esattamente uno dei due bucket, mai in entrambi e mai in nessuno, su un
+  // mix di client con e senza segnale marketing verificabile (una
+  // cancellazione è inclusa per confermare che non è mai contata in nessun
+  // bucket, coerente con realConversions stesso).
+  it("keeps attributedConversions + unattributedConversions === realConversions across a mixed set of bookings", async () => {
+    fakeState.clientRows = [
+      client({ id: "c1", utmSource: "newsletter" }),
+      client({ id: "c2", gclid: "Cj0KEQjw" }),
+      client({ id: "c3" }), // no utm*, no gclid
+      client({ id: "c4" }), // no utm*, no gclid
+    ];
+    fakeState.bookingRows = [
+      booking({ clientId: "c1", status: "completed", finalAmountCents: 10000 }),
+      booking({ clientId: "c2", status: "confirmed" }),
+      booking({ clientId: "c3", status: "completed", finalAmountCents: 5000 }),
+      booking({ clientId: "c4", status: "cancelled", finalAmountCents: 99999 }), // excluded entirely
+    ];
+
+    const result = await getRealConversionSummary("tenant-1");
+
+    expect(result.realConversions).toBe(3);
+    expect(result.attributedConversions).toBe(2);
+    expect(result.unattributedConversions).toBe(1);
+    expect(result.attributedConversions + result.unattributedConversions).toBe(result.realConversions);
   });
 });
 
