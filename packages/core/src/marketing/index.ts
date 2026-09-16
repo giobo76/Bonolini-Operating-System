@@ -36,6 +36,8 @@ export {
   getLtvBySource,
   getCostPerStageBySource,
   getLeadConversionBySource,
+  getRealConversionSummary,
+  getTransferRequestFunnel,
 } from "./business-kpis";
 export type {
   FunnelSummary,
@@ -46,6 +48,8 @@ export type {
   CostPerStageEntry,
   LeadConversionBySource,
   LeadConversionSourceEntry,
+  RealConversionSummary,
+  TransferRequestFunnel,
 } from "./business-kpis";
 export type {
   MarketingConnection,

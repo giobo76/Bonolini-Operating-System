@@ -1,0 +1,123 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
+import type { AgentDefinition } from "@bos/ai";
+import { aiCategories } from "@bos/ai";
+import { listSocialPosts } from "../../social-publishing";
+import type { AgentCycleOutput } from "../types";
+
+// Same Claude-calling shape every other module in this codebase already
+// uses (see marketing/strategist.ts, whatsapp/parser.ts): forced tool-use,
+// zod-validated output, fail-soft on a missing ANTHROPIC_API_KEY — no new
+// pattern invented here.
+
+const decisionSchema = z.object({
+  recommendation: z.enum(["retry_facebook", "prepare_content", "none"]),
+  postId: z.string().uuid().optional(),
+  reasoning: z.string().min(1),
+});
+
+const DECISION_TOOL = {
+  name: "report_social_decision",
+  description:
+    "Report exactly one recommendation about this week's social publishing state: retry a specific failed Facebook post (with its postId), prepare fresh content/image material, or do nothing.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      recommendation: { type: "string", enum: ["retry_facebook", "prepare_content", "none"] },
+      postId: { type: "string", description: "Required only when recommendation is 'retry_facebook'." },
+      reasoning: { type: "string" },
+    },
+    required: ["recommendation", "reasoning"],
+  },
+} as const;
+
+const SYSTEM_PROMPT =
+  "You are the Social Agent for Bonolini Transfer, a small chauffeur company. You are given this tenant's recent weekly social_posts rows (status, whether Facebook already succeeded, whether content was ever generated). You NEVER publish anything yourself and you NEVER touch Instagram — you only recommend, at most, ONE of: retrying the Facebook publish step of a specific already-failed post that still has saved content (recommendation 'retry_facebook', with that post's exact id as postId), preparing fresh content/image material for the next post (recommendation 'prepare_content'), or doing nothing (recommendation 'none'). Never invent a postId that wasn't given to you. Never recommend retrying a post that already succeeded on Facebook or that has no saved content.";
+
+async function decide(
+  posts: Array<{ id: string; weekStartDate: string; status: string; hasContent: boolean; metaError: string | null }>,
+): Promise<z.infer<typeof decisionSchema>> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error("ANTHROPIC_API_KEY not set — Social Agent recommending 'none' for this run");
+    return { recommendation: "none", reasoning: "ANTHROPIC_API_KEY not set" };
+  }
+
+  const anthropic = new Anthropic({ apiKey });
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-5",
+    max_tokens: 1024,
+    system: SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `Recent social_posts rows for this tenant:\n\n${JSON.stringify(posts, null, 2)}\n\nReport your recommendation using the report_social_decision tool.`,
+      },
+    ],
+    tools: [DECISION_TOOL],
+    tool_choice: { type: "tool", name: "report_social_decision" },
+  });
+
+  const toolUse = response.content.find((block) => block.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") {
+    return { recommendation: "none", reasoning: "Claude returned no tool_use block" };
+  }
+
+  const result = decisionSchema.safeParse(toolUse.input);
+  if (!result.success) {
+    return { recommendation: "none", reasoning: "Claude's output failed schema validation" };
+  }
+
+  return result.data;
+}
+
+export const SOCIAL_AGENT_ID = "social.agent";
+
+export const socialAgent: AgentDefinition = {
+  metadata: {
+    id: SOCIAL_AGENT_ID,
+    name: "Social Agent",
+    description:
+      "Reviews recent weekly social_posts rows and recommends, at most, retrying a specific failed Facebook post or preparing fresh content/image material. Never publishes directly, never touches Instagram.",
+    category: aiCategories.SOCIAL,
+    capabilities: ["social", "analysis"],
+    permissions: [{ permission: "agent:invoke" }, { permission: "agent:discover" }, { permission: "task:execute" }],
+    version: "0.1.0",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  handler: async ({ tenantId }) => {
+    const recentPosts = await listSocialPosts(tenantId, 10);
+    const perceivedPosts = recentPosts.map((post) => ({
+      id: post.id,
+      weekStartDate: post.weekStartDate,
+      status: post.status,
+      hasContent: Boolean(post.content),
+      metaError: post.metaError,
+    }));
+
+    const decision = await decide(perceivedPosts);
+
+    // Defensive re-validation, same discipline ai-analyst.ts applies to its
+    // own agent's output: never recommend a retry for a post this
+    // perception step didn't actually see as failed-with-content, even if
+    // Claude's own output otherwise passed schema validation.
+    const validRetryCandidate =
+      decision.recommendation === "retry_facebook" &&
+      decision.postId != null &&
+      perceivedPosts.some((p) => p.id === decision.postId && p.status === "failed" && p.hasContent);
+
+    const output: AgentCycleOutput = {
+      perception: { posts: perceivedPosts },
+      decision,
+      ...(validRetryCandidate
+        ? { proposedAction: { toolName: "social.retry_facebook_only", input: { postId: decision.postId } } }
+        : decision.recommendation === "prepare_content"
+          ? { proposedAction: { toolName: "social.prepare_content", input: {} } }
+          : {}),
+    };
+
+    return { result: output as unknown as Record<string, unknown> };
+  },
+};
