@@ -73,7 +73,7 @@ vi.mock("./validator", () => validatorMock);
 const metaClientMock = vi.hoisted(() => ({ publishTextPost: vi.fn(), publishInstagramPost: vi.fn() }));
 vi.mock("./meta-client", () => metaClientMock);
 
-const { runWeeklySocialPost, getWeekStartDateEuropeRome } = await import("./service");
+const { runWeeklySocialPost, getWeekStartDateEuropeRome, retryFacebookOnly } = await import("./service");
 
 const SNAPSHOT = {
   servedRoutes: [{ pickup: "Milano", destination: "Tirano" }],
@@ -290,5 +290,87 @@ describe("runWeeklySocialPost — Instagram configured", () => {
     expect(result.instagramStatus).toBe("failed");
     expect(result.instagramError).toContain("too long for Instagram");
     expect(metaClientMock.publishInstagramPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("retryFacebookOnly", () => {
+  it("returns null when the post does not exist for this tenant", async () => {
+    fakeState.posts = [];
+
+    const result = await retryFacebookOnly("tenant-1", "nonexistent-id");
+
+    expect(result).toBeNull();
+  });
+
+  it("is idempotent — never calls the Graph API again when Facebook is already published", async () => {
+    const initial = await runWeeklySocialPost("tenant-1", MONDAY);
+    expect(initial.status).toBe("published");
+    metaClientMock.publishTextPost.mockClear();
+
+    const result = await retryFacebookOnly("tenant-1", initial.id);
+
+    expect(result).toEqual({
+      ok: true,
+      alreadyPublished: true,
+      facebookPostId: "page_123",
+      error: null,
+      post: expect.objectContaining({ id: initial.id, status: "published", metaPostId: "page_123" }),
+    });
+    expect(metaClientMock.publishTextPost).not.toHaveBeenCalled();
+  });
+
+  it("retries a previously failed Facebook publish and succeeds, without touching Instagram or regenerating content", async () => {
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: false, error: "Invalid OAuth access token." });
+    const initial = await runWeeklySocialPost("tenant-1", MONDAY);
+    expect(initial.status).toBe("failed");
+    expect(initial.content).toBeTruthy();
+    expect(initial.instagramStatus).toBe("skipped");
+
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: true, postId: "page_456" });
+    contentGeneratorMock.generatePostContent.mockClear();
+
+    const result = await retryFacebookOnly("tenant-1", initial.id);
+
+    expect(result?.ok).toBe(true);
+    expect(result?.alreadyPublished).toBe(false);
+    expect(result?.facebookPostId).toBe("page_456");
+    expect(result?.post.status).toBe("published");
+    expect(result?.post.metaPostId).toBe("page_456");
+    // Instagram's own prior outcome is untouched by the retry.
+    expect(result?.post.instagramStatus).toBe("skipped");
+    expect(result?.post.instagramMediaId).toBeNull();
+    expect(metaClientMock.publishInstagramPost).not.toHaveBeenCalled();
+    expect(contentGeneratorMock.generatePostContent).not.toHaveBeenCalled();
+    expect(metaClientMock.publishTextPost).toHaveBeenCalledWith(initial.content);
+  });
+
+  it("records a Facebook error on a retry that fails again, still without touching Instagram", async () => {
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: false, error: "Invalid OAuth access token." });
+    const initial = await runWeeklySocialPost("tenant-1", MONDAY);
+
+    metaClientMock.publishTextPost.mockResolvedValue({ ok: false, error: "Rate limited." });
+
+    const result = await retryFacebookOnly("tenant-1", initial.id);
+
+    expect(result?.ok).toBe(false);
+    expect(result?.error).toBe("Rate limited.");
+    expect(result?.facebookPostId).toBeNull();
+    expect(result?.post.status).toBe("failed");
+    expect(result?.post.metaError).toBe("Rate limited.");
+    expect(metaClientMock.publishInstagramPost).not.toHaveBeenCalled();
+  });
+
+  it("fails cleanly without calling the Graph API when there is no saved content to retry", async () => {
+    contentSourceMock.hasEnoughDataForPost.mockReturnValue(false);
+    const initial = await runWeeklySocialPost("tenant-1", MONDAY);
+    expect(initial.status).toBe("failed");
+    expect(initial.content).toBeFalsy();
+    metaClientMock.publishTextPost.mockClear();
+
+    const result = await retryFacebookOnly("tenant-1", initial.id);
+
+    expect(result?.ok).toBe(false);
+    expect(result?.error).toContain("no content saved");
+    expect(metaClientMock.publishTextPost).not.toHaveBeenCalled();
   });
 });

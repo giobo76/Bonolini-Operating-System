@@ -251,6 +251,89 @@ export async function runWeeklySocialPost(tenantId: string, referenceDate: Date 
   }
 }
 
+export interface RetryFacebookOnlyResult {
+  ok: boolean;
+  alreadyPublished: boolean;
+  facebookPostId: string | null;
+  error: string | null;
+  post: SocialPost;
+}
+
+// ── Facebook-only retry ──────────────────────────────────────────────────
+// Lets an admin retry just the Facebook half of one specific, already-
+// existing social_posts row (typically one whose Facebook publish
+// previously failed) without touching Instagram in any way and without
+// re-running the full weekly pipeline (runWeeklySocialPost) — no new data
+// snapshot, no second Claude call, no re-validation: it reuses row.content
+// exactly as already saved. Idempotent the same way the rest of this module
+// is: if Facebook already succeeded (status 'published' with a metaPostId
+// already set), this is a pure read, never a second Graph API call and
+// never a duplicate Facebook post. The update this writes touches only the
+// columns socialPosts' own schema comment already documents as "the
+// Facebook pipeline" (status/metaPostId/metaError/publishedAt) — the
+// instagram* columns are never read from or written to here.
+export async function retryFacebookOnly(tenantId: string, postId: string): Promise<RetryFacebookOnlyResult | null> {
+  const db = getDb();
+
+  const rows = await db
+    .select()
+    .from(socialPosts)
+    .where(and(eq(socialPosts.id, postId), eq(socialPosts.tenantId, tenantId)));
+  const row = rows[0];
+  if (!row) return null;
+
+  if (row.status === "published" && row.metaPostId) {
+    log("social_publishing.retry_facebook_only.already_published", { tenantId, postId, metaPostId: row.metaPostId });
+    return { ok: true, alreadyPublished: true, facebookPostId: row.metaPostId, error: null, post: row };
+  }
+
+  if (!row.content) {
+    return {
+      ok: false,
+      alreadyPublished: false,
+      facebookPostId: null,
+      error: "no content saved on this post to retry",
+      post: row,
+    };
+  }
+
+  const publishResult = await publishTextPost(row.content);
+
+  const update = publishResult.ok
+    ? {
+        status: "published" as const,
+        metaPostId: publishResult.postId ?? null,
+        metaError: null,
+        publishedAt: new Date(),
+        updatedAt: new Date(),
+      }
+    : {
+        status: "failed" as const,
+        metaError: publishResult.error ?? "unknown Graph API error",
+        updatedAt: new Date(),
+      };
+
+  await db.update(socialPosts).set(update).where(eq(socialPosts.id, row.id));
+
+  if (!publishResult.ok) {
+    captureException(
+      new Error(publishResult.error ?? "Graph API publish failed"),
+      "social_publishing.retry_facebook_only.publish_failed",
+      { tenantId, postId },
+    );
+  } else {
+    log("social_publishing.retry_facebook_only.published", { tenantId, postId, metaPostId: publishResult.postId });
+  }
+
+  return {
+    ok: publishResult.ok,
+    alreadyPublished: false,
+    facebookPostId: publishResult.ok ? (publishResult.postId ?? null) : null,
+    error: publishResult.ok ? null : (publishResult.error ?? "unknown Graph API error"),
+    post: { ...row, ...update },
+  };
+}
+
 export async function listSocialPosts(tenantId: string, limit = 20): Promise<SocialPost[]> {
   const db = getDb();
   return db

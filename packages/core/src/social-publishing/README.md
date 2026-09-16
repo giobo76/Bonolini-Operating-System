@@ -12,7 +12,7 @@ The `social_posts` table — one row per tenant per calendar week (`UNIQUE(tenan
 
 ## Exposes
 
-`runWeeklySocialPost`, `listSocialPosts`, `getWeekStartDateEuropeRome` (`service.ts`); `getRealPostDataSnapshot`, `hasEnoughDataForPost`, `classifyTransferType` (`content-source.ts`); `validatePost`, `validateInstagramCaptionLength` (`validator.ts`); `socialPublishingRouter` (a minimal admin-only tRPC surface: `listPosts`, `runNow`); `socialPublishingInngestFunctions`. `meta-client.ts`'s `publishTextPost`/`publishInstagramPost` stay internal to the module, called only from `service.ts` — same as before Instagram was added.
+`runWeeklySocialPost`, `listSocialPosts`, `getWeekStartDateEuropeRome`, `retryFacebookOnly` (`service.ts`); `getRealPostDataSnapshot`, `hasEnoughDataForPost`, `classifyTransferType` (`content-source.ts`); `validatePost`, `validateInstagramCaptionLength` (`validator.ts`); `socialPublishingRouter` (a minimal admin-only tRPC surface: `listPosts`, `runNow`, `retryFacebookOnly`); `socialPublishingInngestFunctions`. `meta-client.ts`'s `publishTextPost`/`publishInstagramPost` stay internal to the module, called only from `service.ts` — same as before Instagram was added.
 
 ## Emits/Listens to
 
@@ -70,6 +70,18 @@ Instagram Graph API content publishing is authenticated with the same `FACEBOOK_
 - `INSTAGRAM_POST_IMAGE_URL` — a permanent, publicly reachable URL to a real, official Bonolini Transfer photo. Deliberately **not** chosen or fetched automatically by this module's code (e.g. the Page's current profile picture) — the founder picks the exact real photo, exactly as they will pick the Page Access Token above, rather than code guessing what counts as "official." Instagram has no text-only post type, so this is mandatory for every Instagram publish; when unset, Instagram publishing is skipped, not treated as an error (see `service.ts`'s `publishToInstagram`).
 
 Both are intentionally **not yet set** anywhere, pending the founder's review of this code first — see `.env.example`'s own comments.
+
+## Facebook-only retry (`retryFacebookOnly`)
+
+For the case where Facebook's Graph API call itself failed (rate limit, transient error, expired token since fixed) but the rest of the week's pipeline succeeded — content was generated and validated, or Instagram published fine — `retryFacebookOnly(tenantId, postId)` retries **only** the Facebook publish step of one already-existing `social_posts` row, given its id:
+
+- Reuses `row.content` exactly as already saved — never a new Claude call, never re-validation, never `runWeeklySocialPost`'s full pipeline.
+- Never reads or writes any `instagram*` column — Instagram's own outcome on the row is untouched, whatever it already was.
+- Idempotent: if the row is already `status: 'published'` with a `metaPostId`, this is a pure read (no second Graph API call, no duplicate Facebook post) — returns `alreadyPublished: true`.
+- If there's no saved `content` to retry (the pipeline never reached generation), returns a clear `ok: false` error without calling the Graph API at all.
+- Writes back only the same columns the schema already documents as "the Facebook pipeline" — `status`/`metaPostId`/`metaError`/`publishedAt` — never anything else on the row.
+
+Exposed as `socialPublishingRouter.retryFacebookOnly` (admin-only, `{ id }` input, `NOT_FOUND` if the row doesn't belong to the caller's tenant).
 
 ## Hard constraints (do not relax without the founder reopening this decision)
 

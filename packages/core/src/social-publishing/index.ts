@@ -1,6 +1,7 @@
 export { socialPublishingRouter } from "./router";
 export * from "./schema";
-export { runWeeklySocialPost, listSocialPosts, getWeekStartDateEuropeRome } from "./service";
+export { runWeeklySocialPost, listSocialPosts, getWeekStartDateEuropeRome, retryFacebookOnly } from "./service";
+export type { RetryFacebookOnlyResult } from "./service";
 export { getRealPostDataSnapshot, hasEnoughDataForPost, classifyTransferType } from "./content-source";
 export type { RealPostDataSnapshot, ServedRoute, TransferTypeLabel } from "./content-source";
 export { validatePost } from "./validator";

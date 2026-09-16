@@ -10,3 +10,10 @@ export const listSocialPostsSchema = z.object({
 });
 
 export type ListSocialPostsInput = z.infer<typeof listSocialPostsSchema>;
+
+// Same { id } convention as bookings' bookingIdSchema — a single existing
+// social_posts row to retry, never a week/tenant lookup (that's runNow's
+// job, not this one's).
+export const retryFacebookOnlySchema = z.object({ id: z.string().uuid() });
+
+export type RetryFacebookOnlyInput = z.infer<typeof retryFacebookOnlySchema>;
