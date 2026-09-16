@@ -1,3 +1,14 @@
+// EXAMPLE/REFERENCE ONLY — every handler below is a fake, no-op echo, not a
+// real implementation (see each one's body). None of this file is
+// re-exported from "./index" (the package's public surface, per
+// package.json's "exports" map), and nothing outside this file registers
+// or calls registerCoreAgents/coreAgents in production — verified
+// repo-wide before the BOS Agent orchestrator was built
+// (packages/core/src/bos-agent). Kept only as a shape reference for what a
+// minimal AgentDefinition looks like; a real agent (Marketing/Social/
+// Operations) lives in packages/core/src/bos-agent/agents and always wires
+// a real handler, following createGoogleMarketingAnalystAgent's
+// dependency-injection pattern below.
 import type { AgentDefinition } from "./agent";
 import { aiCategories } from "./categories";
 import type { AgentCapability } from "./tasks";

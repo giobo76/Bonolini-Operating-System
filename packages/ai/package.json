@@ -13,7 +13,9 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests"
   },
-  "dependencies": {},
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
   "devDependencies": {
     "@bos/config": "workspace:*",
     "@types/node": "^22.10.2",

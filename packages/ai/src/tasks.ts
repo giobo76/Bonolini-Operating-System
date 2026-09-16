@@ -4,6 +4,9 @@ export const taskTypes = [
   "dispatch_optimization",
   "invoice_review",
   "content_generation",
+  // Added for the BOS Agent orchestrator (packages/core/src/bos-agent).
+  "social_publishing",
+  "operations_recommendation",
 ] as const;
 
 export type TaskType = (typeof taskTypes)[number];
@@ -16,6 +19,9 @@ export const agentCapabilities = [
   "content",
   "analysis",
   "planning",
+  // Added for the BOS Agent orchestrator (packages/core/src/bos-agent).
+  "social",
+  "operations",
 ] as const;
 
 export type AgentCapability = (typeof agentCapabilities)[number];
