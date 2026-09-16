@@ -3,6 +3,7 @@ export {
   processTransferRequestForMessageAndPrice,
   getTransferRequest,
   listTransferRequestsForClient,
+  listPendingApprovalTransferRequests,
   computeMissingInformation,
   runPricingForTransferRequest,
   runAvailabilityForTransferRequest,

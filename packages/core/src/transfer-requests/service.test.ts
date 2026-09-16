@@ -300,6 +300,7 @@ const {
   rejectTransferRequest,
   modifyPriceForTransferRequest,
   getTransferRequest,
+  listPendingApprovalTransferRequests,
 } = await import("./service");
 
 function seedMessage(id: string, transferRequestId: string | null = null) {
@@ -1569,5 +1570,38 @@ describe("Admin decision — accept / reject / modifyPrice", () => {
       );
       expect(fakeState.bookings).toHaveLength(0);
     });
+  });
+});
+
+// Read-only smoke test — this file's own mock deliberately ignores
+// where()'s condition and returns the seeded array as-is (see the header
+// comment at the top of this file), so it cannot exercise real
+// status-based SQL filtering here; that filtering is exactly what
+// production drizzle/Postgres does, unmocked, for any real query. This
+// just confirms the function executes against the mocked db client and
+// returns rows without throwing — added for the BOS Agent's Operations
+// Agent, which reads this list.
+describe("listPendingApprovalTransferRequests", () => {
+  beforeEach(() => {
+    fakeState.requests = [];
+  });
+
+  it("returns the seeded rows without throwing", async () => {
+    fakeState.requests.push({
+      id: "request-1",
+      tenantId: "tenant-1",
+      status: "pending_admin_approval",
+      updatedAt: new Date("2026-09-01T00:00:00Z"),
+    });
+
+    const result = await listPendingApprovalTransferRequests("tenant-1");
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("request-1");
+  });
+
+  it("returns an empty array when there are no requests at all", async () => {
+    const result = await listPendingApprovalTransferRequests("tenant-1");
+    expect(result).toEqual([]);
   });
 });

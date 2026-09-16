@@ -320,6 +320,24 @@ export async function getTransferRequest(tenantId: string, id: string): Promise<
   return row ?? null;
 }
 
+// Read-only. Added for the BOS Agent's Operations Agent (packages/core/
+// src/bos-agent), which only ever reads this list to produce an advisory
+// summary — it never calls accept/reject/modifyPrice itself. The
+// pending_admin_approval -> decision boundary these rows sit at is
+// unchanged; this is purely a new way to see it, not a new way to cross
+// it. `desc(updatedAt)` surfaces the most recently priced/re-priced
+// request first, since that's usually the one closest to needing a
+// decision. No `.limit()` — same shape as listTransferRequestsForClient
+// above; a caller needing fewer rows slices the result itself.
+export async function listPendingApprovalTransferRequests(tenantId: string): Promise<TransferRequest[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(transferRequests)
+    .where(and(eq(transferRequests.tenantId, tenantId), eq(transferRequests.status, "pending_admin_approval")))
+    .orderBy(desc(transferRequests.updatedAt));
+}
+
 export async function listTransferRequestsForClient(tenantId: string, clientId: string): Promise<TransferRequest[]> {
   const db = getDb();
   return db
