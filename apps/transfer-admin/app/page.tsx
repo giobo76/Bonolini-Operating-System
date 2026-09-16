@@ -25,6 +25,11 @@ export default async function DashboardPage() {
             Marketing Intelligence
           </Link>
         ) : null}
+        {session?.profile.role === "admin" ? (
+          <Link href="/bos-agent" className="rounded border px-4 py-2 text-sm">
+            BOS Agent
+          </Link>
+        ) : null}
       </nav>
 
       <p className="text-neutral-500 dark:text-neutral-400">
