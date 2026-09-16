@@ -1,4 +1,5 @@
 export { inngest } from "./client";
+export * from "./events";
 
 // Function *definitions* live in packages/core (e.g.
 // packages/core/src/marketing/inngest-functions.ts), not here — they need
