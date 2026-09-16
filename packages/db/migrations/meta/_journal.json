@@ -78,6 +78,13 @@
       "when": 1789303200000,
       "tag": "0018_social_publishing_instagram",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789586376329,
+      "tag": "0019_bos_agent",
+      "breakpoints": true
     }
   ]
 }
