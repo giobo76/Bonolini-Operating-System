@@ -1,5 +1,6 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, transferRequests, whatsappMessages, assertOne, type TransferRequest } from "@bos/db";
+import { inngest, emitDomainEvent } from "@bos/jobs";
 import { calculatePrice, determineCustomerType, isComoTiranoRoute, type CustomerType } from "../pricing";
 import { calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip, calculateRoute } from "../maps-distance";
 import {
@@ -171,7 +172,20 @@ async function insertNewTransferRequest(
     .set({ missingInformation: missing })
     .where(eq(transferRequests.id, created.id))
     .returning();
-  return withMissing ?? created;
+  const result = withMissing ?? created;
+
+  // Fire-and-forget, fail-soft (emitDomainEvent never throws) — for the
+  // BOS Agent's Operations Agent (packages/core/src/bos-agent), the one
+  // real point a transfer_request comes into existence. Never awaited
+  // synchronously so a transient event-delivery problem can't slow down or
+  // fail message intake.
+  void emitDomainEvent(inngest, "transfer_request.created", {
+    tenantId,
+    transferRequestId: result.id,
+    status: result.status,
+  });
+
+  return result;
 }
 
 // Wraps insertNewTransferRequest with the same race fallback as
@@ -1020,6 +1034,16 @@ export async function acceptTransferRequest(
 
   const updated = assertOne(rows, "acceptTransferRequest");
   await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated);
+
+  // Fire-and-forget, fail-soft — only on the fresh transition to
+  // 'approved', never on the idempotent early-return above (that would
+  // re-emit for a confirmation that already happened).
+  void emitDomainEvent(inngest, "transfer_request.confirmed", {
+    tenantId,
+    transferRequestId: updated.id,
+    finalAmountCents: updated.finalAmountCents ?? 0,
+  });
+
   return updated;
 }
 
@@ -1133,5 +1157,16 @@ export async function modifyPriceForTransferRequest(
   // rule above; this call only ensures the booking for the request this
   // invocation itself just approved.
   await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated);
+
+  // Fire-and-forget, fail-soft — same event acceptTransferRequest emits on
+  // its own fresh confirmation; this function is never re-runnable once
+  // approved (see above), so there is no idempotent-retry branch to avoid
+  // double-emitting from here.
+  void emitDomainEvent(inngest, "transfer_request.confirmed", {
+    tenantId,
+    transferRequestId: updated.id,
+    finalAmountCents: updated.finalAmountCents ?? 0,
+  });
+
   return updated;
 }

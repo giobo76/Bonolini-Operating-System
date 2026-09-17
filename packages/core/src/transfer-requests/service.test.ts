@@ -76,6 +76,14 @@ function extractEqValue(condition: { queryChunks: unknown[] }): string | undefin
 
 const OPEN_STATUSES = ["collecting_info", "ready_for_pricing"];
 
+// @bos/jobs mocked so this suite never attempts a real inngest.send() call
+// — emitDomainEvent is fire-and-forget/fail-soft in production, but a real
+// network attempt in every one of this file's 80+ cases would be exactly
+// the kind of thing this codebase's own testing discipline (mock every
+// external call) forbids.
+const jobsMock = vi.hoisted(() => ({ inngest: {}, emitDomainEvent: vi.fn() }));
+vi.mock("@bos/jobs", () => jobsMock);
+
 vi.mock("@bos/db", () => {
   const db = {
     // Plain `select()` calls (findOpenTransferRequest, getTransferRequest,
@@ -330,6 +338,7 @@ beforeEach(() => {
   calculateGenericRouteRoundTrip.mockClear();
   calculateComoTiranoRoundTrip.mockClear();
   calculateRoute.mockClear();
+  jobsMock.emitDomainEvent.mockClear();
 });
 
 describe("computeMissingInformation", () => {
@@ -1603,5 +1612,95 @@ describe("listPendingApprovalTransferRequests", () => {
   it("returns an empty array when there are no requests at all", async () => {
     const result = await listPendingApprovalTransferRequests("tenant-1");
     expect(result).toEqual([]);
+  });
+});
+
+// Domain event emission for the BOS Agent's Operations Agent
+// (packages/core/src/bos-agent) — @bos/jobs is mocked at the top of this
+// file, so these only assert emitDomainEvent was called with the right
+// event name/payload, never a real network call.
+describe("transfer_request.confirmed domain event", () => {
+  function seedPendingApprovalForEventTest(overrides: Partial<Record<string, unknown>> = {}) {
+    fakeState.requests.push({
+      id: "request-1",
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      status: "pending_admin_approval",
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      requestedDate: "2026-09-15",
+      requestedTime: "10:00",
+      passengers: 4,
+      luggage: null,
+      flightNumber: null,
+      trainNumber: null,
+      hotel: null,
+      language: null,
+      intent: null,
+      missingInformation: [],
+      pricingStatus: "fixed",
+      calculatedAmountCents: 25000,
+      currency: "EUR",
+      pricingBreakdown: { matchedRule: "fixed_airport_malpensa" },
+      finalAmountCents: null,
+      priceOverrideReason: null,
+      adminApprovedAt: null,
+      adminApprovedBy: null,
+      cancelledReason: null,
+      pickupAddress: null,
+      destinationAddress: null,
+      customerTripDurationMinutes: 45,
+      ...overrides,
+    });
+  }
+
+  it("acceptTransferRequest emits transfer_request.confirmed with the real final amount", async () => {
+    seedPendingApprovalForEventTest();
+
+    await acceptTransferRequest("tenant-1", "request-1", "admin-profile-1");
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "transfer_request.confirmed",
+      expect.objectContaining({ tenantId: "tenant-1", transferRequestId: "request-1", finalAmountCents: 25000 }),
+    );
+  });
+
+  it("acceptTransferRequest never re-emits on its own idempotent retry (already 'approved')", async () => {
+    seedPendingApprovalForEventTest();
+    await acceptTransferRequest("tenant-1", "request-1", "admin-profile-1");
+    jobsMock.emitDomainEvent.mockClear();
+
+    await acceptTransferRequest("tenant-1", "request-1", "admin-profile-1");
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "transfer_request.confirmed",
+      expect.anything(),
+    );
+  });
+
+  it("modifyPriceForTransferRequest emits transfer_request.confirmed with the admin-chosen amount", async () => {
+    seedPendingApprovalForEventTest();
+
+    await modifyPriceForTransferRequest("tenant-1", "request-1", "admin-profile-1", 30000, "goodwill discount review");
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "transfer_request.confirmed",
+      expect.objectContaining({ tenantId: "tenant-1", transferRequestId: "request-1", finalAmountCents: 30000 }),
+    );
+  });
+
+  it("rejectTransferRequest never emits transfer_request.confirmed", async () => {
+    seedPendingApprovalForEventTest();
+
+    await rejectTransferRequest("tenant-1", "request-1", "not needed anymore");
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(
+      jobsMock.inngest,
+      "transfer_request.confirmed",
+      expect.anything(),
+    );
   });
 });
