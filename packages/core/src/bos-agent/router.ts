@@ -1,10 +1,11 @@
 import { TRPCError } from "@trpc/server";
 import { router, adminProcedure } from "../trpc";
-import { triggerNowSchema, listRunsSchema, runIdSchema, approvalIdSchema } from "./schema";
+import { triggerNowSchema, listRunsSchema, runIdSchema, approvalIdSchema, memoryActivitySchema } from "./schema";
 import { listRuns, getRun } from "./audit";
-import { listPendingApprovals, getApproval, markApproved, markRejected } from "./approvals";
+import { listPendingApprovals, getApproval, markRejected } from "./approvals";
 import { buildOrchestrator, getToolRegistry } from "./registry-instance";
-import { runAgentCycle, executeApprovedAction } from "./orchestrator";
+import { runAgentCycle, approveAndExecute } from "./orchestrator";
+import { memorySearch } from "./memory";
 
 // admin-only throughout — same tier as marketing's getRealConversionSummary
 // (ad spend/marketing-strategy-adjacent data), a deliberately higher bar
@@ -36,6 +37,7 @@ export const bosAgentRouter = router({
       category: tool.category,
       requiresApproval: tool.requiresApproval,
       reversible: tool.reversible,
+      allowedAgents: tool.allowedAgents ?? null,
     }));
   }),
 
@@ -49,25 +51,31 @@ export const bosAgentRouter = router({
 
   pendingApprovals: adminProcedure.query(({ ctx }) => listPendingApprovals(ctx.session.profile.tenantId)),
 
+  // Bounded (memorySearch's own cap), namespace-scoped read of
+  // agent_memory for the admin UI's "Memory activity" view — never a
+  // free-form cross-namespace scan.
+  memoryActivity: adminProcedure
+    .input(memoryActivitySchema)
+    .query(({ ctx, input }) => memorySearch(ctx.session.profile.tenantId, input.namespace, { limit: input.limit })),
+
   // Approving fulfills the human-approval condition the Policy Engine
   // already required at proposal time, then immediately performs ACTION +
-  // VERIFICATION + AUDIT for exactly the tool/input the original run
-  // proposed (see orchestrator.ts's executeApprovedAction) — never a
-  // re-derived action.
+  // VERIFICATION + AUDIT + MEMORY UPDATE for exactly the tool/input the
+  // original run proposed (see orchestrator.ts's approveAndExecute) —
+  // never a re-derived action, and never executed twice even on a
+  // duplicate/retried request (approveAndExecute's own idempotency).
   approve: adminProcedure.input(approvalIdSchema).mutation(async ({ ctx, input }) => {
     const tenantId = ctx.session.profile.tenantId;
     const approval = await getApproval(tenantId, input.id);
     if (!approval) throw new TRPCError({ code: "NOT_FOUND" });
 
     try {
-      const approved = await markApproved(tenantId, input.id, ctx.session.profile.id);
-      const { actionResult, verification } = await executeApprovedAction(
+      const { approval: updated, actionResult, verification, alreadyExecuted } = await approveAndExecute(
         tenantId,
-        approved.agentRunId,
-        approved.requestedAction,
-        approved.payload,
+        input.id,
+        ctx.session.profile.id,
       );
-      return { approval: approved, actionResult, verification };
+      return { approval: updated, actionResult, verification, alreadyExecuted };
     } catch (error) {
       throw new TRPCError({ code: "CONFLICT", message: error instanceof Error ? error.message : "approve failed" });
     }
@@ -88,8 +96,9 @@ export const bosAgentRouter = router({
   // Manual trigger — same "safe to call twice" spirit as social-
   // publishing's runNow, though each agent's own idempotency here comes
   // from what it does with its output (Marketing/Operations are pure
-  // reads; Social's only mutating path is approval-gated) rather than a
-  // per-week DB constraint.
+  // reads; Social's only mutating path is approval-gated, with duplicate-
+  // proposal prevention on top — see orchestrator.ts's idempotencyKey
+  // dedup) rather than a per-week DB constraint.
   triggerNow: adminProcedure.input(triggerNowSchema).mutation(({ ctx, input }) =>
     runAgentCycle({
       tenantId: ctx.session.profile.tenantId,

@@ -11,12 +11,11 @@ vi.mock("./audit", () => auditMock);
 const approvalsMock = vi.hoisted(() => ({
   listPendingApprovals: vi.fn(),
   getApproval: vi.fn(),
-  markApproved: vi.fn(),
   markRejected: vi.fn(),
 }));
 vi.mock("./approvals", () => approvalsMock);
 
-const orchestratorMock = vi.hoisted(() => ({ runAgentCycle: vi.fn(), executeApprovedAction: vi.fn() }));
+const orchestratorMock = vi.hoisted(() => ({ runAgentCycle: vi.fn(), approveAndExecute: vi.fn() }));
 vi.mock("./orchestrator", () => orchestratorMock);
 
 const registryMock = vi.hoisted(() => ({ discoverAgents: vi.fn(), toolList: vi.fn() }));
@@ -24,6 +23,9 @@ vi.mock("./registry-instance", () => ({
   buildOrchestrator: () => ({ discoverAgents: registryMock.discoverAgents }),
   getToolRegistry: () => ({ list: registryMock.toolList }),
 }));
+
+const memoryMock = vi.hoisted(() => ({ memorySearch: vi.fn() }));
+vi.mock("./memory", () => memoryMock);
 
 const { bosAgentRouter } = await import("./router");
 
@@ -45,12 +47,12 @@ beforeEach(() => {
   auditMock.getRun.mockReset();
   approvalsMock.listPendingApprovals.mockReset().mockResolvedValue([]);
   approvalsMock.getApproval.mockReset();
-  approvalsMock.markApproved.mockReset();
   approvalsMock.markRejected.mockReset();
   orchestratorMock.runAgentCycle.mockReset();
-  orchestratorMock.executeApprovedAction.mockReset();
+  orchestratorMock.approveAndExecute.mockReset();
   registryMock.discoverAgents.mockReset().mockResolvedValue([]);
   registryMock.toolList.mockReset().mockReturnValue([]);
+  memoryMock.memorySearch.mockReset().mockResolvedValue([]);
 });
 
 describe("bosAgentRouter — authorization (admin-only, dispatcher excluded)", () => {
@@ -92,27 +94,48 @@ describe("bosAgentRouter.approve", () => {
   it("throws NOT_FOUND when the approval doesn't exist for this tenant", async () => {
     approvalsMock.getApproval.mockResolvedValue(null);
     await expect(callerWithSession("admin").approve({ id: APPROVAL_ID })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect(approvalsMock.markApproved).not.toHaveBeenCalled();
+    expect(orchestratorMock.approveAndExecute).not.toHaveBeenCalled();
   });
 
-  it("marks approved then executes exactly the approved tool/payload", async () => {
+  it("delegates to approveAndExecute (the single place owning approve+execute) with the caller's tenant/profile", async () => {
     approvalsMock.getApproval.mockResolvedValue({ id: APPROVAL_ID, agentRunId: "run-1", requestedAction: "social.retry_facebook_only", payload: { postId: "p1" } });
-    approvalsMock.markApproved.mockResolvedValue({ id: APPROVAL_ID, status: "approved", agentRunId: "run-1", requestedAction: "social.retry_facebook_only", payload: { postId: "p1" } });
-    orchestratorMock.executeApprovedAction.mockResolvedValue({ actionResult: { ok: true }, verification: { ok: true } });
+    orchestratorMock.approveAndExecute.mockResolvedValue({
+      approval: { id: APPROVAL_ID, status: "executed" },
+      actionResult: { ok: true },
+      verification: { ok: true },
+      alreadyExecuted: false,
+    });
 
     const result = await callerWithSession("admin", "tenant-real").approve({ id: APPROVAL_ID });
 
-    expect(approvalsMock.markApproved).toHaveBeenCalledWith("tenant-real", APPROVAL_ID, "profile-1");
-    expect(orchestratorMock.executeApprovedAction).toHaveBeenCalledWith("tenant-real", "run-1", "social.retry_facebook_only", { postId: "p1" });
+    expect(orchestratorMock.approveAndExecute).toHaveBeenCalledWith("tenant-real", APPROVAL_ID, "profile-1");
     expect(result.actionResult).toEqual({ ok: true });
+    expect(result.alreadyExecuted).toBe(false);
   });
 
-  it("maps a markApproved error (e.g. already rejected) to CONFLICT, never executing the tool", async () => {
+  it("maps an approveAndExecute error (e.g. already rejected) to CONFLICT", async () => {
     approvalsMock.getApproval.mockResolvedValue({ id: APPROVAL_ID, status: "rejected" });
-    approvalsMock.markApproved.mockRejectedValue(new Error("agent_approval is 'rejected', not 'pending'"));
+    orchestratorMock.approveAndExecute.mockRejectedValue(new Error("agent_approval is 'rejected', cannot be approved"));
 
     await expect(callerWithSession("admin").approve({ id: APPROVAL_ID })).rejects.toMatchObject({ code: "CONFLICT" });
-    expect(orchestratorMock.executeApprovedAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("bosAgentRouter.memoryActivity", () => {
+  it("passes exactly ctx.session.profile.tenantId and the requested namespace/limit to memorySearch", async () => {
+    memoryMock.memorySearch.mockResolvedValue([{ kind: "decision", agentName: "social", summary: "ok", createdAt: "now" }]);
+
+    const result = await callerWithSession("admin", "tenant-real").memoryActivity({ namespace: "social", limit: 5 });
+
+    expect(memoryMock.memorySearch).toHaveBeenCalledWith("tenant-real", "social", { limit: 5 });
+    expect(result).toHaveLength(1);
+  });
+
+  it("rejects an unknown namespace before ever reaching memorySearch", async () => {
+    await expect(
+      callerWithSession("admin").memoryActivity({ namespace: "not-a-real-namespace" as never, limit: 5 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(memoryMock.memorySearch).not.toHaveBeenCalled();
   });
 });
 
@@ -128,7 +151,7 @@ describe("bosAgentRouter.reject", () => {
 
     await expect(callerWithSession("admin", "tenant-real").reject({ id: APPROVAL_ID })).resolves.toMatchObject({ status: "rejected" });
     expect(approvalsMock.markRejected).toHaveBeenCalledWith("tenant-real", APPROVAL_ID);
-    expect(orchestratorMock.executeApprovedAction).not.toHaveBeenCalled();
+    expect(orchestratorMock.approveAndExecute).not.toHaveBeenCalled();
   });
 });
 
