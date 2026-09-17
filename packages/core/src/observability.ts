@@ -14,7 +14,11 @@ type LogContext = Record<string, unknown>;
 
 const SENSITIVE_KEY_PATTERN = /token|secret|password|apikey|api_key|credential/i;
 
-function redact(context: LogContext): LogContext {
+// Exported (V2) so bos-agent/memory.ts can apply the exact same
+// key-pattern redaction to what gets persisted into agent_memory, not only
+// to what gets logged — a memory write is a second place secret-shaped
+// data could otherwise leak that log() alone never covered.
+export function redact(context: LogContext): LogContext {
   const safe: LogContext = {};
   for (const [key, value] of Object.entries(context)) {
     safe[key] = SENSITIVE_KEY_PATTERN.test(key) ? "[redacted]" : value;
