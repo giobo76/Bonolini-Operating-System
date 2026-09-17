@@ -13,6 +13,7 @@ vi.mock("drizzle-orm", async (importOriginal) => {
     ...actual,
     eq: (col: string, val: unknown) => ({ __eq: true, col, val }),
     and: (...conds: unknown[]) => ({ __and: true, conds }),
+    desc: (col: string) => ({ __desc: true, col }),
   };
 });
 
@@ -33,7 +34,11 @@ vi.mock("@bos/db", () => ({
   getDb: () => ({
     select: () => ({
       from: () => ({
-        where: (cond: Cond) => Promise.resolve(fakeState.rows.filter((row) => matches(row, cond))),
+        where: (cond: Cond) => {
+          const filtered = fakeState.rows.filter((row) => matches(row, cond));
+          const promise = Promise.resolve(filtered);
+          return Object.assign(promise, { orderBy: () => Promise.resolve(filtered) });
+        },
       }),
     }),
     insert: () => ({

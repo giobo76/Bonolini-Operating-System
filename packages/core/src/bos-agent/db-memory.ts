@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, agentMemory } from "@bos/db";
 import type { SharedMemory, SharedMemoryEntry } from "@bos/ai";
 
@@ -49,12 +49,16 @@ export class DbSharedMemory implements SharedMemory {
     return rows.length > 0;
   }
 
+  // Most-recently-updated first — callers that bound this list to a small
+  // limit (see memory.ts's memorySearch) rely on that order to mean "most
+  // recent", not an arbitrary slice of however many rows happen to exist.
   async list(namespace: string): Promise<Record<string, SharedMemoryEntry>> {
     const db = getDb();
     const rows = await db
       .select()
       .from(agentMemory)
-      .where(and(eq(agentMemory.tenantId, this.tenantId), eq(agentMemory.namespace, namespace)));
+      .where(and(eq(agentMemory.tenantId, this.tenantId), eq(agentMemory.namespace, namespace)))
+      .orderBy(desc(agentMemory.updatedAt));
     return Object.fromEntries(rows.map((row) => [row.key, { value: row.value, updatedAt: row.updatedAt.toISOString() }]));
   }
 }
