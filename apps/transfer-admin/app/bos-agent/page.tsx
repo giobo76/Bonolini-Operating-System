@@ -6,6 +6,15 @@ import { approveAction, rejectAction, triggerNowAction } from "./actions";
 
 const AGENT_NAMES = ["marketing", "social", "operations"] as const;
 
+const KNOWN_MEMORY_NAMESPACES = [
+  "marketing",
+  "social",
+  "operations",
+  "marketing-approvals",
+  "social-approvals",
+  "operations-approvals",
+] as const;
+
 const STATUS_STYLES: Record<string, string> = {
   success: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
   failed: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300",
@@ -18,6 +27,43 @@ function formatDate(value: Date | string) {
   return new Date(value).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
 
+function DecisionDetails({ run }: { run: { decision: unknown; policyResult: unknown; perception: unknown; memoryOps: unknown; correlationId: string | null; eventType: string | null } }) {
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-xs text-neutral-500 underline dark:text-neutral-400">
+        What did the agent see, decide, and why?
+      </summary>
+      <div className="mt-2 flex flex-col gap-2 text-xs">
+        {run.correlationId ? (
+          <div>
+            <span className="text-neutral-500 dark:text-neutral-400">correlation id: </span>
+            <code className="rounded bg-neutral-100 px-1 dark:bg-neutral-800">{run.correlationId}</code>
+            {run.eventType ? <span className="text-neutral-500 dark:text-neutral-400"> ({run.eventType})</span> : null}
+          </div>
+        ) : null}
+        {run.decision ? (
+          <div>
+            <div className="text-neutral-500 dark:text-neutral-400">Decision:</div>
+            <pre className="mt-1 overflow-x-auto rounded bg-neutral-50 p-2 dark:bg-neutral-900">{JSON.stringify(run.decision, null, 2)}</pre>
+          </div>
+        ) : null}
+        {run.policyResult ? (
+          <div>
+            <div className="text-neutral-500 dark:text-neutral-400">Policy result (why it acted, waited, or was denied):</div>
+            <pre className="mt-1 overflow-x-auto rounded bg-neutral-50 p-2 dark:bg-neutral-900">{JSON.stringify(run.policyResult, null, 2)}</pre>
+          </div>
+        ) : null}
+        {run.memoryOps ? (
+          <div>
+            <div className="text-neutral-500 dark:text-neutral-400">Memory used:</div>
+            <pre className="mt-1 overflow-x-auto rounded bg-neutral-50 p-2 dark:bg-neutral-900">{JSON.stringify(run.memoryOps, null, 2)}</pre>
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 export default async function BosAgentPage({
   searchParams,
 }: {
@@ -26,17 +72,22 @@ export default async function BosAgentPage({
   const sp = await searchParams;
   const triggered = sp.triggered === "1";
   const errorParam = Array.isArray(sp.error) ? sp.error[0] : sp.error;
+  const memoryNamespaceParam = Array.isArray(sp.memoryNamespace) ? sp.memoryNamespace[0] : sp.memoryNamespace;
+  const memoryNamespace = (KNOWN_MEMORY_NAMESPACES as readonly string[]).includes(memoryNamespaceParam ?? "")
+    ? (memoryNamespaceParam as (typeof KNOWN_MEMORY_NAMESPACES)[number])
+    : "social";
 
   const caller = await createServerCaller();
 
-  let status, agents, tools, runs, pendingApprovals;
+  let status, agents, tools, runs, pendingApprovals, memoryActivity;
   try {
-    [status, agents, tools, runs, pendingApprovals] = await Promise.all([
+    [status, agents, tools, runs, pendingApprovals, memoryActivity] = await Promise.all([
       caller.bosAgent.status(),
       caller.bosAgent.agents(),
       caller.bosAgent.tools(),
       caller.bosAgent.listRuns({ limit: 20 }),
       caller.bosAgent.pendingApprovals(),
+      caller.bosAgent.memoryActivity({ namespace: memoryNamespace, limit: 10 }),
     ]);
   } catch (error) {
     if (error instanceof TRPCError && error.code === "FORBIDDEN") {
@@ -55,8 +106,9 @@ export default async function BosAgentPage({
           <h1 className="text-2xl font-semibold">BOS Agent</h1>
           <p className="mt-1 max-w-xl text-xs text-neutral-500 dark:text-neutral-400">
             Central orchestrator coordinating the Marketing, Social, and Operations agents through EVENT →
-            PERCEPTION → DECISION → POLICY CHECK → ACTION → VERIFICATION → AUDIT. Budget, price, and booking-
-            mutation actions always require approval below — nothing in that category runs automatically.
+            CONTEXT → MEMORY → SPECIALIST AGENT → DECISION → POLICY → ACTION/APPROVAL/NO ACTION → AUDIT → MEMORY
+            UPDATE. Budget, price, and booking-mutation actions always require approval below — nothing in that
+            category runs automatically.
           </p>
         </div>
       </header>
@@ -118,7 +170,7 @@ export default async function BosAgentPage({
       </section>
 
       <section className="rounded border p-4">
-        <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Registered tools</h2>
+        <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Registered tools (Action Registry)</h2>
         <ul className="flex flex-col gap-2 text-sm">
           {tools.map((tool) => (
             <li key={tool.name} className="rounded border p-2">
@@ -130,6 +182,9 @@ export default async function BosAgentPage({
                 </span>
               </div>
               <div className="text-xs text-neutral-500 dark:text-neutral-400">{tool.description}</div>
+              {tool.allowedAgents ? (
+                <div className="mt-1 text-xs text-neutral-400">allowed agents: {tool.allowedAgents.join(", ")}</div>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -152,6 +207,11 @@ export default async function BosAgentPage({
                   </span>
                 </div>
                 <div className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">{approval.reason}</div>
+                {approval.correlationId ? (
+                  <div className="mt-1 text-xs text-neutral-400">
+                    correlation id: <code className="rounded bg-neutral-100 px-1 dark:bg-neutral-800">{approval.correlationId}</code>
+                  </div>
+                ) : null}
                 {approval.payload ? (
                   <pre className="mt-2 overflow-x-auto rounded bg-neutral-50 p-2 text-xs dark:bg-neutral-900">
                     {JSON.stringify(approval.payload, null, 2)}
@@ -194,6 +254,37 @@ export default async function BosAgentPage({
                   {run.toolName ? ` · ${run.toolName}` : ""}
                 </div>
                 {run.error ? <div className="mt-1 text-xs text-red-600 dark:text-red-400">{run.error}</div> : null}
+                <DecisionDetails run={run} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="rounded border p-4">
+        <h2 className="mb-3 text-sm font-medium text-neutral-500 dark:text-neutral-400">Memory activity</h2>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {KNOWN_MEMORY_NAMESPACES.map((ns) => (
+            <Link
+              key={ns}
+              href={`/bos-agent?memoryNamespace=${ns}`}
+              className={`rounded border px-2 py-1 text-xs ${ns === memoryNamespace ? "bg-neutral-900 text-white" : ""}`}
+            >
+              {ns}
+            </Link>
+          ))}
+        </div>
+        {memoryActivity.length === 0 ? (
+          <p className="text-sm text-neutral-500 dark:text-neutral-400">Nothing remembered yet in &quot;{memoryNamespace}&quot;.</p>
+        ) : (
+          <ul className="flex flex-col gap-2 text-sm">
+            {memoryActivity.map((record, i) => (
+              <li key={i} className="rounded border p-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium uppercase text-neutral-500 dark:text-neutral-400">{record.kind}</span>
+                  <span className="text-xs text-neutral-400">{formatDate(record.createdAt)}</span>
+                </div>
+                <div className="mt-1">{record.summary}</div>
               </li>
             ))}
           </ul>
