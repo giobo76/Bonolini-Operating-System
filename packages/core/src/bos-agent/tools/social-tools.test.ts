@@ -22,6 +22,15 @@ describe("social.retry_facebook_only tool — metadata (Policy Engine gate)", ()
     expect(tool.riskLevel).toBe("requires_approval");
     expect(tool.category).toBe("content_publish");
   });
+
+  it("restricts itself to the social agent only (Action Registry allowedAgents)", () => {
+    expect(createRetryFacebookOnlyTool().allowedAgents).toEqual(["social"]);
+  });
+
+  it("derives its idempotency key from the postId, so re-proposing the same post dedupes", () => {
+    const tool = createRetryFacebookOnlyTool();
+    expect(tool.getIdempotencyKey?.({ postId: "post-1" })).toBe("post-1");
+  });
 });
 
 describe("social.retry_facebook_only tool — handler (thin wrapper, never re-implements publishing)", () => {

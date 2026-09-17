@@ -37,6 +37,11 @@ export function createRetryFacebookOnlyTool(): ToolDefinition<
     category: "content_publish",
     requiresApproval: true,
     reversible: false,
+    allowedAgents: ["social"],
+    // One pending/decided approval per post — a cron/event run that
+    // re-proposes retrying the same already-failed post (nothing about it
+    // changed) must not pile up a second approval row for it.
+    getIdempotencyKey: (input) => input.postId,
     handler: async (input, ctx) => {
       const result = await retryFacebookOnly(ctx.tenantId, input.postId);
       if (!result) {
@@ -90,6 +95,7 @@ export function createPrepareSocialContentTool(
     category: "content_generation",
     requiresApproval: false,
     reversible: true,
+    allowedAgents: ["social"],
     handler: async (_input, ctx) => {
       const snapshot = await getRealPostDataSnapshot(ctx.tenantId);
       const themes = snapshot.servedRoutes.map((route) => `${route.pickup} -> ${route.destination}`);
