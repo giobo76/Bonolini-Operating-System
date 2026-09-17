@@ -16,7 +16,15 @@ vi.mock("../../transfer-requests", () => transferRequestsMock);
 const { operationsAgent } = await import("./operations-agent");
 
 function toolUseResponse(input: Record<string, unknown>) {
-  return { content: [{ type: "tool_use", id: "tu_1", name: "report_operations_assessment", input }] };
+  return { stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu_1", name: "report_operations_assessment", input }] };
+}
+
+// Reproduces the real mechanics of a production truncation: the API cut
+// generation short (stop_reason "max_tokens") and closed the JSON, so
+// `input` is whatever partial object had been written by that point —
+// never the fields the schema requires, in full.
+function truncatedResponse(partialInput: Record<string, unknown>) {
+  return { stop_reason: "max_tokens", content: [{ type: "tool_use", id: "tu_1", name: "report_operations_assessment", input: partialInput }] };
 }
 
 const REQUEST_ID = "11111111-1111-1111-1111-111111111111";
@@ -202,6 +210,62 @@ describe("operationsAgent — output contract regression (2026-09 production bug
 
     expect(result.validationFailed?.reason).toContain("recommendations");
     expect(result.decision).toEqual({});
+  });
+});
+
+// ROOT CAUSE FIX (2026-09, second production failure after 4fb2523): the
+// prompt-strengthening fix had zero effect because the real cause was
+// never the prompt — it was generation being cut off by max_tokens before
+// Claude finished writing its tool_use input, which decisionSchema alone
+// can't distinguish from a deliberate field omission. These tests exercise
+// the new stop_reason check directly, and verify it is deterministic and
+// never produces a fabricated fallback value.
+describe("operationsAgent — truncated response (stop_reason=max_tokens) never trusted", () => {
+  it("reproduces the exact second production failure verbatim — stop_reason max_tokens, both `summary` and `recommendations` missing — and is caught by the truncation check before decisionSchema ever runs", async () => {
+    messagesCreate.mockResolvedValue(truncatedResponse({ followUpsNeeded: [] }));
+
+    const output = await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown>; proposedAction?: unknown };
+
+    expect(result.validationFailed?.reason).toContain("truncated");
+    expect(result.validationFailed?.reason).toContain("max_tokens");
+    // Not the generic zod message — proves the stop_reason check fired
+    // first, rather than decisionSchema.safeParse happening to also fail.
+    expect(result.validationFailed?.reason).not.toContain("schema validation");
+    expect(result.decision).toEqual({});
+    expect(result.proposedAction).toBeUndefined();
+  });
+
+  it("a truncated response is caught even when the partial tool_use input would otherwise have parsed as schema-valid", async () => {
+    // A pathological case: generation was cut off right after a
+    // complete-looking object, but stop_reason still says max_tokens —
+    // the field-presence check alone would have let this through as a
+    // real success. The stop_reason check must fire regardless.
+    messagesCreate.mockResolvedValue(truncatedResponse({ summary: "Nothing to flag.", followUpsNeeded: [], recommendations: [] }));
+
+    const output = await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string } };
+
+    expect(result.validationFailed?.reason).toContain("truncated");
+  });
+
+  it("a normal, complete response (stop_reason tool_use) is never treated as truncated", async () => {
+    messagesCreate.mockResolvedValue(
+      toolUseResponse({ summary: "One request pending.", followUpsNeeded: [], recommendations: [] }),
+    );
+
+    const output = await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown };
+
+    expect(result.validationFailed).toBeUndefined();
+  });
+
+  it("calls the Anthropic API with a larger max_tokens budget (4096) — verified on the actual payload sent to the client, not just on the local zod schema", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", followUpsNeeded: [], recommendations: [] }));
+
+    await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(messagesCreate).toHaveBeenCalledWith(expect.objectContaining({ max_tokens: 4096 }));
   });
 });
 

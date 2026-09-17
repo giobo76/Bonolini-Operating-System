@@ -104,7 +104,7 @@ async function decide(data: Record<string, unknown>): Promise<DecideResult> {
 
   const response = await anthropic.messages.create({
     model: "claude-sonnet-5",
-    max_tokens: 2048,
+    max_tokens: 4096,
     system: SYSTEM_PROMPT,
     messages: [
       {
@@ -115,6 +115,18 @@ async function decide(data: Record<string, unknown>): Promise<DecideResult> {
     tools: [DECISION_TOOL],
     tool_choice: { type: "tool", name: "report_marketing_assessment" },
   });
+
+  // Same root cause and same fix as operations-agent.ts's real 2026-09
+  // production failures (confirmed by investigation): `required` alone
+  // can't stop a required key from going missing when generation is cut
+  // off by max_tokens mid-object. Checked here via the API's own
+  // stop_reason, before decisionSchema ever runs.
+  if (response.stop_reason === "max_tokens") {
+    return {
+      ok: false,
+      reason: "Claude's response was truncated (stop_reason=max_tokens) before it finished writing its tool_use input — the output cannot be trusted this run",
+    };
+  }
 
   const toolUse = response.content.find((block) => block.type === "tool_use");
   if (!toolUse || toolUse.type !== "tool_use") {

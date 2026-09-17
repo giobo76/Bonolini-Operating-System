@@ -69,6 +69,19 @@ async function decide(
     tool_choice: { type: "tool", name: "report_social_decision" },
   });
 
+  // Same structural guard as operations-agent.ts/marketing-agent.ts,
+  // applied here too for consistency even though this agent's small,
+  // fixed-shape output (no arrays) makes hitting max_tokens unlikely: a
+  // required key missing because generation was cut off (stop_reason
+  // "max_tokens") must never reach decisionSchema as if it were a normal
+  // omission.
+  if (response.stop_reason === "max_tokens") {
+    return {
+      ok: false,
+      reason: "Claude's response was truncated (stop_reason=max_tokens) before it finished writing its tool_use input — the output cannot be trusted this run",
+    };
+  }
+
   const toolUse = response.content.find((block) => block.type === "tool_use");
   if (!toolUse || toolUse.type !== "tool_use") {
     return { ok: false, reason: "Claude returned no tool_use block" };

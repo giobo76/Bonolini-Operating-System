@@ -19,7 +19,11 @@ vi.mock("../../marketing", () => marketingMock);
 const { marketingAgent } = await import("./marketing-agent");
 
 function toolUseResponse(input: Record<string, unknown>) {
-  return { content: [{ type: "tool_use", id: "tu_1", name: "report_marketing_assessment", input }] };
+  return { stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu_1", name: "report_marketing_assessment", input }] };
+}
+
+function truncatedResponse(partialInput: Record<string, unknown>) {
+  return { stop_reason: "max_tokens", content: [{ type: "tool_use", id: "tu_1", name: "report_marketing_assessment", input: partialInput }] };
 }
 
 beforeEach(() => {
@@ -141,5 +145,40 @@ describe("marketingAgent — output contract regression (2026-09 production bug 
 
     expect(result.validationFailed?.reason).toContain("recommendations");
     expect(result.decision).toEqual({});
+  });
+});
+
+// ROOT CAUSE FIX (2026-09) — same mechanism as operations-agent.ts's real
+// production failures: generation cut off by max_tokens, not a prompt
+// problem. See that file's equivalent describe block for the full
+// investigation writeup.
+describe("marketingAgent — truncated response (stop_reason=max_tokens) never trusted", () => {
+  it("a truncated response (stop_reason max_tokens, required fields missing) is caught deterministically, before decisionSchema ever runs", async () => {
+    messagesCreate.mockResolvedValue(truncatedResponse({ anomalies: [] }));
+
+    const output = await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown> };
+
+    expect(result.validationFailed?.reason).toContain("truncated");
+    expect(result.validationFailed?.reason).toContain("max_tokens");
+    expect(result.validationFailed?.reason).not.toContain("schema validation");
+    expect(result.decision).toEqual({});
+  });
+
+  it("a normal, complete response (stop_reason tool_use) is never treated as truncated", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "Looks healthy.", anomalies: [], recommendations: [] }));
+
+    const output = await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown };
+
+    expect(result.validationFailed).toBeUndefined();
+  });
+
+  it("calls the Anthropic API with a larger max_tokens budget (4096) — verified on the actual payload sent to the client", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", anomalies: [], recommendations: [] }));
+
+    await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(messagesCreate).toHaveBeenCalledWith(expect.objectContaining({ max_tokens: 4096 }));
   });
 });

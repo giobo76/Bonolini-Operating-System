@@ -97,7 +97,7 @@ async function decide(data: Record<string, unknown>): Promise<DecideResult> {
 
   const response = await anthropic.messages.create({
     model: "claude-sonnet-5",
-    max_tokens: 2048,
+    max_tokens: 4096,
     system: SYSTEM_PROMPT,
     messages: [
       {
@@ -108,6 +108,23 @@ async function decide(data: Record<string, unknown>): Promise<DecideResult> {
     tools: [DECISION_TOOL],
     tool_choice: { type: "tool", name: "report_operations_assessment" },
   });
+
+  // Root cause of the real 2026-09 production failures (confirmed by
+  // investigation, not a guess): `required` in a JSON Schema only shapes
+  // what Claude *intends* to write — it cannot force generation to finish
+  // within max_tokens. When generation is cut off mid-object,
+  // stop_reason is "max_tokens" and the tool_use input the API hands
+  // back is missing whichever required keys hadn't been written yet
+  // (never `null`/`""` — the key is simply absent), which decisionSchema
+  // alone can't distinguish from a deliberate omission. Caught here,
+  // before decisionSchema ever runs, using a signal the API itself
+  // reports about its own generation.
+  if (response.stop_reason === "max_tokens") {
+    return {
+      ok: false,
+      reason: "Claude's response was truncated (stop_reason=max_tokens) before it finished writing its tool_use input — the output cannot be trusted this run",
+    };
+  }
 
   const toolUse = response.content.find((block) => block.type === "tool_use");
   if (!toolUse || toolUse.type !== "tool_use") {

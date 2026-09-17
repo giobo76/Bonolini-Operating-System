@@ -13,7 +13,11 @@ vi.mock("../../social-publishing", () => socialPublishingMock);
 const { socialAgent } = await import("./social-agent");
 
 function toolUseResponse(input: Record<string, unknown>) {
-  return { content: [{ type: "tool_use", id: "tu_1", name: "report_social_decision", input }] };
+  return { stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu_1", name: "report_social_decision", input }] };
+}
+
+function truncatedResponse(partialInput: Record<string, unknown>) {
+  return { stop_reason: "max_tokens", content: [{ type: "tool_use", id: "tu_1", name: "report_social_decision", input: partialInput }] };
 }
 
 const FAILED_POST_ID = "11111111-1111-1111-1111-111111111111";
@@ -130,6 +134,32 @@ describe("socialAgent — schema validation outcome (never fabricated)", () => {
   });
 
   it("a genuinely valid recommendation:'none' is a real success, not a validation failure", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ recommendation: "none", reasoning: "nothing to do" }));
+
+    const output = await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown };
+
+    expect(result.validationFailed).toBeUndefined();
+  });
+});
+
+// Same structural guard added to operations-agent.ts/marketing-agent.ts
+// after the 2026-09 root-cause investigation, applied here too for
+// consistency (identical decide() shape/wrapper) even though this agent's
+// fixed-shape, arrayless output makes truncation unlikely in practice.
+describe("socialAgent — truncated response (stop_reason=max_tokens) never trusted", () => {
+  it("a truncated response is caught deterministically, before decisionSchema ever runs", async () => {
+    messagesCreate.mockResolvedValue(truncatedResponse({}));
+
+    const output = await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown> };
+
+    expect(result.validationFailed?.reason).toContain("truncated");
+    expect(result.validationFailed?.reason).toContain("max_tokens");
+    expect(result.decision).toEqual({});
+  });
+
+  it("a normal, complete response (stop_reason tool_use) is never treated as truncated", async () => {
     messagesCreate.mockResolvedValue(toolUseResponse({ recommendation: "none", reasoning: "nothing to do" }));
 
     const output = await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
