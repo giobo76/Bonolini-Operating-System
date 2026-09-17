@@ -78,3 +78,28 @@ describe("marketingAgent — handler", () => {
     expect(result.decision.summary).toContain("ANTHROPIC_API_KEY");
   });
 });
+
+// V2 bug fix — same fix applied identically to operations-agent.ts, see
+// that file's test suite for the fuller test matrix; this pins the same
+// contract here so Marketing never regresses to the pre-fix behavior
+// either.
+describe("marketingAgent — schema validation outcome (never fabricated)", () => {
+  it("sets validationFailed (never a fabricated empty decision) when Claude's tool_use input fails decisionSchema", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ anomalies: [], recommendations: [] })); // missing required 'summary'
+
+    const output = await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown> };
+
+    expect(result.validationFailed?.reason).toContain("schema validation");
+    expect(result.decision).toEqual({});
+  });
+
+  it("a valid decision with empty anomalies/recommendations is a real success, not a validation failure", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "Nothing notable this run.", anomalies: [], recommendations: [] }));
+
+    const output = await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown };
+
+    expect(result.validationFailed).toBeUndefined();
+  });
+});

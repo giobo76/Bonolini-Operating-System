@@ -137,6 +137,104 @@ describe("runAgentCycle — advisory-only (no proposedAction)", () => {
   });
 });
 
+// V2 bug fix (production smoke test, 2026-09): an agent whose own Claude
+// call produced output that failed the agent's decisionSchema was
+// previously indistinguishable from a genuine "nothing to flag" success —
+// the agent silently returned a fabricated empty decision. Agents now
+// signal this via cycleOutput.validationFailed instead; these tests pin
+// the orchestrator's own handling of that signal.
+describe("runAgentCycle — model output validation failure (never a false success)", () => {
+  it("reports status 'validation_failed', never 'success', and records the real reason", async () => {
+    registryMock.invokeAgent.mockResolvedValue({
+      result: { perception: { some: "real data" }, decision: {}, validationFailed: { reason: "Claude's output failed schema validation: ..." } },
+    });
+
+    const result = await runAgentCycle({ tenantId: "tenant-1", callerId: "system", agentName: "operations", trigger: "manual" });
+
+    expect(result.status).toBe("validation_failed");
+    expect(result.error).toContain("validation_failed:");
+    expect(result.error).toContain("schema validation");
+  });
+
+  it("persists the run to the audit trail — completeRun is called with the underlying DB status 'failed' (no new enum value) and the validation_failed-prefixed error", async () => {
+    registryMock.invokeAgent.mockResolvedValue({
+      result: { perception: {}, decision: {}, validationFailed: { reason: "Claude returned no tool_use block" } },
+    });
+
+    await runAgentCycle({ tenantId: "tenant-1", callerId: "system", agentName: "operations", trigger: "manual" });
+
+    expect(auditMock.createRun).toHaveBeenCalledTimes(1);
+    expect(auditMock.completeRun).toHaveBeenCalledWith(
+      "tenant-1",
+      "run-1",
+      "failed",
+      expect.objectContaining({ error: "validation_failed: Claude returned no tool_use block" }),
+    );
+  });
+
+  it("never executes any tool", async () => {
+    const handler = vi.fn();
+    registryMock.toolGet.mockReturnValue(fakeTool({ handler }));
+    registryMock.invokeAgent.mockResolvedValue({
+      result: { perception: {}, decision: {}, validationFailed: { reason: "invalid output" } },
+    });
+
+    await runAgentCycle({ tenantId: "tenant-1", callerId: "system", agentName: "social", trigger: "manual" });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(registryMock.toolGet).not.toHaveBeenCalled();
+  });
+
+  it("never creates an approval", async () => {
+    registryMock.invokeAgent.mockResolvedValue({
+      result: { perception: {}, decision: {}, validationFailed: { reason: "invalid output" } },
+    });
+
+    await runAgentCycle({ tenantId: "tenant-1", callerId: "system", agentName: "social", trigger: "manual" });
+
+    expect(approvalsMock.createApproval).not.toHaveBeenCalled();
+  });
+
+  it("never writes to memory — nothing in an invalid cycleOutput is trusted, not even a memoryWrites array if one were present", async () => {
+    registryMock.invokeAgent.mockResolvedValue({
+      result: {
+        perception: {},
+        decision: {},
+        validationFailed: { reason: "invalid output" },
+        // Even if an agent bug somehow attached memoryWrites alongside
+        // validationFailed, the orchestrator must never apply them.
+        memoryWrites: [{ key: "should-never-be-written", kind: "decision", summary: "must not persist" }],
+      },
+    });
+
+    await runAgentCycle({ tenantId: "tenant-1", callerId: "system", agentName: "marketing", trigger: "manual" });
+
+    expect(memoryMock.memorySet).not.toHaveBeenCalled();
+  });
+
+  it("keeps tenant isolation — every audit write uses the exact tenantId the cycle was run for", async () => {
+    registryMock.invokeAgent.mockResolvedValue({
+      result: { perception: {}, decision: {}, validationFailed: { reason: "invalid output" } },
+    });
+
+    await runAgentCycle({ tenantId: "tenant-xyz", callerId: "system", agentName: "operations", trigger: "manual" });
+
+    expect(auditMock.createRun).toHaveBeenCalledWith(expect.objectContaining({ tenantId: "tenant-xyz" }));
+    expect(auditMock.updateRun).toHaveBeenCalledWith("tenant-xyz", "run-1", expect.anything());
+    expect(auditMock.completeRun).toHaveBeenCalledWith("tenant-xyz", "run-1", "failed", expect.anything());
+  });
+
+  it("a VALID output with no proposedAction (a real 'decided to do nothing' analysis) still reports success, never validation_failed", async () => {
+    registryMock.invokeAgent.mockResolvedValue({
+      result: { perception: { real: "data" }, decision: { summary: "Nothing to flag.", recommendations: [] } },
+    });
+
+    const result = await runAgentCycle({ tenantId: "tenant-1", callerId: "system", agentName: "operations", trigger: "manual" });
+
+    expect(result.status).toBe("success");
+  });
+});
+
 describe("runAgentCycle — unknown tool", () => {
   it("fails the run when the agent proposes a tool that isn't registered", async () => {
     registryMock.invokeAgent.mockResolvedValue({

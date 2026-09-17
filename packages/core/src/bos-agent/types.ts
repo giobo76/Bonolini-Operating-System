@@ -39,4 +39,13 @@ export interface AgentCycleOutput {
   decision: Record<string, unknown>;
   proposedAction?: ProposedAction;
   memoryWrites?: MemoryWrite[];
+  // Set by an agent's handler instead of a normal decision when the
+  // model's own output could not be trusted this run — it returned no
+  // tool_use block at all, or its tool_use input failed the agent's own
+  // decisionSchema. Never fabricate a "decided nothing" decision for this
+  // case (that's indistinguishable from a real analysis that genuinely
+  // found nothing to flag) — orchestrator.ts checks this first, before any
+  // proposedAction/memoryWrites handling, and records the run as failed
+  // with a distinct, machine-readable reason, never as success.
+  validationFailed?: { reason: string };
 }

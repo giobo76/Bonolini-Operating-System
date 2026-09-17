@@ -44,7 +44,13 @@ export interface RunAgentCycleInput {
 export interface RunAgentCycleResult {
   runId: string;
   correlationId: string;
-  status: "success" | "failed" | "pending_approval" | "denied";
+  // "validation_failed" is a TS-level-only distinction (no new DB enum
+  // value) — the underlying agent_runs.status column stores "failed" for
+  // this case too (genuinely true: the run did fail), but the error
+  // column carries a "validation_failed: " prefix and this field exposes
+  // it as its own literal so a caller never has to string-match `error` to
+  // tell it apart from a real execution failure.
+  status: "success" | "failed" | "pending_approval" | "denied" | "validation_failed";
   decision: unknown;
   policyResult: unknown;
   actionResult: unknown;
@@ -141,6 +147,32 @@ export async function runAgentCycle(input: RunAgentCycleInput): Promise<RunAgent
     });
 
     const cycleOutput = agentOutput.result as unknown as AgentCycleOutput;
+
+    if (cycleOutput.validationFailed) {
+      // The model's own output could not be trusted this run (no tool_use
+      // block, or it failed the agent's own decisionSchema) — never
+      // treated as a real "decided to do nothing" success, and nothing in
+      // cycleOutput is applied (no memory write, no proposedAction can
+      // exist here by construction — see each agent's own handler).
+      await updateRun(input.tenantId, run.id, {
+        perception: cycleOutput.perception,
+        decision: cycleOutput.decision ?? {},
+        memoryOps,
+      });
+      const completed = await completeRun(input.tenantId, run.id, "failed", {
+        error: `validation_failed: ${cycleOutput.validationFailed.reason}`,
+      });
+      return {
+        runId: run.id,
+        correlationId,
+        status: "validation_failed",
+        decision: cycleOutput.decision ?? {},
+        policyResult: null,
+        actionResult: null,
+        verification: null,
+        error: completed.error ?? undefined,
+      };
+    }
 
     memoryOps.wrote = await applyMemoryWrites(input.tenantId, input.agentName, cycleOutput.memoryWrites, correlationId);
     await updateRun(input.tenantId, run.id, {

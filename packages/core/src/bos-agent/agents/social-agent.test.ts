@@ -114,3 +114,27 @@ describe("socialAgent — proposes retry_facebook only for a real, valid candida
     expect(result.proposedAction).toBeUndefined();
   });
 });
+
+// V2 bug fix — same fix applied identically to operations-agent.ts, see
+// that file's test suite for the fuller test matrix.
+describe("socialAgent — schema validation outcome (never fabricated)", () => {
+  it("sets validationFailed (never a fabricated recommendation:'none') when Claude's tool_use input fails decisionSchema", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ postId: FAILED_POST_ID })); // missing required 'recommendation'/'reasoning'
+
+    const output = await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown>; proposedAction?: unknown };
+
+    expect(result.validationFailed?.reason).toContain("schema validation");
+    expect(result.decision).toEqual({});
+    expect(result.proposedAction).toBeUndefined();
+  });
+
+  it("a genuinely valid recommendation:'none' is a real success, not a validation failure", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ recommendation: "none", reasoning: "nothing to do" }));
+
+    const output = await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown };
+
+    expect(result.validationFailed).toBeUndefined();
+  });
+});
