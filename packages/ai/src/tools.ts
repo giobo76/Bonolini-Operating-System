@@ -27,6 +27,19 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   category: ActionCategory;
   requiresApproval: boolean;
   reversible: boolean;
+  // V2 — this ToolRegistry doubles as the "Action Registry": which
+  // agent(s) may even propose this tool. Enforced by evaluatePolicy (see
+  // policy.ts's PolicyAction.allowedAgents), not by convention — the
+  // orchestrator always passes the calling agent's name through. Omit to
+  // leave a tool unrestricted by this particular rule (still subject to
+  // every other Policy Engine check).
+  allowedAgents?: readonly string[];
+  // V2 — derives a stable dedup key from a proposed call's input, so the
+  // orchestrator can recognize "this is the same underlying action already
+  // pending approval" (e.g. the same postId) instead of piling up duplicate
+  // agent_approvals rows every time a cron/event run re-proposes it. Omit
+  // for a tool where duplicate proposals are meaningless or harmless.
+  getIdempotencyKey?: (input: TInput) => string;
   handler: (input: TInput, ctx: ToolContext) => Promise<TOutput>;
   // VERIFICATION step, declared per-tool since what "confirms the action
   // really happened" is action-specific. Optional: a tool that omits this

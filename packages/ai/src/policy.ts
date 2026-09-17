@@ -78,23 +78,58 @@ export interface PolicyAction {
   requiresApproval: boolean;
   reversible: boolean;
   amountCents?: number;
+  // V2: which agent is proposing this call, and which agents the tool
+  // itself is registered to allow (ToolDefinition.allowedAgents in
+  // tools.ts). When both are given and callerAgent isn't in the list,
+  // this is denied before any risk/approval reasoning even runs — a
+  // registered tool is not implicitly available to every agent.
+  callerAgent?: string;
+  allowedAgents?: readonly string[];
 }
+
+// V2's five-tier vocabulary (READ_ONLY/PREPARE/AUTONOMOUS_SAFE/
+// REQUIRES_APPROVAL/DENIED) — computed here, by the Policy Engine, from
+// its own allowed/requiresApproval/category verdict, never read back from
+// a tool's own declaration. This is what "the Policy Engine determines the
+// risk, not the tool" means concretely: a tool declares riskLevel/category
+// as raw inputs; only evaluatePolicy's own decision produces a tier.
+export const policyTiers = ["READ_ONLY", "PREPARE", "AUTONOMOUS_SAFE", "REQUIRES_APPROVAL", "DENIED"] as const;
+export type PolicyTier = (typeof policyTiers)[number];
 
 export interface PolicyDecision {
   allowed: boolean;
   requiresApproval: boolean;
   reason: string;
+  tier: PolicyTier;
+}
+
+function tierFor(allowed: boolean, requiresApproval: boolean, category: ActionCategory): PolicyTier {
+  if (!allowed) return "DENIED";
+  if (requiresApproval) return "REQUIRES_APPROVAL";
+  if (category === "read") return "READ_ONLY";
+  if (category === "content_generation" || category === "follow_up") return "PREPARE";
+  return "AUTONOMOUS_SAFE";
 }
 
 export function evaluatePolicy(
   action: PolicyAction,
   thresholds: PolicyThresholds = DEFAULT_POLICY_THRESHOLDS,
 ): PolicyDecision {
+  if (action.allowedAgents && action.callerAgent && !action.allowedAgents.includes(action.callerAgent)) {
+    return {
+      allowed: false,
+      requiresApproval: false,
+      reason: `agent '${action.callerAgent}' is not among the agents allowed to invoke '${action.toolName}' (${action.allowedAgents.join(", ")})`,
+      tier: "DENIED",
+    };
+  }
+
   if (ALWAYS_FORBIDDEN.has(action.category)) {
     return {
       allowed: false,
       requiresApproval: false,
       reason: `action category '${action.category}' is categorically forbidden and cannot be executed by any agent`,
+      tier: "DENIED",
     };
   }
 
@@ -103,6 +138,7 @@ export function evaluatePolicy(
       allowed: false,
       requiresApproval: false,
       reason: `tool '${action.toolName}' declares riskLevel 'forbidden'`,
+      tier: "DENIED",
     };
   }
 
@@ -137,8 +173,13 @@ export function evaluatePolicy(
   }
 
   if (!requiresApproval) {
-    return { allowed: true, requiresApproval: false, reason: "auto-approved: read-only/low-risk/reversible action" };
+    return {
+      allowed: true,
+      requiresApproval: false,
+      reason: "auto-approved: read-only/low-risk/reversible action",
+      tier: tierFor(true, false, action.category),
+    };
   }
 
-  return { allowed: true, requiresApproval: true, reason: reasons.join("; ") };
+  return { allowed: true, requiresApproval: true, reason: reasons.join("; "), tier: "REQUIRES_APPROVAL" };
 }
