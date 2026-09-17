@@ -27,10 +27,15 @@ const decisionSchema = z.object({
   recommendations: z.array(recommendationSchema),
 });
 
+// See operations-agent.ts's identical comment for the full 2026-09
+// root-cause writeup: strict:true + additionalProperties:false at every
+// object level is what actually makes the API enforce `required`, not the
+// prompt or the schema's `required` list alone.
 const DECISION_TOOL = {
   name: "report_marketing_assessment",
   description:
     "Report a structured assessment of this tenant's real conversion/funnel data: a summary, any anomalies, and any recommendations. anomalies and recommendations are both REQUIRED — always include them in your tool call, even when there is nothing to report; use an empty array [] rather than leaving the field out.",
+  strict: true,
   input_schema: {
     type: "object" as const,
     properties: {
@@ -46,6 +51,7 @@ const DECISION_TOOL = {
             severity: { type: "string", enum: ["low", "medium", "high"] },
           },
           required: ["title", "description", "severity"],
+          additionalProperties: false,
         },
       },
       recommendations: {
@@ -62,10 +68,12 @@ const DECISION_TOOL = {
             },
           },
           required: ["title", "description", "requiresApproval"],
+          additionalProperties: false,
         },
       },
     },
     required: ["summary", "anomalies", "recommendations"],
+    additionalProperties: false,
   },
 } as const;
 
@@ -113,7 +121,7 @@ async function decide(data: Record<string, unknown>): Promise<DecideResult> {
       },
     ],
     tools: [DECISION_TOOL],
-    tool_choice: { type: "tool", name: "report_marketing_assessment" },
+    tool_choice: { type: "tool", name: "report_marketing_assessment", disable_parallel_tool_use: true },
   });
 
   // Same root cause and same fix as operations-agent.ts's real 2026-09

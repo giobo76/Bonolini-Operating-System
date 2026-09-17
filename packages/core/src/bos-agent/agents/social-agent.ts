@@ -17,10 +17,18 @@ const decisionSchema = z.object({
   reasoning: z.string().min(1),
 });
 
+// See operations-agent.ts's identical comment for the full 2026-09
+// root-cause writeup: strict:true + additionalProperties:false is what
+// actually makes the API enforce `required`. `postId` stays out of
+// `required` on purpose — it's genuinely optional (only meaningful for
+// recommendation:'retry_facebook') and Anthropic's own strict-mode
+// documentation example uses exactly this shape (an optional property
+// simply absent from `required`).
 const DECISION_TOOL = {
   name: "report_social_decision",
   description:
     "Report exactly one recommendation about this week's social publishing state: retry a specific failed Facebook post (with its postId), prepare fresh content/image material, or do nothing.",
+  strict: true,
   input_schema: {
     type: "object" as const,
     properties: {
@@ -29,6 +37,7 @@ const DECISION_TOOL = {
       reasoning: { type: "string" },
     },
     required: ["recommendation", "reasoning"],
+    additionalProperties: false,
   },
 } as const;
 
@@ -66,7 +75,7 @@ async function decide(
       },
     ],
     tools: [DECISION_TOOL],
-    tool_choice: { type: "tool", name: "report_social_decision" },
+    tool_choice: { type: "tool", name: "report_social_decision", disable_parallel_tool_use: true },
   });
 
   // Same structural guard as operations-agent.ts/marketing-agent.ts,

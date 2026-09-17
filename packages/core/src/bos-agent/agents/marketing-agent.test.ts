@@ -182,3 +182,59 @@ describe("marketingAgent — truncated response (stop_reason=max_tokens) never t
     expect(messagesCreate).toHaveBeenCalledWith(expect.objectContaining({ max_tokens: 4096 }));
   });
 });
+
+// DEFINITIVE ROOT CAUSE FIX (2026-09) — see operations-agent.ts's
+// equivalent describe block for the full investigation writeup. Asserts
+// on the actual object handed to the Anthropic client mock, not the
+// internal DECISION_TOOL constant.
+describe("marketingAgent — Anthropic payload contract (strict tool use)", () => {
+  function sentTool() {
+    const call = messagesCreate.mock.calls.at(-1)![0] as {
+      tools: Array<{ name: string; strict?: boolean; input_schema: Record<string, unknown> }>;
+      tool_choice: { type: string; name: string; disable_parallel_tool_use?: boolean };
+    };
+    return { tool: call.tools[0]!, toolChoice: call.tool_choice };
+  }
+
+  it("sends strict: true on the report_marketing_assessment tool", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", anomalies: [], recommendations: [] }));
+
+    await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(sentTool().tool.strict).toBe(true);
+  });
+
+  it("sends additionalProperties: false at the top-level input_schema and at the nested anomalies/recommendations item schemas", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", anomalies: [], recommendations: [] }));
+
+    await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    const schema = sentTool().tool.input_schema as {
+      additionalProperties: boolean;
+      properties: {
+        anomalies: { items: { additionalProperties: boolean } };
+        recommendations: { items: { additionalProperties: boolean } };
+      };
+    };
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.anomalies.items.additionalProperties).toBe(false);
+    expect(schema.properties.recommendations.items.additionalProperties).toBe(false);
+  });
+
+  it("keeps summary, anomalies, and recommendations in the top-level required list", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", anomalies: [], recommendations: [] }));
+
+    await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    const schema = sentTool().tool.input_schema as { required: string[] };
+    expect(schema.required).toEqual(["summary", "anomalies", "recommendations"]);
+  });
+
+  it("sends disable_parallel_tool_use: true on tool_choice", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", anomalies: [], recommendations: [] }));
+
+    await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(sentTool().toolChoice.disable_parallel_tool_use).toBe(true);
+  });
+});

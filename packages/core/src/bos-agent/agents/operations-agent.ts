@@ -30,10 +30,23 @@ const decisionSchema = z.object({
   recommendations: z.array(recommendationSchema),
 });
 
+// strict:true + additionalProperties:false on every object level is the
+// real, root-cause fix (2026-09 investigation, confirmed against
+// Anthropic's own "Strict tool use" documentation): without it, the API's
+// tool-use generation does NOT guarantee `required` fields are present in
+// tool_use.input — grammar-constrained sampling (what strict mode turns
+// on) is what actually enforces the schema on the wire. `strict` isn't in
+// this SDK version's TypeScript types (0.32.1 predates the feature), but
+// the SDK forwards `body` to POST /v1/messages verbatim with no
+// whitelisting (see resources/messages.js), so the field still reaches
+// the API correctly — DECISION_TOOL is a pre-typed `const` referenced by
+// value below, not an inline literal, so TypeScript's excess-property
+// check does not reject the extra field.
 const DECISION_TOOL = {
   name: "report_operations_assessment",
   description:
     "Report a structured assessment of pending transfer requests: a summary, any follow-ups needed, and a per-request suggestion (never executed automatically). followUpsNeeded and recommendations are both REQUIRED — always include them in your tool call, even when there is nothing to report; use an empty array [] rather than leaving the field out.",
+  strict: true,
   input_schema: {
     type: "object" as const,
     properties: {
@@ -55,10 +68,12 @@ const DECISION_TOOL = {
             reasoning: { type: "string" },
           },
           required: ["transferRequestId", "suggestion", "reasoning"],
+          additionalProperties: false,
         },
       },
     },
     required: ["summary", "followUpsNeeded", "recommendations"],
+    additionalProperties: false,
   },
 } as const;
 
@@ -106,7 +121,13 @@ async function decide(data: Record<string, unknown>): Promise<DecideResult> {
       },
     ],
     tools: [DECISION_TOOL],
-    tool_choice: { type: "tool", name: "report_operations_assessment" },
+    // disable_parallel_tool_use: this agent's parsing only ever reads the
+    // first tool_use block (see below) — without this, Claude is
+    // permitted to emit more than one report_operations_assessment call
+    // in the same turn even under a forced tool_choice, and any block
+    // after the first would be silently ignored. Forcing exactly one
+    // closes that latent gap.
+    tool_choice: { type: "tool", name: "report_operations_assessment", disable_parallel_tool_use: true },
   });
 
   // Root cause of the real 2026-09 production failures (confirmed by

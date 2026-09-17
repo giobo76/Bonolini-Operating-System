@@ -168,3 +168,44 @@ describe("socialAgent — truncated response (stop_reason=max_tokens) never trus
     expect(result.validationFailed).toBeUndefined();
   });
 });
+
+// DEFINITIVE ROOT CAUSE FIX (2026-09) — see operations-agent.ts's
+// equivalent describe block for the full investigation writeup. Asserts
+// on the actual object handed to the Anthropic client mock, not the
+// internal DECISION_TOOL constant.
+describe("socialAgent — Anthropic payload contract (strict tool use)", () => {
+  function sentTool() {
+    const call = messagesCreate.mock.calls.at(-1)![0] as {
+      tools: Array<{ name: string; strict?: boolean; input_schema: Record<string, unknown> }>;
+      tool_choice: { type: string; name: string; disable_parallel_tool_use?: boolean };
+    };
+    return { tool: call.tools[0]!, toolChoice: call.tool_choice };
+  }
+
+  it("sends strict: true on the report_social_decision tool", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ recommendation: "none", reasoning: "nothing to do" }));
+
+    await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(sentTool().tool.strict).toBe(true);
+  });
+
+  it("sends additionalProperties: false at the top-level input_schema, and keeps postId out of `required` since it is genuinely optional", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ recommendation: "none", reasoning: "nothing to do" }));
+
+    await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    const schema = sentTool().tool.input_schema as { additionalProperties: boolean; required: string[] };
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(["recommendation", "reasoning"]);
+    expect(schema.required).not.toContain("postId");
+  });
+
+  it("sends disable_parallel_tool_use: true on tool_choice", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ recommendation: "none", reasoning: "nothing to do" }));
+
+    await socialAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(sentTool().toolChoice.disable_parallel_tool_use).toBe(true);
+  });
+});

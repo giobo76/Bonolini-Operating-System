@@ -269,6 +269,63 @@ describe("operationsAgent — truncated response (stop_reason=max_tokens) never 
   });
 });
 
+// DEFINITIVE ROOT CAUSE FIX (2026-09, third production failure): confirmed
+// against Anthropic's own "Strict tool use" documentation — without
+// `strict: true`, the API does not guarantee `required` fields are
+// present in tool_use.input at all, independent of prompt wording or
+// max_tokens. These tests assert on the actual object handed to the
+// Anthropic client mock (not the internal DECISION_TOOL constant, which
+// isn't exported), because the defect this fixes is specifically in the
+// application/API contract, not in the local zod schema.
+describe("operationsAgent — Anthropic payload contract (strict tool use)", () => {
+  function sentTool() {
+    const call = messagesCreate.mock.calls.at(-1)![0] as {
+      tools: Array<{ name: string; strict?: boolean; input_schema: Record<string, unknown> }>;
+      tool_choice: { type: string; name: string; disable_parallel_tool_use?: boolean };
+    };
+    return { tool: call.tools[0]!, toolChoice: call.tool_choice };
+  }
+
+  it("sends strict: true on the report_operations_assessment tool", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", followUpsNeeded: [], recommendations: [] }));
+
+    await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(sentTool().tool.strict).toBe(true);
+  });
+
+  it("sends additionalProperties: false at the top-level input_schema and at the nested recommendations item schema", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", followUpsNeeded: [], recommendations: [] }));
+
+    await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    const schema = sentTool().tool.input_schema as {
+      additionalProperties: boolean;
+      required: string[];
+      properties: { recommendations: { items: { additionalProperties: boolean } } };
+    };
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.recommendations.items.additionalProperties).toBe(false);
+  });
+
+  it("keeps summary, followUpsNeeded, and recommendations in the top-level required list", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", followUpsNeeded: [], recommendations: [] }));
+
+    await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    const schema = sentTool().tool.input_schema as { required: string[] };
+    expect(schema.required).toEqual(["summary", "followUpsNeeded", "recommendations"]);
+  });
+
+  it("sends disable_parallel_tool_use: true on tool_choice, so the parser's first-block selection can't silently drop a second tool_use", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "ok", followUpsNeeded: [], recommendations: [] }));
+
+    await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+
+    expect(sentTool().toolChoice.disable_parallel_tool_use).toBe(true);
+  });
+});
+
 describe("operationsAgent — prompt injection safety (§13/§14 security review)", () => {
   // pickup/destination originate from real customer WhatsApp messages
   // (whatsapp/parser.ts) — an adversarial customer could type something
