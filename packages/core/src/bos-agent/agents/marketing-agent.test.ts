@@ -103,3 +103,43 @@ describe("marketingAgent — schema validation outcome (never fabricated)", () =
     expect(result.validationFailed).toBeUndefined();
   });
 });
+
+// Same latent defect as operations-agent.ts's real 2026-09 production
+// bug — anomalies/recommendations are both required arrays here too, and
+// Claude could just as easily omit one of them instead of sending [].
+// Fixed identically (property descriptions + SYSTEM_PROMPT both spell out
+// "always present, use [] if empty"); these tests pin the fixed contract.
+describe("marketingAgent — output contract regression (2026-09 production bug family: omitted required array)", () => {
+  it("a valid output with multiple anomalies and multiple recommendations passes through in full", async () => {
+    messagesCreate.mockResolvedValue(
+      toolUseResponse({
+        summary: "Two anomalies and two recommendations this run.",
+        anomalies: [
+          { title: "CPA spike", description: "Cost per acquisition doubled week over week.", severity: "high" },
+          { title: "Drop in leads", description: "Lead volume down from the usual range.", severity: "medium" },
+        ],
+        recommendations: [
+          { title: "Increase budget", description: "The top campaign is under-spending its daily cap.", requiresApproval: true },
+          { title: "Pause underperforming ad", description: "This ad has zero conversions in two weeks.", requiresApproval: true },
+        ],
+      }),
+    );
+
+    const output = await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown; decision: { anomalies: unknown[]; recommendations: unknown[] } };
+
+    expect(result.validationFailed).toBeUndefined();
+    expect(result.decision.anomalies).toHaveLength(2);
+    expect(result.decision.recommendations).toHaveLength(2);
+  });
+
+  it("Claude omitting `recommendations` entirely (not even []) is a validation failure naming that field, never a fabricated empty decision", async () => {
+    messagesCreate.mockResolvedValue(toolUseResponse({ summary: "Looks healthy.", anomalies: [] }));
+
+    const output = await marketingAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown> };
+
+    expect(result.validationFailed?.reason).toContain("recommendations");
+    expect(result.decision).toEqual({});
+  });
+});

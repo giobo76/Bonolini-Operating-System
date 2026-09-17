@@ -159,6 +159,52 @@ describe("operationsAgent — schema validation outcome (never fabricated)", () 
   });
 });
 
+const REQUEST_ID_2 = "22222222-2222-2222-2222-222222222222";
+
+// Real 2026-09 production bug: Claude sent a syntactically valid tool_use
+// call (summary + followUpsNeeded present) but omitted the `recommendations`
+// key entirely instead of sending `[]` — the top-level `required` list in
+// DECISION_TOOL didn't stop that. Fixed by making both the property
+// descriptions and SYSTEM_PROMPT spell out "always present, use [] if
+// empty" explicitly. These tests pin the fixed contract without adding any
+// fallback that would turn a real omission into a silent [].
+describe("operationsAgent — output contract regression (2026-09 production bug: omitted `recommendations`)", () => {
+  it("a valid output with two recommendations for two different real pending requests passes through in full", async () => {
+    transferRequestsMock.listPendingApprovalTransferRequests.mockResolvedValue([
+      { id: REQUEST_ID, status: "pending_admin_approval", calculatedAmountCents: 5000, pickup: "Milano", destination: "Tirano", requestedDate: "2026-09-20", updatedAt: new Date() },
+      { id: REQUEST_ID_2, status: "pending_admin_approval", calculatedAmountCents: 8000, pickup: "Bergamo", destination: "Como", requestedDate: "2026-09-21", updatedAt: new Date() },
+    ]);
+    messagesCreate.mockResolvedValue(
+      toolUseResponse({
+        summary: "Two requests pending.",
+        followUpsNeeded: [],
+        recommendations: [
+          { transferRequestId: REQUEST_ID, suggestion: "accept", reasoning: "price looks fine" },
+          { transferRequestId: REQUEST_ID_2, suggestion: "review_price", reasoning: "price seems high for the distance" },
+        ],
+      }),
+    );
+
+    const output = await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: unknown; decision: { recommendations: unknown[] } };
+
+    expect(result.validationFailed).toBeUndefined();
+    expect(result.decision.recommendations).toHaveLength(2);
+  });
+
+  it("the exact production case — Claude's tool_use omits `recommendations` entirely (not even []) — is a validation failure naming that field, never a fabricated empty decision", async () => {
+    messagesCreate.mockResolvedValue(
+      toolUseResponse({ summary: "One request pending, nothing to recommend.", followUpsNeeded: [] }),
+    );
+
+    const output = await operationsAgent.handler({ tenantId: "tenant-1", payload: {}, callerId: "system" });
+    const result = output.result as { validationFailed?: { reason: string }; decision: Record<string, unknown> };
+
+    expect(result.validationFailed?.reason).toContain("recommendations");
+    expect(result.decision).toEqual({});
+  });
+});
+
 describe("operationsAgent — prompt injection safety (§13/§14 security review)", () => {
   // pickup/destination originate from real customer WhatsApp messages
   // (whatsapp/parser.ts) — an adversarial customer could type something
