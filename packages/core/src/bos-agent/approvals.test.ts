@@ -19,7 +19,7 @@ function matches(row: Record<string, unknown>, cond: Cond): boolean {
 
 const { fakeState, agentApprovalsTable } = vi.hoisted(() => ({
   fakeState: { rows: [] as Array<Record<string, unknown>>, nextId: 1 },
-  agentApprovalsTable: { id: "id", tenantId: "tenantId", status: "status", createdAt: "createdAt" },
+  agentApprovalsTable: { id: "id", tenantId: "tenantId", status: "status", createdAt: "createdAt", idempotencyKey: "idempotencyKey" },
 }));
 
 function thenable(rows: unknown[]) {
@@ -64,7 +64,16 @@ vi.mock("@bos/db", () => ({
   }),
 }));
 
-const { createApproval, getApproval, listPendingApprovals, markApproved, markRejected } = await import("./approvals");
+const {
+  createApproval,
+  getApproval,
+  listPendingApprovals,
+  markApproved,
+  markRejected,
+  markExecuted,
+  markExecutionFailed,
+  findApprovalByIdempotencyKey,
+} = await import("./approvals");
 
 beforeEach(() => {
   fakeState.rows = [];
@@ -136,6 +145,68 @@ describe("markApproved — idempotency and cross-outcome safety", () => {
 
   it("throws when the approval doesn't exist", async () => {
     await expect(markApproved("tenant-1", "nonexistent", "admin-1")).rejects.toThrow("no agent_approval found");
+  });
+
+  it("is idempotent — approving an already-executed row is a safe no-op, never re-triggering execution", async () => {
+    const approval = await createApproval({ tenantId: "tenant-1", agentRunId: "run-1", requestedAction: "a", risk: "requires_approval", reason: "r" });
+    await markApproved("tenant-1", approval.id, "admin-1");
+    const executed = await markExecuted("tenant-1", approval.id);
+
+    const result = await markApproved("tenant-1", approval.id, "admin-2");
+    expect(result).toEqual(executed);
+    expect(result.approvedBy).toBe("admin-1"); // never overwritten by the second caller
+  });
+});
+
+describe("markExecuted / markExecutionFailed", () => {
+  it("marks an approved row executed", async () => {
+    const approval = await createApproval({ tenantId: "tenant-1", agentRunId: "run-1", requestedAction: "a", risk: "requires_approval", reason: "r" });
+    await markApproved("tenant-1", approval.id, "admin-1");
+
+    const executed = await markExecuted("tenant-1", approval.id);
+    expect(executed.status).toBe("executed");
+  });
+
+  it("marks an approved row execution_failed, leaving the original approval reason intact (the failure detail lives on agent_runs instead)", async () => {
+    const approval = await createApproval({ tenantId: "tenant-1", agentRunId: "run-1", requestedAction: "a", risk: "requires_approval", reason: "original approval reason" });
+    await markApproved("tenant-1", approval.id, "admin-1");
+
+    const failed = await markExecutionFailed("tenant-1", approval.id);
+    expect(failed.status).toBe("execution_failed");
+    expect(failed.reason).toBe("original approval reason");
+  });
+});
+
+describe("findApprovalByIdempotencyKey — duplicate-proposal prevention", () => {
+  it("finds an existing approval sharing the same idempotency key within the same tenant", async () => {
+    const approval = await createApproval({
+      tenantId: "tenant-1",
+      agentRunId: "run-1",
+      requestedAction: "social.retry_facebook_only",
+      risk: "requires_approval",
+      reason: "r",
+      idempotencyKey: "social.retry_facebook_only:post-1",
+    });
+
+    const found = await findApprovalByIdempotencyKey("tenant-1", "social.retry_facebook_only:post-1");
+    expect(found?.id).toBe(approval.id);
+  });
+
+  it("returns null when no approval shares that idempotency key", async () => {
+    expect(await findApprovalByIdempotencyKey("tenant-1", "nonexistent-key")).toBeNull();
+  });
+
+  it("never matches an idempotency key belonging to a different tenant", async () => {
+    await createApproval({
+      tenantId: "tenant-2",
+      agentRunId: "run-1",
+      requestedAction: "a",
+      risk: "requires_approval",
+      reason: "r",
+      idempotencyKey: "shared-key",
+    });
+
+    expect(await findApprovalByIdempotencyKey("tenant-1", "shared-key")).toBeNull();
   });
 });
 

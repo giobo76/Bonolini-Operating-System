@@ -13,6 +13,7 @@ export interface CreateRunInput {
   agentName: string;
   trigger: "manual" | "cron" | "event";
   eventType?: string;
+  correlationId?: string;
   input: Record<string, unknown>;
 }
 
@@ -25,6 +26,7 @@ export async function createRun(input: CreateRunInput): Promise<AgentRun> {
       agentName: input.agentName,
       trigger: input.trigger,
       eventType: input.eventType,
+      correlationId: input.correlationId,
       input: input.input,
       status: "running",
     })
@@ -35,7 +37,9 @@ export async function createRun(input: CreateRunInput): Promise<AgentRun> {
 export async function updateRun(
   tenantId: string,
   runId: string,
-  patch: Partial<Pick<AgentRun, "perception" | "decision" | "policyResult" | "toolName" | "action" | "verification">>,
+  patch: Partial<
+    Pick<AgentRun, "perception" | "decision" | "policyResult" | "toolName" | "action" | "verification" | "memoryOps">
+  >,
 ): Promise<AgentRun> {
   const db = getDb();
   const rows = await db
@@ -50,7 +54,7 @@ export async function completeRun(
   tenantId: string,
   runId: string,
   status: "success" | "failed" | "pending_approval" | "denied",
-  patch: Partial<Pick<AgentRun, "verification" | "error" | "action" | "policyResult" | "toolName">> = {},
+  patch: Partial<Pick<AgentRun, "verification" | "error" | "action" | "policyResult" | "toolName" | "memoryOps">> = {},
 ): Promise<AgentRun> {
   const db = getDb();
   const rows = await db
