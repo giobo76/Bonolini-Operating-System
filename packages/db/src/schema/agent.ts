@@ -32,11 +32,19 @@ export const agentRiskLevelEnum = pgEnum("agent_risk_level", [
   "forbidden",
 ]);
 
+// "approved" means the human decision was made; "executed"/
+// "execution_failed" (added for V2) record the outcome of actually running
+// the tool afterwards — previously conflated into a single "approved"
+// forever, even after execution succeeded or failed. Existing rows already
+// at "approved" remain valid (a V1 approval whose execution outcome was
+// never retrofitted) — nothing back-fills them, nothing requires it.
 export const agentApprovalStatusEnum = pgEnum("agent_approval_status", [
   "pending",
   "approved",
   "rejected",
   "expired",
+  "executed",
+  "execution_failed",
 ]);
 
 // One row per orchestration cycle. agent_name/tool_name are plain text, not
@@ -51,6 +59,14 @@ export const agentRuns = pgTable("agent_runs", {
   agentName: text("agent_name").notNull(),
   trigger: agentRunTriggerEnum("trigger").notNull(),
   eventType: text("event_type"),
+  // Threads one logical operation across multiple runs/events (e.g. the
+  // same transfer_request id, or a fresh uuid for a manual/cron trigger)
+  // — the same value an emitted domain event and the run(s) it causes
+  // share, so the admin UI and any future replay/dedup logic can group
+  // them. Not unique by itself: several runs (e.g. a cron sweep over many
+  // tenants, or an event and the approval-triggered follow-up run it
+  // causes) legitimately share one.
+  correlationId: text("correlation_id"),
   status: agentRunStatusEnum("status").notNull().default("running"),
   // Each stage of the loop, captured as it completes — never overwritten
   // once set, only added to as the run progresses. Nullable because a run
@@ -63,6 +79,12 @@ export const agentRuns = pgTable("agent_runs", {
   toolName: text("tool_name"),
   action: jsonb("action"),
   verification: jsonb("verification"),
+  // What this run read from / wrote to agent_memory — e.g.
+  // { read: [{namespace,key}], wrote: [{namespace,key,summary}] }. Never
+  // the full memory value (that's in agent_memory itself, readable via its
+  // own tenant-scoped API) — just enough for the admin UI's "what did the
+  // agent remember?" view without duplicating the memory table's content.
+  memoryOps: jsonb("memory_ops"),
   error: text("error"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -81,6 +103,15 @@ export const agentApprovals = pgTable("agent_approvals", {
   agentRunId: uuid("agent_run_id")
     .notNull()
     .references(() => agentRuns.id, { onDelete: "cascade" }),
+  // Denormalized from the originating run for quick filtering/display
+  // without a join — the run remains the source of truth.
+  correlationId: text("correlation_id"),
+  // Derived from the tool's own getIdempotencyKey(payload) (see @bos/ai's
+  // ToolDefinition) — lets the orchestrator detect and skip creating a
+  // second pending approval for the same underlying action while one
+  // already exists, instead of piling up duplicates every time a cron/
+  // event run re-proposes the same fix.
+  idempotencyKey: text("idempotency_key"),
   requestedAction: text("requested_action").notNull(),
   risk: agentRiskLevelEnum("risk").notNull(),
   reason: text("reason").notNull(),

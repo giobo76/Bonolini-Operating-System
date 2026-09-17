@@ -85,6 +85,13 @@
       "when": 1789586376329,
       "tag": "0019_bos_agent",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789639167239,
+      "tag": "0020_bos_agent_v2",
+      "breakpoints": true
     }
   ]
 }
