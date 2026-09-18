@@ -23,10 +23,13 @@ export const domainEventNames = [
   // agree on the exact name/payload.
   "transfer_request.created",
   "transfer_request.confirmed",
-  // Not yet emitted by any producer — bookings/service.ts's updateBooking
-  // is a single generic patch function with no dedicated confirm/complete
-  // entry point to hook narrowly without broader, higher-risk changes.
-  // Same status as the two transfer_request events above.
+  // Emitted: bookings/service.ts's ensureBookingForApprovedTransferRequest
+  // and ensureBookingFromCalendarEvent (booking.confirmed, only on a
+  // genuinely new row — never on their idempotent conflict/no-op
+  // fallback), and updateBooking (booking.completed, only on the first
+  // transition to status:"completed" for a given booking — see that
+  // function's own comment). See bos-agent/inngest-functions.ts for the
+  // BOS Agent's own listeners.
   "booking.confirmed",
   "booking.completed",
   // Not yet emitted by any producer — no rule in marketing/ currently

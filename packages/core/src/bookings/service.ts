@@ -1,5 +1,6 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, bookings, assertOne, type Booking } from "@bos/db";
+import { inngest, emitDomainEvent } from "@bos/jobs";
 import type {
   CreateBookingInput,
   UpdateBookingInput,
@@ -34,10 +35,29 @@ export async function getBooking(tenantId: string, id: string) {
   return row ?? null;
 }
 
+// booking.completed: this is a generic, multi-purpose patch function (also
+// used to record a deposit, an invoice, a payment, or a cancellation) — it
+// must never emit just because `status: "completed"` appears in a patch
+// that's actually a no-op repeat of an already-completed booking (e.g. a
+// later call recording the final payment on a booking completed days ago
+// would otherwise incorrectly re-fire the event). The pre-fetch below is
+// only done on the rare "this patch touches status" path, and the
+// genuinely-new-transition check compares against that snapshot, not
+// against the patch itself — same idempotency-by-provably-fresh-branch
+// discipline as transfer-requests/service.ts's acceptTransferRequest.
 export async function updateBooking(tenantId: string, input: UpdateBookingInput) {
   const db = getDb();
   const { id, ...patch } = input;
   const now = new Date();
+
+  const isCompleting = patch.status === "completed";
+  // Captured as a plain boolean, not held as a reference to the fetched
+  // row: the row object returned by the update below is the same booking
+  // (same real DB row, same id), and comparing against a still-referenced
+  // "previous" object after mutating it is a real footgun — decide now,
+  // from the pre-update snapshot, whether this is a genuinely new
+  // transition.
+  const wasAlreadyCompleted = isCompleting ? (await getBooking(tenantId, id))?.status === "completed" : false;
 
   // Recording a milestone amount implies "this just happened now" unless a
   // specific timestamp was already supplied — matches the admin UI, which
@@ -65,6 +85,11 @@ export async function updateBooking(tenantId: string, input: UpdateBookingInput)
     .set({ ...patch, ...derived, updatedAt: now })
     .where(and(eq(bookings.tenantId, tenantId), eq(bookings.id, id)))
     .returning();
+
+  if (row && isCompleting && !wasAlreadyCompleted) {
+    void emitDomainEvent(inngest, "booking.completed", { tenantId, bookingId: row.id });
+  }
+
   return row ?? null;
 }
 
@@ -115,7 +140,13 @@ export async function ensureBookingForApprovedTransferRequest(
   `);
 
   if (insertedRows.length > 0) {
-    return assertOne(insertedRows, "ensureBookingForApprovedTransferRequest");
+    const created = assertOne(insertedRows, "ensureBookingForApprovedTransferRequest");
+    // Only on this branch — a genuinely new row just landed at its
+    // 'confirmed' column default. The DO NOTHING fallback below never
+    // reaches here, exactly like insertNewTransferRequest's own
+    // transfer_request.created emission.
+    void emitDomainEvent(inngest, "booking.confirmed", { tenantId, bookingId: created.id });
+    return created;
   }
 
   const [existing] = await db
@@ -166,6 +197,13 @@ export async function ensureBookingFromCalendarEvent(
 ): Promise<Booking> {
   const db = getDb();
 
+  // Resolved before the upsert specifically to tell a genuine first-time
+  // creation apart from a re-sync's UPDATE-on-conflict branch — the single
+  // INSERT ... ON CONFLICT DO UPDATE query below returns a row on both
+  // branches, so `upsertedRows.length > 0` alone can't make that
+  // distinction the way insertNewTransferRequest's DO NOTHING can.
+  const existingBeforeUpsert = await getBookingByCalendarEventId(tenantId, input.calendarEventId);
+
   const upsertedRows = await db.execute<Booking>(sql`
     insert into bookings (
       tenant_id, client_id, calendar_event_id, pickup, destination,
@@ -186,7 +224,15 @@ export async function ensureBookingFromCalendarEvent(
   `);
 
   if (upsertedRows.length > 0) {
-    return assertOne(upsertedRows, "ensureBookingFromCalendarEvent");
+    const result = assertOne(upsertedRows, "ensureBookingFromCalendarEvent");
+    // Only when the pre-upsert check found nothing — a genuinely new
+    // booking just landed at its 'confirmed' column default. A re-sync
+    // that hit the DO UPDATE branch (existingBeforeUpsert was already a
+    // row) never re-emits.
+    if (!existingBeforeUpsert) {
+      void emitDomainEvent(inngest, "booking.confirmed", { tenantId, bookingId: result.id });
+    }
+    return result;
   }
 
   // Either the WHERE guard suppressed the update (booking already

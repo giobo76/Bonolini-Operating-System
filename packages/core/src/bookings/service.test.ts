@@ -18,6 +18,12 @@ const { fakeState, bookingsTable } = vi.hoisted(() => {
   };
 });
 
+// Same jobsMock shape/convention as transfer-requests/service.test.ts and
+// social-publishing/service.test.ts — emitDomainEvent is asserted on
+// directly, never the real Inngest client.
+const jobsMock = vi.hoisted(() => ({ inngest: {}, emitDomainEvent: vi.fn() }));
+vi.mock("@bos/jobs", () => jobsMock);
+
 // Recursively flattens a drizzle and(eq(...), eq(...), sql`...`) condition
 // down to its real bound values, in order — StringChunks (literal SQL
 // text) and the `undefined` column-reference chunks (the mocked
@@ -43,13 +49,16 @@ function extractConditionValues(node: { queryChunks: unknown[] }): unknown[] {
   return values;
 }
 
-// Every lookup this module does is (tenantId, transferRequestId) or
-// (tenantId, calendarEventId) — a booking is only ever sourced from one
-// path, never both, so matching either field against the second extracted
-// value is unambiguous for these tests.
+// Every lookup this module does is (tenantId, transferRequestId),
+// (tenantId, calendarEventId), or — now that getBooking/updateBooking are
+// exercised too — (tenantId, id). A booking is only ever sourced from one
+// path, and fake ids ("booking-1", ...) never collide with the
+// transferRequestId/calendarEventId strings used in these tests, so
+// matching any of the three against the second extracted value stays
+// unambiguous.
 function findByTenantAndKey(tenantId: unknown, key: unknown): Record<string, unknown> | undefined {
   return fakeState.bookings.find(
-    (b) => b.tenantId === tenantId && (b.transferRequestId === key || b.calendarEventId === key),
+    (b) => b.tenantId === tenantId && (b.id === key || b.transferRequestId === key || b.calendarEventId === key),
   );
 }
 
@@ -198,6 +207,7 @@ const {
   ensureBookingFromCalendarEvent,
   getBookingByCalendarEventId,
   cancelBookingByCalendarEventId,
+  updateBooking,
 } = await import("./service");
 
 function inputFor(overrides: Partial<EnsureBookingSnapshotInput> = {}): EnsureBookingSnapshotInput {
@@ -219,6 +229,7 @@ function inputFor(overrides: Partial<EnsureBookingSnapshotInput> = {}): EnsureBo
 beforeEach(() => {
   fakeState.bookings = [];
   fakeState.nextId = 1;
+  jobsMock.emitDomainEvent.mockClear();
 });
 
 describe("ensureBookingForApprovedTransferRequest", () => {
@@ -375,5 +386,125 @@ describe("cancelBookingByCalendarEventId", () => {
   it("returns null when no booking exists for the given calendarEventId", async () => {
     const result = await cancelBookingByCalendarEventId("tenant-1", "does-not-exist");
     expect(result).toBeNull();
+  });
+});
+
+// BOS Agent V2 booking lifecycle wiring — booking.confirmed/booking.completed
+// were already in the event catalog (packages/jobs/src/events.ts) with no
+// real producer; this is the first one. Only tenantId + bookingId in the
+// payload (matches the catalog's schema exactly) — no pickup/destination/
+// price or other booking detail, since the BOS Agent's context-builder.ts
+// doesn't resolve a "booking" entity from the event anyway (see
+// inngest-functions.ts's own comment) and there's no reason to carry data
+// nothing downstream reads.
+describe("booking.confirmed domain event", () => {
+  it("ensureBookingForApprovedTransferRequest emits booking.confirmed with exactly tenantId and bookingId, on a genuinely new booking", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", {
+      tenantId: "tenant-1",
+      bookingId: booking.id,
+    });
+  });
+
+  it("ensureBookingForApprovedTransferRequest never re-emits on its own idempotent retry (same transferRequestId)", async () => {
+    await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    jobsMock.emitDomainEvent.mockClear();
+
+    await ensureBookingForApprovedTransferRequest("tenant-1", inputFor({ finalAmountCents: 99999 }));
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", expect.anything());
+  });
+
+  it("ensureBookingFromCalendarEvent emits booking.confirmed on first sync", async () => {
+    const booking = await ensureBookingFromCalendarEvent("tenant-1", calendarInputFor());
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", {
+      tenantId: "tenant-1",
+      bookingId: booking.id,
+    });
+  });
+
+  it("ensureBookingFromCalendarEvent never re-emits on a re-sync of the same calendar event", async () => {
+    await ensureBookingFromCalendarEvent("tenant-1", calendarInputFor());
+    jobsMock.emitDomainEvent.mockClear();
+
+    await ensureBookingFromCalendarEvent("tenant-1", calendarInputFor({ destination: "Tirano centro" }));
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", expect.anything());
+  });
+
+  it("never re-emits when a re-sync hits the already-cancelled WHERE guard (a real no-op, not a fresh confirmation)", async () => {
+    await ensureBookingFromCalendarEvent("tenant-1", calendarInputFor());
+    await cancelBookingByCalendarEventId("tenant-1", "gcal-event-1");
+    jobsMock.emitDomainEvent.mockClear();
+
+    await ensureBookingFromCalendarEvent("tenant-1", calendarInputFor({ destination: "Somewhere else" }));
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", expect.anything());
+  });
+
+  it("keeps tenant isolation — the emitted payload's tenantId is exactly the call's tenantId", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-42", inputFor({ transferRequestId: "request-99" }));
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", {
+      tenantId: "tenant-42",
+      bookingId: booking.id,
+    });
+  });
+});
+
+describe("booking.completed domain event", () => {
+  it("updateBooking emits booking.completed with exactly tenantId and bookingId, on the first transition to status completed", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    jobsMock.emitDomainEvent.mockClear();
+
+    const completed = await updateBooking("tenant-1", { id: created.id as string, status: "completed" });
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.completed", {
+      tenantId: "tenant-1",
+      bookingId: created.id,
+    });
+    expect(completed?.completedAt).not.toBeNull();
+  });
+
+  it("never re-emits booking.completed on a later, unrelated patch to an already-completed booking", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    await updateBooking("tenant-1", { id: created.id as string, status: "completed" });
+    jobsMock.emitDomainEvent.mockClear();
+
+    // Recording the final payment days later must never look like a fresh
+    // completion just because the patch happens to repeat status:"completed"
+    // or touches an already-completed row.
+    await updateBooking("tenant-1", { id: created.id as string, status: "completed", paidAmountCents: 25000 });
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.completed", expect.anything());
+  });
+
+  it("never emits booking.completed for a patch that doesn't touch status at all", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    jobsMock.emitDomainEvent.mockClear();
+
+    await updateBooking("tenant-1", { id: created.id as string, depositAmountCents: 5000 });
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalled();
+  });
+
+  it("never emits for a nonexistent booking id", async () => {
+    await updateBooking("tenant-1", { id: "booking-does-not-exist", status: "completed" });
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalled();
+  });
+
+  it("keeps tenant isolation on booking.completed's payload", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-77", inputFor({ transferRequestId: "request-77" }));
+    jobsMock.emitDomainEvent.mockClear();
+
+    await updateBooking("tenant-77", { id: created.id as string, status: "completed" });
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.completed", {
+      tenantId: "tenant-77",
+      bookingId: created.id,
+    });
   });
 });

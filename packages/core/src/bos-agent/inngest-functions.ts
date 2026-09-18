@@ -127,6 +127,35 @@ export const bosAgentOnTransferRequestConfirmed = inngest.createFunction(
   },
 );
 
+// Never calls updateBooking/createBooking or any other bookings mutation —
+// only the Operations Agent's own advisory review, exactly like the
+// transfer_request listeners above. context-builder.ts has no special case
+// for `bookingId` (only `transferRequestId`), so this run's perception is
+// the agent's normal generic one (pending transfer requests + funnel) plus
+// recent unscoped memory — the event's only job here is to wake the agent
+// sooner than the next daily cron, not to hand it booking-specific detail.
+export const bosAgentOnBookingConfirmed = inngest.createFunction(
+  { id: "bos-agent-on-booking-confirmed" },
+  { event: "booking.confirmed" },
+  async ({ event, step }) => {
+    const { tenantId, bookingId } = event.data as { tenantId: string; bookingId: string };
+    return step.run("run-operations-agent", () =>
+      runEventDrivenCycle("operations", "booking.confirmed", tenantId, bookingId, { bookingId }),
+    );
+  },
+);
+
+export const bosAgentOnBookingCompleted = inngest.createFunction(
+  { id: "bos-agent-on-booking-completed" },
+  { event: "booking.completed" },
+  async ({ event, step }) => {
+    const { tenantId, bookingId } = event.data as { tenantId: string; bookingId: string };
+    return step.run("run-operations-agent", () =>
+      runEventDrivenCycle("operations", "booking.completed", tenantId, bookingId, { bookingId }),
+    );
+  },
+);
+
 export const bosAgentInngestFunctions = [
   bosAgentDailyMarketingCheck,
   bosAgentDailyOperationsCheck,
@@ -134,4 +163,6 @@ export const bosAgentInngestFunctions = [
   bosAgentOnSocialPostFailed,
   bosAgentOnTransferRequestCreated,
   bosAgentOnTransferRequestConfirmed,
+  bosAgentOnBookingConfirmed,
+  bosAgentOnBookingCompleted,
 ];
