@@ -135,6 +135,7 @@ const {
   listBusinessRules,
   getBusinessRule,
   proposeBusinessRuleVersion,
+  proposeNewBusinessRule,
   linkEvidenceToVersion,
   approveBusinessRuleVersion,
   rejectBusinessRuleVersion,
@@ -543,5 +544,189 @@ describe("a rejected proposal can never become effective", () => {
 
     const detail = await getBusinessRule("tenant-1", rule.id);
     expect(detail?.currentVersionId ?? null).toBeNull();
+  });
+});
+
+// GOVERNANCE REVISION: the BOS can propose an entirely new rule (an
+// opportunity fitting no existing key), not only a new version of one
+// that already exists — but it is exactly as unauthoritative as any other
+// BOS proposal until the founder decides. Same state machine, same
+// idempotency, same tenant isolation as proposeBusinessRuleVersion; these
+// tests pin the new entry point without re-testing the shared machinery
+// already covered above.
+describe("proposeNewBusinessRule — BOS can propose a brand-new rule, but never make it official", () => {
+  it("creates the rule and its first version together, as status='proposed', author='bos_agent'", async () => {
+    const { rule, version } = await proposeNewBusinessRule("tenant-1", {
+      key: "commission_platform.viator.base_markup",
+      category: "commission_platform",
+      content: { markupPercent: 15 },
+      author: "bos_agent",
+      proposalReasoning: "Viator sends recurring transfer requests with no direct-booking follow-up rule yet",
+      evidenceIds: [],
+    });
+
+    expect(rule.key).toBe("commission_platform.viator.base_markup");
+    expect(rule.category).toBe("commission_platform");
+    expect(rule.currentVersionId ?? null).toBeNull(); // never official on creation
+    expect(version.status).toBe("proposed");
+    expect(version.author).toBe("bos_agent");
+    expect(version.versionNumber).toBe(1);
+  });
+
+  it("never produces a rule that is already current/effective, even if content tries to smuggle that in", async () => {
+    const { rule, version } = await proposeNewBusinessRule("tenant-1", {
+      key: "seasonality.august.priority_boost",
+      category: "seasonality",
+      content: { status: "effective", currentVersionId: "not-a-real-id" }, // bait
+      author: "bos_agent",
+      evidenceIds: [],
+    });
+
+    expect(version.status).toBe("proposed");
+    expect(rule.currentVersionId ?? null).toBeNull();
+  });
+
+  it("the BOS cannot approve its own new-rule proposal — approveBusinessRuleVersion is the only path to 'effective', and it is owner-only at the router layer", async () => {
+    // Structural guarantee, exercised the same way as the existing-rule
+    // case: proposeNewBusinessRule has no status parameter and no
+    // approval side effect of its own — the only function that can ever
+    // move this version to 'effective' is approveBusinessRuleVersion,
+    // gated by router.ts's adminProcedure (see router.test.ts). Nothing
+    // here calls that function, so the version simply stays 'proposed'.
+    const { version } = await proposeNewBusinessRule("tenant-1", {
+      key: "priority_weights.viator_to_direct_conversion",
+      category: "priority_weights",
+      content: { weight: 0.3 },
+      author: "bos_agent",
+      evidenceIds: [],
+    });
+
+    expect(version.status).toBe("proposed");
+    expect(version.ownerDecision ?? null).toBeNull();
+  });
+
+  it("owner/admin approval makes the new rule's first version effective and sets the rule's current_version_id", async () => {
+    const { rule, version } = await proposeNewBusinessRule("tenant-1", {
+      key: "pricing.gettransfer.base_markup",
+      category: "pricing",
+      content: { markupPercent: 12 },
+      author: "bos_agent",
+      proposalReasoning: "GetTransfer bookings currently fall back to manual_required with no base markup rule",
+      evidenceIds: [],
+    });
+
+    const approved = await approveBusinessRuleVersion("tenant-1", version.id, "owner-profile-1", "good first pass, approving");
+
+    expect(approved.status).toBe("effective");
+    expect(approved.ownerDecision).toBe("approved");
+
+    const detail = await getBusinessRule("tenant-1", rule.id);
+    expect(detail?.currentVersionId).toBe(version.id);
+  });
+
+  it("owner/admin can reject the new rule's proposal, leaving it with no effective version", async () => {
+    const { rule, version } = await proposeNewBusinessRule("tenant-1", {
+      key: "commercial_relevance.taxi_sondrio",
+      category: "commercial_relevance",
+      content: { relevant: false },
+      author: "bos_agent",
+      proposalReasoning: "high search growth, but taxi service is not something Bonolini Transfer wants to offer",
+      evidenceIds: [],
+    });
+
+    const rejected = await rejectBusinessRuleVersion("tenant-1", version.id, "owner-profile-1", "not a service we offer");
+
+    expect(rejected.status).toBe("rejected");
+    const detail = await getBusinessRule("tenant-1", rule.id);
+    expect(detail?.currentVersionId ?? null).toBeNull();
+  });
+
+  it("keeps reasoning, author, and evidence on a brand-new-rule proposal exactly like an existing-rule proposal — indistinguishable from a governance standpoint", async () => {
+    const fact = await createEvidence("tenant-1", {
+      source: "google_ads_api",
+      rawObservation: { searchTerm: "taxi sondrio", monthlyVolume: 480 },
+      conclusion: "search volume for this term has grown 40% over 3 months",
+      evidenceType: "fact",
+      confidence: "medium",
+    });
+
+    const { rule, version } = await proposeNewBusinessRule("tenant-1", {
+      key: "commercial_relevance.taxi_sondrio_watch",
+      category: "commercial_relevance",
+      content: { relevant: "under_review" },
+      author: "bos_agent",
+      proposalReasoning: "flagging for founder review — grown search volume, unclear commercial fit",
+      evidenceIds: [fact.id],
+    });
+
+    const detail = await getBusinessRule("tenant-1", rule.id);
+    const readBack = detail?.versions.find((v) => v.id === version.id);
+
+    expect(readBack?.proposalReasoning).toBe("flagging for founder review — grown search volume, unclear commercial fit");
+    expect(readBack?.author).toBe("bos_agent");
+    expect(readBack?.evidence).toHaveLength(1);
+    expect(readBack?.evidence[0]?.id).toBe(fact.id);
+  });
+
+  it("refuses to create a second rule under an already-existing key for this tenant", async () => {
+    await proposeNewBusinessRule("tenant-1", {
+      key: "pricing.duplicate_key_test",
+      category: "pricing",
+      content: { a: 1 },
+      author: "bos_agent",
+      evidenceIds: [],
+    });
+
+    await expect(
+      proposeNewBusinessRule("tenant-1", {
+        key: "pricing.duplicate_key_test",
+        category: "pricing",
+        content: { a: 2 },
+        author: "bos_agent",
+        evidenceIds: [],
+      }),
+    ).rejects.toThrow(/already exists/);
+  });
+
+  it("keeps tenant isolation — a new rule proposed for one tenant is invisible to another, and the same key is free to reuse in a different tenant", async () => {
+    const { rule } = await proposeNewBusinessRule("tenant-1", {
+      key: "pricing.tenant_scoped_key",
+      category: "pricing",
+      content: { a: 1 },
+      author: "bos_agent",
+      evidenceIds: [],
+    });
+
+    expect(await getBusinessRule("tenant-2", rule.id)).toBeNull();
+
+    // Same key, different tenant — must not collide with tenant-1's row.
+    const otherTenant = await proposeNewBusinessRule("tenant-2", {
+      key: "pricing.tenant_scoped_key",
+      category: "pricing",
+      content: { a: 2 },
+      author: "bos_agent",
+      evidenceIds: [],
+    });
+    expect(otherTenant.rule.id).not.toBe(rule.id);
+
+    const rulesForTenant1 = await listBusinessRules("tenant-1");
+    expect(rulesForTenant1.some((r) => r.id === otherTenant.rule.id)).toBe(false);
+  });
+
+  it("allocates version_number=1 for the new rule and continues incrementing correctly for later proposals on the same rule", async () => {
+    const { rule, version: v1 } = await proposeNewBusinessRule("tenant-1", {
+      key: "seasonality.winter_watch",
+      category: "seasonality",
+      content: { a: 1 },
+      author: "bos_agent",
+      evidenceIds: [],
+    });
+    expect(v1.versionNumber).toBe(1);
+
+    const v2 = await proposeBusinessRuleVersion("tenant-1", { ruleId: rule.id, content: { a: 2 }, author: "owner", evidenceIds: [] });
+    expect(v2.versionNumber).toBe(2);
+
+    const detail = await getBusinessRule("tenant-1", rule.id);
+    expect(detail?.versions.map((v) => v.versionNumber).sort()).toEqual([1, 2]);
   });
 });

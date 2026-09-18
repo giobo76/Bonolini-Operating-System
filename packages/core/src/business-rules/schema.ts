@@ -33,6 +33,21 @@ export const proposeBusinessRuleVersionSchema = z.object({
   evidenceIds: z.array(z.string().uuid()).optional().default([]),
 });
 
+// Governance revision: the BOS may now propose an entirely new rule (an
+// opportunity that fits no existing key), not only a new version of one
+// that already exists — but exactly like proposeBusinessRuleVersion, the
+// result is never anything but status="proposed", and the rule itself
+// never becomes official (no `current_version_id`) until the founder
+// approves. Same "not wired to tRPC" reasoning as above.
+export const proposeNewBusinessRuleSchema = z.object({
+  key: z.string().trim().min(1),
+  category: businessRuleCategorySchema,
+  content: z.record(z.string(), z.unknown()),
+  author: businessRuleVersionAuthorSchema,
+  proposalReasoning: z.string().trim().min(1).optional(),
+  evidenceIds: z.array(z.string().uuid()).optional().default([]),
+});
+
 export const approveBusinessRuleVersionSchema = z.object({
   versionId: z.string().uuid(),
   reasoning: z.string().trim().optional(),
@@ -48,3 +63,4 @@ export const rejectBusinessRuleVersionSchema = z.object({
 
 export type CreateBusinessRuleInput = z.infer<typeof createBusinessRuleSchema>;
 export type ProposeBusinessRuleVersionInput = z.infer<typeof proposeBusinessRuleVersionSchema>;
+export type ProposeNewBusinessRuleInput = z.infer<typeof proposeNewBusinessRuleSchema>;

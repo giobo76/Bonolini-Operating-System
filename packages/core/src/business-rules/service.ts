@@ -10,7 +10,7 @@ import {
   type Evidence,
 } from "@bos/db";
 import { getEvidenceByIds } from "../evidence";
-import type { CreateBusinessRuleInput, ProposeBusinessRuleVersionInput } from "./schema";
+import type { CreateBusinessRuleInput, ProposeBusinessRuleVersionInput, ProposeNewBusinessRuleInput } from "./schema";
 
 // BOS Business Intelligence + Autonomy Model, Phase 1 — the founder owns
 // business rules exclusively (see this module's own README's "Governance"
@@ -32,6 +32,17 @@ import type { CreateBusinessRuleInput, ProposeBusinessRuleVersionInput } from ".
 // business-rules/router.ts exposes as adminProcedure mutations — nothing
 // in this module is reachable from a code path a BOS-agent tool could call
 // that produces anything other than status="proposed".
+//
+// Governance revision: the BOS can now also propose an entirely new rule
+// (proposeNewBusinessRule), not only a new version of one that already
+// exists — a `business_rules` row's mere existence has never been what
+// makes it "official" in this design: only `current_version_id` being set
+// does, and that only ever happens via approveBusinessRuleVersion. So a
+// BOS-created rule shell with no approved version yet is exactly as
+// non-authoritative as a BOS-proposed version of an existing rule — the
+// same governance guarantee, extended to cover the rule's own creation,
+// not a new exception to it. createBusinessRule (founder-only, via
+// router.ts's adminProcedure) remains for the founder's own direct use.
 
 async function getBusinessRuleRowForTenant(tenantId: string, id: string): Promise<BusinessRule | null> {
   const db = getDb();
@@ -48,16 +59,22 @@ async function getVersionForTenant(tenantId: string, versionId: string): Promise
   return row ?? null;
 }
 
-// The rule's very existence/key/category is a business decision — this is
-// deliberately the only function that creates a business_rules row, and
-// business-rules/router.ts gates it behind adminProcedure. A BOS-agent
-// analysis can only ever propose a new *version* of an already-existing
-// rule (proposeBusinessRuleVersion below), never invent a brand-new rule
-// key unilaterally.
+// The founder's own direct way to register a rule key — business-
+// rules/router.ts gates it behind adminProcedure. proposeNewBusinessRule
+// (below) is the BOS-agent equivalent: it also creates a business_rules
+// row, but always paired with a status="proposed" version in the same
+// call, and the row it creates is exactly as non-authoritative as this
+// one is on its own (no current_version_id) until the founder approves.
 export async function createBusinessRule(tenantId: string, input: CreateBusinessRuleInput): Promise<BusinessRule> {
   const db = getDb();
   const rows = await db.insert(businessRules).values({ tenantId, key: input.key, category: input.category }).returning();
   return assertOne(rows, "createBusinessRule");
+}
+
+async function getBusinessRuleRowByKeyForTenant(tenantId: string, key: string): Promise<BusinessRule | null> {
+  const db = getDb();
+  const [row] = await db.select().from(businessRules).where(and(eq(businessRules.tenantId, tenantId), eq(businessRules.key, key)));
+  return row ?? null;
 }
 
 export async function listBusinessRules(tenantId: string): Promise<BusinessRule[]> {
@@ -117,13 +134,47 @@ export async function getBusinessRule(tenantId: string, id: string): Promise<Bus
   };
 }
 
-// The one function that creates a version — always status="proposed",
-// regardless of `author`. There is no other exported function that could
-// create a version at any other status; approve/reject (below) are the
-// only way a "proposed" row ever moves. `evidenceIds` are validated
-// (tenant-scoped, real rows only) and silently filtered rather than
-// throwing on a stray id — a proposal must never fail to save just because
-// one citation was stale.
+// Shared by proposeBusinessRuleVersion and proposeNewBusinessRule — the
+// one place a business_rule_versions row is ever inserted, always
+// status="proposed" regardless of `author`. There is no other function
+// that could create a version at any other status; approve/reject
+// (below) are the only way a "proposed" row ever moves. `evidenceIds` are
+// validated (tenant-scoped, real rows only) and silently filtered rather
+// than throwing on a stray id — a proposal must never fail to save just
+// because one citation was stale.
+async function insertProposedVersion(
+  tenantId: string,
+  ruleId: string,
+  versionNumber: number,
+  input: { content: Record<string, unknown>; author: "owner" | "bos_agent"; proposalReasoning?: string; evidenceIds: string[] },
+): Promise<BusinessRuleVersion> {
+  const db = getDb();
+  const rows = await db
+    .insert(businessRuleVersions)
+    .values({
+      tenantId,
+      ruleId,
+      versionNumber,
+      status: "proposed",
+      content: input.content,
+      author: input.author,
+      proposalReasoning: input.proposalReasoning ?? null,
+    })
+    .returning();
+  const version = assertOne(rows, "insertProposedVersion");
+
+  if (input.evidenceIds.length > 0) {
+    const validEvidence = await getEvidenceByIds(tenantId, input.evidenceIds);
+    if (validEvidence.length > 0) {
+      await db
+        .insert(businessRuleVersionEvidence)
+        .values(validEvidence.map((ev) => ({ tenantId, businessRuleVersionId: version.id, evidenceId: ev.id })));
+    }
+  }
+
+  return version;
+}
+
 export async function proposeBusinessRuleVersion(
   tenantId: string,
   input: ProposeBusinessRuleVersionInput,
@@ -142,30 +193,50 @@ export async function proposeBusinessRuleVersion(
     .limit(1);
   const nextVersionNumber = (lastVersion?.versionNumber ?? 0) + 1;
 
-  const rows = await db
-    .insert(businessRuleVersions)
-    .values({
-      tenantId,
-      ruleId: input.ruleId,
-      versionNumber: nextVersionNumber,
-      status: "proposed",
-      content: input.content,
-      author: input.author,
-      proposalReasoning: input.proposalReasoning ?? null,
-    })
-    .returning();
-  const version = assertOne(rows, "proposeBusinessRuleVersion");
+  return insertProposedVersion(tenantId, input.ruleId, nextVersionNumber, input);
+}
 
-  if (input.evidenceIds.length > 0) {
-    const validEvidence = await getEvidenceByIds(tenantId, input.evidenceIds);
-    if (validEvidence.length > 0) {
-      await db
-        .insert(businessRuleVersionEvidence)
-        .values(validEvidence.map((ev) => ({ tenantId, businessRuleVersionId: version.id, evidenceId: ev.id })));
-    }
+export interface NewBusinessRuleProposal {
+  rule: BusinessRule;
+  version: BusinessRuleVersion;
+}
+
+// The governance-revision entry point: the BOS can propose an opportunity
+// that fits no existing rule key at all. Creates the business_rules row
+// AND its first version (versionNumber=1, status="proposed") together —
+// never a rule left with zero versions on success. Sequential, not
+// wrapped in a db.transaction() (this codebase deliberately doesn't use
+// one anywhere — see transfer-requests/service.ts's own "Opzione A"
+// comment for the precedent this follows): if the version insert were to
+// fail after the rule insert already committed, the rule is left with
+// current_version_id still null — a recoverable, harmless, detectable
+// state (a rule with no proposed version is not authoritative and not
+// dangerous), not a silent inconsistency. A retry can simply call
+// proposeBusinessRuleVersion against that now-existing rule id.
+//
+// Refuses to create a second rule under a key that already exists for
+// this tenant (the unique(tenant_id, key) constraint would reject it
+// anyway; checked here first for a clear error naming the real cause) —
+// the caller should use proposeBusinessRuleVersion against the existing
+// rule's id instead.
+export async function proposeNewBusinessRule(
+  tenantId: string,
+  input: ProposeNewBusinessRuleInput,
+): Promise<NewBusinessRuleProposal> {
+  const existing = await getBusinessRuleRowByKeyForTenant(tenantId, input.key);
+  if (existing) {
+    throw new Error(
+      `proposeNewBusinessRule: a rule with key '${input.key}' already exists for this tenant — propose a new version of rule ${existing.id} instead`,
+    );
   }
 
-  return version;
+  const db = getDb();
+  const ruleRows = await db.insert(businessRules).values({ tenantId, key: input.key, category: input.category }).returning();
+  const rule = assertOne(ruleRows, "proposeNewBusinessRule");
+
+  const version = await insertProposedVersion(tenantId, rule.id, 1, input);
+
+  return { rule, version };
 }
 
 // Attaches one more piece of evidence to an existing proposal — only while

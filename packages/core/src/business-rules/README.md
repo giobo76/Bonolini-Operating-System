@@ -1,10 +1,10 @@
 # business-rules
 
-**Status:** Phase 1 of the BOS Business Intelligence + Autonomy Model — implemented. Foundations only: the versioned rule store, its strict state machine, and the admin approval UI. No agent reads or writes through this module yet (Marketing/Social/Operations Agents, pricing at runtime, and the Opportunity Priority Engine are all explicitly out of scope for this phase — see the phase's own approval message).
+**Status:** Phase 1 of the BOS Business Intelligence + Autonomy Model — implemented, plus a governance revision: the BOS may now propose an entirely new rule (`proposeNewBusinessRule`), not only a new version of one that already exists. Foundations only: the versioned rule store, its strict state machine, and the admin approval UI. No agent reads or writes through this module yet (Marketing/Social/Operations Agents, pricing at runtime, and the Opportunity Priority Engine are all explicitly out of scope for this phase — see the phase's own approval message).
 
 **Owns:** `business_rules` (id, tenant_id, key, category, current_version_id, created_at, updated_at) and `business_rule_versions` (id, tenant_id, rule_id, version_number, status, content, author, proposal_reasoning, owner_decision, owner_decision_reason, decided_by, decided_at, effective_from, created_at). Also `business_rule_version_evidence`, the many-to-many join to `evidence` (see the `evidence` module).
 
-**Exposes:** `businessRulesRouter` (admin-only tRPC: `list`, `get`, `create`, `approve`, `reject`) plus service functions `createBusinessRule`, `listBusinessRules`, `getBusinessRule`, `proposeBusinessRuleVersion`, `linkEvidenceToVersion`, `approveBusinessRuleVersion`, `rejectBusinessRuleVersion`.
+**Exposes:** `businessRulesRouter` (admin-only tRPC: `list`, `get`, `create`, `approve`, `reject`) plus service functions `createBusinessRule`, `listBusinessRules`, `getBusinessRule`, `proposeBusinessRuleVersion`, `proposeNewBusinessRule`, `linkEvidenceToVersion`, `approveBusinessRuleVersion`, `rejectBusinessRuleVersion`.
 
 **Emits:** — (no domain events this phase; a future phase may add one, e.g. for the notification system Section B of the gap analysis calls out as still unimplemented).
 
@@ -19,9 +19,9 @@ Concretely, in this code:
 | Actor | Can | Cannot |
 |---|---|---|
 | Founder (admin) | Create a rule (`createBusinessRule`); approve a proposal (`approve` — also makes it effective in the same call, see below); reject a proposal, with a required reason | — |
-| BOS (any future agent) | Read rules/versions/evidence (`list`/`get`); propose a new version of an *existing* rule (`proposeBusinessRuleVersion`, always `status="proposed"`); attach evidence to its own still-`proposed` version (`linkEvidenceToVersion`) | Create a rule's very identity; set a version to `approved`/`rejected`/`effective`/`superseded`; modify a version's `content`/`author`/`proposalReasoning` after creation, ever; modify a version once it has been decided, for any reason |
+| BOS (any future agent) | Read rules/versions/evidence (`list`/`get`); propose a new version of an existing rule (`proposeBusinessRuleVersion`) *or* an entirely new rule for an opportunity that fits no existing key (`proposeNewBusinessRule`) — both always produce `status="proposed"`; attach evidence to its own still-`proposed` version (`linkEvidenceToVersion`) | Make any rule (new or existing) official — no path sets a version to `approved`/`rejected`/`effective`/`superseded`, and `proposeNewBusinessRule` never sets `business_rules.current_version_id`; modify a version's `content`/`author`/`proposalReasoning` after creation, ever; modify a version once it has been decided, for any reason |
 
-`proposeBusinessRuleVersion` is **not** wired to a tRPC mutation — see `router.ts`'s own header comment. It is the one function a future agent calls directly (the same way `orchestrator.ts` calls `audit.ts`/`approvals.ts`/`memory.ts` directly, never through a human-facing router), and it is structurally incapable of producing anything other than a `proposed` row — there is no parameter, no code path, that lets a caller pick a different starting status.
+Neither `proposeBusinessRuleVersion` nor `proposeNewBusinessRule` is wired to a tRPC mutation — see `router.ts`'s own header comment. Both are entry points a future agent calls directly (the same way `orchestrator.ts` calls `audit.ts`/`approvals.ts`/`memory.ts` directly, never through a human-facing router), and both are structurally incapable of producing anything other than a `proposed` row — there is no parameter, no code path, that lets a caller pick a different starting status. A BOS-proposed brand-new rule is exactly as unauthoritative as a BOS-proposed version of an existing one: a `business_rules` row's mere existence has never been what makes it official in this design — only `current_version_id` being set does, and that only ever happens via `approveBusinessRuleVersion`.
 
 ## State machine
 
