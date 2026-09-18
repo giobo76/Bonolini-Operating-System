@@ -9,6 +9,8 @@ export * from "./transfer-requests";
 export * from "./calendar";
 export * from "./social-publishing";
 export * from "./agent";
+export * from "./evidence";
+export * from "./business-rules";
 
 // Domain schemas (drivers, billing, ...) are added here as each module is
 // built, one file per packages/core module.

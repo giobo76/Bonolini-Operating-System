@@ -7,6 +7,7 @@ import { transferRequestsRouter } from "./transfer-requests";
 import { calendarRouter } from "./calendar";
 import { socialPublishingRouter } from "./social-publishing";
 import { bosAgentRouter } from "./bos-agent";
+import { businessRulesRouter } from "./business-rules";
 
 // dispatch, drivers, billing, notifications routers merge in here as each
 // module is built — see docs/domain/13-api-contracts.md for the intended
@@ -20,6 +21,7 @@ export const appRouter = router({
   calendar: calendarRouter,
   socialPublishing: socialPublishingRouter,
   bosAgent: bosAgentRouter,
+  businessRules: businessRulesRouter,
 });
 
 export type AppRouter = typeof appRouter;
