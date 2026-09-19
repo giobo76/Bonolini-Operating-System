@@ -1,5 +1,6 @@
 export { calculatePrice, determineCustomerType, isComoTiranoRoute } from "./service";
 export * from "./schema";
+export { resolvePricingRates, type PricingRatesResolution, type PricingRuleProvenanceEntry } from "./rates-provider";
 
 // Boundary rule (ADR 0002): other modules/apps import only from here — the
 // keyword tables, fare tables, and internal builders in service.ts are

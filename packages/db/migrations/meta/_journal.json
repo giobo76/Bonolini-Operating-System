@@ -99,6 +99,13 @@
       "when": 1789744090099,
       "tag": "0021_business_rules_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789830522000,
+      "tag": "0022_pricing_business_rules",
+      "breakpoints": true
     }
   ]
 }

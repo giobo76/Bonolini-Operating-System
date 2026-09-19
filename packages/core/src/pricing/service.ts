@@ -1,3 +1,4 @@
+import { DEFAULT_PRICING_RATES } from "./schema";
 import type {
   CustomerType,
   HospitalWaitingInfo,
@@ -5,15 +6,14 @@ import type {
   MatchedRule,
   PricingBreakdown,
   PricingInput,
+  PricingRates,
   PricingResult,
 } from "./schema";
 
-// ── Constants recovered verbatim from CChiefGrowthAI's pricing_engine.py,
-// confirmed by the founder — never reinterpreted. See README.md for the
-// exact source lines each one came from.
-
-const TOLL_RATE_PER_KM = 0.08;
-const MINIMUM_FARE_CENTS = 5000;
+// ── Route/destination classification — pure keyword matching, never a
+// commercial value, so none of this became a Business Rule in Phase 2 (see
+// schema.ts's "Business Rules content shapes" comment for the exact line
+// between "value" and "classification"). Unchanged from before Phase 2.
 
 type FixedFareCategory = "linate_orio_citta" | "malpensa";
 
@@ -28,11 +28,6 @@ const AIRPORT_FARE_CATEGORY: Record<string, FixedFareCategory> = {
   milano: "linate_orio_citta",
   malpensa: "malpensa",
   mxp: "malpensa",
-};
-
-const FIXED_FARE_TABLE_CENTS: Record<FixedFareCategory, Record<4 | 5 | 6 | 7 | 8, number>> = {
-  linate_orio_citta: { 4: 22000, 5: 25000, 6: 28000, 7: 30000, 8: 32000 },
-  malpensa: { 4: 25000, 5: 27000, 6: 29000, 7: 32000, 8: 35000 },
 };
 
 const HOSPITAL_KEYWORDS = ["ospedale", "hospital", "clinica", "pronto soccorso"];
@@ -50,14 +45,6 @@ const HOSPITAL_KEYWORDS = ["ospedale", "hospital", "clinica", "pronto soccorso"]
 // guarantees the five routes below are identical in both directions, per
 // the explicit commercial requirement.
 type ForeignFixedTiranoRoute = "varenna" | "menaggio" | "como" | "milan" | "malpensa";
-
-const FOREIGN_FIXED_TIRANO_FARE_CENTS: Record<ForeignFixedTiranoRoute, number> = {
-  varenna: 26000, // €260
-  menaggio: 30000, // €300
-  como: 36000, // €360 — same figure as the pre-existing COMO_TIRANO_FOREIGN_FIXED_CENTS below; this table is now its single source
-  milan: 39000, // €390
-  malpensa: 44000, // €440
-};
 
 const FOREIGN_FIXED_TIRANO_MATCHED_RULE: Record<ForeignFixedTiranoRoute, MatchedRule> = {
   varenna: "varenna_tirano_fixed_foreign",
@@ -122,11 +109,11 @@ export function determineCustomerType(phone: string): CustomerType {
   return cleaned.startsWith("39") ? "italian" : "foreign";
 }
 
-function kmRate(customerType: CustomerType, distanceKm: number): number {
+function kmRate(customerType: CustomerType, distanceKm: number, distanceRate: PricingRates["distanceRate"]): number {
   if (customerType === "foreign") {
-    return distanceKm <= 100 ? 1.3 : 1.2;
+    return distanceKm <= 100 ? distanceRate.foreignUpTo100Km : distanceRate.foreignAbove100Km;
   }
-  return distanceKm <= 100 ? 1.0 : 0.85;
+  return distanceKm <= 100 ? distanceRate.italianUpTo100Km : distanceRate.italianAbove100Km;
 }
 
 // Exported (only this one internal helper, deliberately) so the
@@ -158,13 +145,18 @@ function isOriginCompatibleWithFixedFare(pickup: string): boolean {
   return Object.keys(AIRPORT_FARE_CATEGORY).some((keyword) => normalized.includes(keyword));
 }
 
-function fixedFareForPassengers(category: FixedFareCategory, passengers: number): number {
-  const tiers = [4, 5, 6, 7, 8] as const;
+function fixedFareForPassengers(
+  category: FixedFareCategory,
+  passengers: number,
+  fixedFareAirport: PricingRates["fixedFareAirport"],
+): number {
+  const table = category === "malpensa" ? fixedFareAirport.malpensa : fixedFareAirport.linateOrioCitta;
+  const tiers = ["4", "5", "6", "7", "8"] as const;
   for (const tier of tiers) {
-    if (passengers <= tier) return FIXED_FARE_TABLE_CENTS[category][tier];
+    if (passengers <= Number(tier)) return table[tier];
   }
   // Unreachable: callers only reach here after confirming passengers <= 8.
-  return FIXED_FARE_TABLE_CENTS[category][8];
+  return table["8"];
 }
 
 // Hospital detection is cross-cutting — evaluated once, independent of
@@ -172,25 +164,36 @@ function fixedFareForPassengers(category: FixedFareCategory, passengers: number)
 // CChiefGrowthAI's own code, where the equivalent check only ever fired
 // inside the fixed-fare branch, never on a km-calculated destination
 // (e.g. "Ospedale di Sondalo", CChiefGrowthAI's own test example).
-function evaluateHospitalWaiting(destination: string, customerType: CustomerType): HospitalWaitingInfo {
+// `rates` is nullable here specifically: calculatePrice() calls this
+// before its own top-level "rates could not be resolved safely" check (see
+// that function's own comment), so this needs its own honest answer for
+// that case too — never guessing a value it doesn't have. When `rates` is
+// null, an italian hospital destination gets the same manual_required
+// treatment foreign already gets below: applies=true (that fact doesn't
+// depend on rates), but no rate is invented.
+function evaluateHospitalWaiting(
+  destination: string,
+  customerType: CustomerType,
+  rates: PricingRates | null,
+): HospitalWaitingInfo {
   const applies = HOSPITAL_KEYWORDS.some((keyword) => destination.toLowerCase().includes(keyword));
 
   if (!applies) {
     return { applies: false, hospitalWaitingStatus: "not_applicable", hospitalWaitingRule: null, freeMinutes: null, ratePerHourCents: null };
   }
 
-  if (customerType === "italian") {
+  if (customerType === "italian" && rates) {
     return {
       applies: true,
       hospitalWaitingStatus: "defined",
       hospitalWaitingRule: "1h_free_then_40_eur_per_hour",
-      freeMinutes: 60,
-      ratePerHourCents: 4000,
+      freeMinutes: rates.hospitalWaitingItalian.freeMinutes,
+      ratePerHourCents: rates.hospitalWaitingItalian.ratePerHourCents,
     };
   }
 
-  // Foreign: rule not yet defined — never guessed, never defaulted to the
-  // italian rate.
+  // Foreign (rule not yet defined), or rates unavailable: never guessed,
+  // never defaulted to the italian rate.
   return { applies: true, hospitalWaitingStatus: "manual_required", hospitalWaitingRule: null, freeMinutes: null, ratePerHourCents: null };
 }
 
@@ -198,6 +201,7 @@ function buildManualRequired(
   customerType: CustomerType,
   reason: ManualRequiredReason,
   hospitalWaiting: HospitalWaitingInfo,
+  minimumFareCents: number,
   breakdownOverrides: Partial<PricingBreakdown> = {},
 ): PricingResult {
   return {
@@ -217,7 +221,7 @@ function buildManualRequired(
       ratePerKmApplied: null,
       fixedFareApplied: null,
       tollEstimateCents: null,
-      minimumFareCents: MINIMUM_FARE_CENTS,
+      minimumFareCents,
       minimumFareApplied: false,
       manualRequiredReason: reason,
       warnings: [],
@@ -231,6 +235,7 @@ function buildFixedResult(
   fareCents: number,
   matchedRule: MatchedRule,
   hospitalWaiting: HospitalWaitingInfo,
+  minimumFareCents: number,
 ): PricingResult {
   return {
     pricingStatus: "fixed",
@@ -249,7 +254,7 @@ function buildFixedResult(
       ratePerKmApplied: null,
       fixedFareApplied: fareCents,
       tollEstimateCents: null,
-      minimumFareCents: MINIMUM_FARE_CENTS,
+      minimumFareCents,
       minimumFareApplied: false,
       manualRequiredReason: null,
       warnings: [],
@@ -267,13 +272,14 @@ function buildKmResult(
   distanceKm: number,
   matchedRule: MatchedRule,
   hospitalWaiting: HospitalWaitingInfo,
+  rates: PricingRates,
 ): PricingResult {
-  const rate = kmRate(customerType, distanceKm);
+  const rate = kmRate(customerType, distanceKm, rates.distanceRate);
   const baseAmountCents = Math.round(distanceKm * rate * 100);
-  const tollAmountCents = Math.round(distanceKm * TOLL_RATE_PER_KM * 100);
+  const tollAmountCents = Math.round(distanceKm * rates.tollRatePerKm * 100);
   const computedTotalCents = baseAmountCents + tollAmountCents;
-  const minimumFareApplied = computedTotalCents < MINIMUM_FARE_CENTS;
-  const finalAmountCents = Math.max(computedTotalCents, MINIMUM_FARE_CENTS);
+  const minimumFareApplied = computedTotalCents < rates.minimumFareCents;
+  const finalAmountCents = Math.max(computedTotalCents, rates.minimumFareCents);
 
   return {
     pricingStatus: "calculated_km",
@@ -292,7 +298,7 @@ function buildKmResult(
       ratePerKmApplied: rate,
       fixedFareApplied: null,
       tollEstimateCents: tollAmountCents,
-      minimumFareCents: MINIMUM_FARE_CENTS,
+      minimumFareCents: rates.minimumFareCents,
       minimumFareApplied,
       manualRequiredReason: null,
       warnings: [],
@@ -300,52 +306,85 @@ function buildKmResult(
   };
 }
 
-// The single entry point. Pure — no DB, no network, no side effects.
+// The single entry point. Pure — no DB, no network, no side effects — even
+// after Phase 2 (Business Rules): `rates` is a plain value the caller
+// resolved beforehand (see rates-provider.ts), never fetched here.
+// Defaults to DEFAULT_PRICING_RATES so every pre-Phase-2 caller/test that
+// never passed a second argument at all keeps computing the exact same
+// numbers as before — this default is the whole reason OLD and NEW prices
+// are provably identical, not just "equivalent": they run the identical
+// arithmetic against the identical values, because DEFAULT_PRICING_RATES
+// *is* the same values, just moved from a scattered set of module
+// constants into one named export.
+//
+// `rates === null` is the one new case: the caller determined the tariff
+// values could not be safely resolved from the Business Rules system this
+// run (an effective rule's content failed validation, or more than one
+// effective version existed for the same rule) and explicitly chose not to
+// guess. Checked first, before any routing logic, so no branch below ever
+// computes a price using a rate it can't trust.
+//
 // Never throws on business-shape issues (missing passengers, missing
-// distance): every such case resolves to a manual_required PricingResult
-// instead, per the "conservative engine, never guess" mandate.
-export function calculatePrice(input: PricingInput): PricingResult {
-  const hospitalWaiting = evaluateHospitalWaiting(input.destination, input.customerType);
+// distance, or now unavailable rates): every such case resolves to a
+// manual_required PricingResult instead, per the "conservative engine,
+// never guess" mandate.
+export function calculatePrice(input: PricingInput, rates: PricingRates | null = DEFAULT_PRICING_RATES): PricingResult {
+  const hospitalWaiting = evaluateHospitalWaiting(input.destination, input.customerType, rates);
+
+  if (rates === null) {
+    return buildManualRequired(input.customerType, "pricing_rules_invalid", hospitalWaiting, DEFAULT_PRICING_RATES.minimumFareCents);
+  }
 
   // Intake signals that immediately defer — see schema.ts's comment on why
   // these fields exist. None of them compute a price; they only let the
   // engine recognize a case it must not guess at.
   if (input.requestedServiceType === "hourly") {
-    return buildManualRequired(input.customerType, "hourly_formula_not_defined", hospitalWaiting);
+    return buildManualRequired(input.customerType, "hourly_formula_not_defined", hospitalWaiting, rates.minimumFareCents);
   }
   if (input.channel === "gettransfer") {
-    return buildManualRequired(input.customerType, "gettransfer_base_tariff_not_defined", hospitalWaiting);
+    return buildManualRequired(input.customerType, "gettransfer_base_tariff_not_defined", hospitalWaiting, rates.minimumFareCents);
   }
   if (input.channel === "viator") {
-    return buildManualRequired(input.customerType, "viator_external_price_not_provided", hospitalWaiting);
+    return buildManualRequired(input.customerType, "viator_external_price_not_provided", hospitalWaiting, rates.minimumFareCents);
   }
   if (input.possibleNightOrHolidaySurcharge && input.customerType === "foreign") {
-    return buildManualRequired(input.customerType, "night_holiday_surcharge_requires_admin_decision", hospitalWaiting);
+    return buildManualRequired(
+      input.customerType,
+      "night_holiday_surcharge_requires_admin_decision",
+      hospitalWaiting,
+      rates.minimumFareCents,
+    );
   }
 
   if (!Number.isInteger(input.passengers) || input.passengers <= 0) {
-    return buildManualRequired(input.customerType, "passengers_missing", hospitalWaiting);
+    return buildManualRequired(input.customerType, "passengers_missing", hospitalWaiting, rates.minimumFareCents);
   }
 
   // Foreign Lake Como <-> Tirano commercial fixed fares — checked first,
   // ahead of every other branch, for exactly the reasons in the comment
-  // above FOREIGN_FIXED_TIRANO_FARE_CENTS.
+  // above FOREIGN_FIXED_TIRANO_MATCHED_RULE.
   if (input.customerType === "foreign") {
     const namedRoute = matchForeignFixedTiranoRoute(input.pickup, input.destination);
     if (namedRoute) {
       if (input.passengers > 4) {
-        return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting);
+        return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting, rates.minimumFareCents);
       }
       return buildFixedResult(
         input.customerType,
-        FOREIGN_FIXED_TIRANO_FARE_CENTS[namedRoute],
+        rates.foreignFixedTirano[namedRoute],
         FOREIGN_FIXED_TIRANO_MATCHED_RULE[namedRoute],
         hospitalWaiting,
+        rates.minimumFareCents,
       );
     }
 
     if (isOtherLakeComoMention(input.pickup, input.destination)) {
-      return buildManualRequired(input.customerType, "lake_como_location_requires_personalized_quote", hospitalWaiting);
+      return buildManualRequired(
+        input.customerType,
+        "lake_como_location_requires_personalized_quote",
+        hospitalWaiting,
+        rates.minimumFareCents,
+      );
     }
   }
 
@@ -356,28 +395,28 @@ export function calculatePrice(input: PricingInput): PricingResult {
     // keyword matches whenever isComoTiranoRoute does, for a foreign
     // customer, so that branch never falls through to this one).
     if (input.distanceKm === undefined) {
-      return buildManualRequired(input.customerType, "distance_not_provided", hospitalWaiting);
+      return buildManualRequired(input.customerType, "distance_not_provided", hospitalWaiting, rates.minimumFareCents);
     }
-    return buildKmResult(input.customerType, input.distanceKm, "como_tirano_km_italian", hospitalWaiting);
+    return buildKmResult(input.customerType, input.distanceKm, "como_tirano_km_italian", hospitalWaiting, rates);
   }
 
   const fixedCategory = findFixedFareCategory(input.destination);
   if (fixedCategory) {
     if (input.passengers > 8) {
-      return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting);
+      return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting, rates.minimumFareCents);
     }
     if (!isOriginCompatibleWithFixedFare(input.pickup)) {
-      return buildManualRequired(input.customerType, "fixed_fare_origin_requires_verification", hospitalWaiting, {
+      return buildManualRequired(input.customerType, "fixed_fare_origin_requires_verification", hospitalWaiting, rates.minimumFareCents, {
         warnings: ["Pickup location is not Sondrio or a known fixed-fare location — fixed fare cannot be applied automatically."],
       });
     }
-    const fareCents = fixedFareForPassengers(fixedCategory, input.passengers);
+    const fareCents = fixedFareForPassengers(fixedCategory, input.passengers, rates.fixedFareAirport);
     const matchedRule: MatchedRule = fixedCategory === "malpensa" ? "fixed_airport_malpensa" : "fixed_airport_linate_orio_city";
-    return buildFixedResult(input.customerType, fareCents, matchedRule, hospitalWaiting);
+    return buildFixedResult(input.customerType, fareCents, matchedRule, hospitalWaiting, rates.minimumFareCents);
   }
 
   if (input.distanceKm === undefined) {
-    return buildManualRequired(input.customerType, "distance_not_provided", hospitalWaiting);
+    return buildManualRequired(input.customerType, "distance_not_provided", hospitalWaiting, rates.minimumFareCents);
   }
-  return buildKmResult(input.customerType, input.distanceKm, "generic_km", hospitalWaiting);
+  return buildKmResult(input.customerType, input.distanceKm, "generic_km", hospitalWaiting, rates);
 }

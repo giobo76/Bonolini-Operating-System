@@ -34,6 +34,10 @@ const {
   clientsTable,
   whatsappMessagesTable,
   transferRequestsTable,
+  businessRulesTable,
+  businessRuleVersionsTable,
+  businessRuleVersionEvidenceTable,
+  evidenceTable,
 } = vi.hoisted(() => {
   return {
     fakeState: {
@@ -48,6 +52,16 @@ const {
     clientsTable: { __name: "clients" },
     whatsappMessagesTable: { __name: "whatsappMessages" },
     transferRequestsTable: { __name: "transferRequests" },
+    // Phase 2 (Business Rules): runPricingForTransferRequest now calls
+    // resolvePricingRates(), which reads these tables — always empty here
+    // (no test in this file is about pricing rule content), so it always
+    // takes the documented "rule not found" fallback to
+    // DEFAULT_PRICING_RATES, the exact same numeric values this file's
+    // scenarios already assert on.
+    businessRulesTable: { __name: "businessRules" },
+    businessRuleVersionsTable: { __name: "businessRuleVersions" },
+    businessRuleVersionEvidenceTable: { __name: "businessRuleVersionEvidence" },
+    evidenceTable: { __name: "evidence" },
   };
 });
 
@@ -217,6 +231,10 @@ vi.mock("@bos/db", () => {
     clients: clientsTable,
     whatsappMessages: whatsappMessagesTable,
     transferRequests: transferRequestsTable,
+    businessRules: businessRulesTable,
+    businessRuleVersions: businessRuleVersionsTable,
+    businessRuleVersionEvidence: businessRuleVersionEvidenceTable,
+    evidence: evidenceTable,
     assertOne: (rows: unknown[]) => rows[0],
     getDb: () => db,
   };

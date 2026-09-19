@@ -90,20 +90,12 @@ export interface BusinessRuleDetail extends BusinessRule {
   versions: BusinessRuleVersionWithEvidence[];
 }
 
-// The DETTAGLIO view's one read: current rule row + full version history,
-// each version carrying the real evidence rows it cites (not just ids) —
-// this is what lets a recommendation be reconstructed end to end (rule
-// content -> reasoning -> the actual observed facts behind it) in one
-// call, per this phase's "provenance" requirement.
-export async function getBusinessRule(tenantId: string, id: string): Promise<BusinessRuleDetail | null> {
+async function assembleBusinessRuleDetail(tenantId: string, rule: BusinessRule): Promise<BusinessRuleDetail> {
   const db = getDb();
-  const rule = await getBusinessRuleRowForTenant(tenantId, id);
-  if (!rule) return null;
-
   const versions = await db
     .select()
     .from(businessRuleVersions)
-    .where(and(eq(businessRuleVersions.tenantId, tenantId), eq(businessRuleVersions.ruleId, id)))
+    .where(and(eq(businessRuleVersions.tenantId, tenantId), eq(businessRuleVersions.ruleId, rule.id)))
     .orderBy(desc(businessRuleVersions.versionNumber));
 
   if (versions.length === 0) {
@@ -132,6 +124,27 @@ export async function getBusinessRule(tenantId: string, id: string): Promise<Bus
     ...rule,
     versions: versions.map((version) => ({ ...version, evidence: evidenceByVersionId.get(version.id) ?? [] })),
   };
+}
+
+// The DETTAGLIO view's one read: current rule row + full version history,
+// each version carrying the real evidence rows it cites (not just ids) —
+// this is what lets a recommendation be reconstructed end to end (rule
+// content -> reasoning -> the actual observed facts behind it) in one
+// call, per this phase's "provenance" requirement.
+export async function getBusinessRule(tenantId: string, id: string): Promise<BusinessRuleDetail | null> {
+  const rule = await getBusinessRuleRowForTenant(tenantId, id);
+  if (!rule) return null;
+  return assembleBusinessRuleDetail(tenantId, rule);
+}
+
+// The read a *consumer* of a rule (e.g. pricing's rates-provider.ts) uses —
+// consumers know a rule's stable `key` (e.g. "pricing.minimum_fare"), never
+// its generated id, which only the admin UI/router ever handles. Same
+// shape as getBusinessRule, just keyed differently.
+export async function getBusinessRuleByKey(tenantId: string, key: string): Promise<BusinessRuleDetail | null> {
+  const rule = await getBusinessRuleRowByKeyForTenant(tenantId, key);
+  if (!rule) return null;
+  return assembleBusinessRuleDetail(tenantId, rule);
 }
 
 // Shared by proposeBusinessRuleVersion and proposeNewBusinessRule — the

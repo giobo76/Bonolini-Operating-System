@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { calculatePrice, determineCustomerType } from "./service";
-import type { PricingInput } from "./schema";
+import { DEFAULT_PRICING_RATES } from "./schema";
+import type { PricingInput, PricingRates } from "./schema";
 
 // Pure module, no @bos/db mock needed — calculatePrice() never touches the
 // database, unlike every other core module's tests.
@@ -389,5 +390,95 @@ describe("calculatePrice — foreign Lake Como / Milan / Malpensa <-> Tirano fix
     // destination (which would hit the pre-existing airport-fare table).
     const generic = calculatePrice(input({ customerType: "foreign", pickup: "Bellagio", destination: "Livigno", distanceKm: 80 }));
     expect(generic.pricingBreakdown.matchedRule).toBe("generic_km");
+  });
+});
+
+// PHASE 2 (Business Rules): calculatePrice() gained an optional second
+// `rates` parameter, defaulting to DEFAULT_PRICING_RATES — every test
+// above calls calculatePrice(input) with exactly one argument, so every
+// one of them already proves OLD price === NEW price for its case: same
+// test code, same assertions, unmodified, passing against the refactored
+// implementation. These new tests exercise only the new parameter itself.
+describe("calculatePrice — rates parameter (Phase 2: Business Rules)", () => {
+  it("uses DEFAULT_PRICING_RATES's exact numbers when no rates argument is passed at all", () => {
+    const withDefaultArg = calculatePrice(input({ distanceKm: 60 }), DEFAULT_PRICING_RATES);
+    const withNoArg = calculatePrice(input({ distanceKm: 60 }));
+    expect(withNoArg).toEqual(withDefaultArg);
+  });
+
+  it("a custom rates object changes the price deterministically, proving the value is genuinely read from `rates`, not still hardcoded", () => {
+    const customRates: PricingRates = {
+      ...DEFAULT_PRICING_RATES,
+      distanceRate: { ...DEFAULT_PRICING_RATES.distanceRate, italianUpTo100Km: 2.0 },
+    };
+    const result = calculatePrice(input({ distanceKm: 60 }), customRates);
+    expect(result.pricingBreakdown.ratePerKmApplied).toBe(2.0);
+    expect(result.baseAmountCents).toBe(12000); // 60km * 2.00 EUR/km, not the default 1.00
+  });
+
+  it("a custom minimum fare is honored", () => {
+    const customRates: PricingRates = { ...DEFAULT_PRICING_RATES, minimumFareCents: 9000 };
+    const result = calculatePrice(input({ distanceKm: 10 }), customRates);
+    expect(result.pricingBreakdown.minimumFareApplied).toBe(true);
+    expect(result.finalAmountCents).toBe(9000);
+  });
+
+  it("a custom fixed airport fare is honored", () => {
+    const customRates: PricingRates = {
+      ...DEFAULT_PRICING_RATES,
+      fixedFareAirport: {
+        ...DEFAULT_PRICING_RATES.fixedFareAirport,
+        malpensa: { ...DEFAULT_PRICING_RATES.fixedFareAirport.malpensa, "5": 99999 },
+      },
+    };
+    const result = calculatePrice(input({ destination: "Malpensa", passengers: 5 }), customRates);
+    expect(result.finalAmountCents).toBe(99999);
+  });
+
+  it("a custom foreign fixed Tirano fare is honored", () => {
+    const customRates: PricingRates = {
+      ...DEFAULT_PRICING_RATES,
+      foreignFixedTirano: { ...DEFAULT_PRICING_RATES.foreignFixedTirano, como: 40000 },
+    };
+    const result = calculatePrice(
+      input({ customerType: "foreign", pickup: "Como", destination: "Tirano" }),
+      customRates,
+    );
+    expect(result.finalAmountCents).toBe(40000);
+  });
+
+  it("a custom hospital waiting rate for italian customers is honored", () => {
+    const customRates: PricingRates = {
+      ...DEFAULT_PRICING_RATES,
+      hospitalWaitingItalian: { freeMinutes: 30, ratePerHourCents: 5000 },
+    };
+    const result = calculatePrice(input({ destination: "Ospedale di Sondalo", distanceKm: 20 }), customRates);
+    expect(result.hospitalWaiting).toEqual({
+      applies: true,
+      hospitalWaitingStatus: "defined",
+      hospitalWaitingRule: "1h_free_then_40_eur_per_hour",
+      freeMinutes: 30,
+      ratePerHourCents: 5000,
+    });
+  });
+
+  it("rates=null defers to manual_required with reason 'pricing_rules_invalid' — never inventing a price", () => {
+    const result = calculatePrice(input({ distanceKm: 60 }), null);
+    expect(result.pricingStatus).toBe("manual_required");
+    expect(result.manualRequiredReason).toBe("pricing_rules_invalid");
+    expect(result.finalAmountCents).toBeNull();
+  });
+
+  it("rates=null on a fixed-fare route also defers, never falling back to any hardcoded price", () => {
+    const result = calculatePrice(input({ destination: "Malpensa", passengers: 4 }), null);
+    expect(result.pricingStatus).toBe("manual_required");
+    expect(result.manualRequiredReason).toBe("pricing_rules_invalid");
+  });
+
+  it("rates=null still reports an honest hospitalWaiting for an italian hospital destination — manual_required, never the default rate", () => {
+    const result = calculatePrice(input({ destination: "Ospedale di Sondalo", distanceKm: 20 }), null);
+    expect(result.hospitalWaiting.applies).toBe(true);
+    expect(result.hospitalWaiting.hospitalWaitingStatus).toBe("manual_required");
+    expect(result.hospitalWaiting.ratePerHourCents).toBeNull();
   });
 });

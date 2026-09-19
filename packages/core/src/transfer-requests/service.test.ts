@@ -23,13 +23,35 @@ import type { PreviousService } from "../availability";
 // primitive string/number chunks (drizzle's own Column reference chunk is
 // neither) to isolate the bound row id.
 
-const { fakeState, transferRequestsTable, whatsappMessagesTable, clientsTable, bookingsTable } = vi.hoisted(() => {
+const {
+  fakeState,
+  transferRequestsTable,
+  whatsappMessagesTable,
+  clientsTable,
+  bookingsTable,
+  businessRulesTable,
+  businessRuleVersionsTable,
+  businessRuleVersionEvidenceTable,
+  evidenceTable,
+} = vi.hoisted(() => {
   return {
     fakeState: {
       requests: [] as Array<Record<string, unknown>>,
       messages: [] as Array<Record<string, unknown>>,
       clients: [] as Array<Record<string, unknown>>,
       bookings: [] as Array<Record<string, unknown>>,
+      // Phase 2 (Business Rules): always empty in this file — no test here
+      // is about pricing rule *content*, only transfer-request lifecycle.
+      // Deliberately never seeded, so runPricingForTransferRequest's own
+      // resolvePricingRates() call always takes the documented "rule not
+      // found" fallback path (DEFAULT_PRICING_RATES) — the exact same
+      // numeric values every test here already asserts on, computed the
+      // same pre-Phase-2 way. See pricing/rates-provider.test.ts for real
+      // coverage of the business-rule-sourced path.
+      businessRules: [] as Array<Record<string, unknown>>,
+      businessRuleVersions: [] as Array<Record<string, unknown>>,
+      businessRuleVersionEvidence: [] as Array<Record<string, unknown>>,
+      evidence: [] as Array<Record<string, unknown>>,
       nextRequestId: 1,
       nextBookingId: 1,
     },
@@ -37,6 +59,10 @@ const { fakeState, transferRequestsTable, whatsappMessagesTable, clientsTable, b
     whatsappMessagesTable: { __name: "whatsappMessages" },
     clientsTable: { __name: "clients" },
     bookingsTable: { __name: "bookings" },
+    businessRulesTable: { __name: "businessRules" },
+    businessRuleVersionsTable: { __name: "businessRuleVersions" },
+    businessRuleVersionEvidenceTable: { __name: "businessRuleVersionEvidence" },
+    evidenceTable: { __name: "evidence" },
   };
 });
 
@@ -53,6 +79,10 @@ function sourceFor(table: unknown): Array<Record<string, unknown>> {
   if (table === transferRequestsTable) return fakeState.requests;
   if (table === clientsTable) return fakeState.clients;
   if (table === bookingsTable) return fakeState.bookings;
+  if (table === businessRulesTable) return fakeState.businessRules;
+  if (table === businessRuleVersionsTable) return fakeState.businessRuleVersions;
+  if (table === businessRuleVersionEvidenceTable) return fakeState.businessRuleVersionEvidence;
+  if (table === evidenceTable) return fakeState.evidence;
   return fakeState.messages;
 }
 
@@ -258,6 +288,10 @@ vi.mock("@bos/db", () => {
     whatsappMessages: whatsappMessagesTable,
     clients: clientsTable,
     bookings: bookingsTable,
+    businessRules: businessRulesTable,
+    businessRuleVersions: businessRuleVersionsTable,
+    businessRuleVersionEvidence: businessRuleVersionEvidenceTable,
+    evidence: evidenceTable,
     assertOne: (rows: unknown[]) => {
       if (rows.length === 0) throw new Error("Expected exactly one row, got none");
       return rows[0];

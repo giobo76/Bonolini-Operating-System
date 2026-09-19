@@ -1,7 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, transferRequests, whatsappMessages, assertOne, type TransferRequest } from "@bos/db";
 import { inngest, emitDomainEvent } from "@bos/jobs";
-import { calculatePrice, determineCustomerType, isComoTiranoRoute, type CustomerType } from "../pricing";
+import { calculatePrice, determineCustomerType, isComoTiranoRoute, resolvePricingRates, type CustomerType } from "../pricing";
 import { calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip, calculateRoute } from "../maps-distance";
 import {
   determineRelocationOrigin,
@@ -426,13 +426,23 @@ export async function runPricingForTransferRequest(
     possibleNightOrHolidaySurcharge: false,
   };
 
+  // Phase 2 (Business Rules): resolved once per pricing attempt and reused
+  // for both calculatePrice() calls below (first pass and, if needed, the
+  // distance-aware second pass) — the tariff values must not differ
+  // between the two calls within the same request. See
+  // pricing/rates-provider.ts's own header comment for what "resolved"
+  // means (business rule if effective and valid, the documented temporary
+  // fallback if merely missing, or an explicit `null` — never a silently
+  // invented price — if a rule exists but is genuinely invalid).
+  const ratesResolution = await resolvePricingRates(tenantId);
+
   // First pass, no distance: calculatePrice() is the only authority on
   // whether a distance is even needed at all (fixed fares and the
   // Como-Tirano foreign fixed fare never need one) — this connection never
   // re-implements that routing/fare-matching decision itself. Only when
   // the engine's own answer is "the sole blocker is a missing distance" do
   // we go fetch one from maps-distance, then ask the engine again with it.
-  let pricingResult = calculatePrice(basePricingInput);
+  let pricingResult = calculatePrice(basePricingInput, ratesResolution.rates);
   let distanceLookup: Record<string, unknown> = { attempted: false };
 
   if (pricingResult.manualRequiredReason === "distance_not_provided") {
@@ -452,7 +462,7 @@ export async function runPricingForTransferRequest(
         distanceKm: routeResult.distanceKm,
         durationMinutes: routeResult.durationMinutes,
       };
-      pricingResult = calculatePrice({ ...basePricingInput, distanceKm: routeResult.distanceKm });
+      pricingResult = calculatePrice({ ...basePricingInput, distanceKm: routeResult.distanceKm }, ratesResolution.rates);
     } else {
       // Maps couldn't produce a real distance: pricingResult stays exactly
       // the first-pass manual_required result above — no price is ever
@@ -487,6 +497,14 @@ export async function runPricingForTransferRequest(
         adjustments: pricingResult.adjustments,
         hospitalWaiting: pricingResult.hospitalWaiting,
         distanceLookup,
+        // Phase 2 (Business Rules) provenance: which rule/version (or
+        // documented fallback) supplied each tariff value used above —
+        // "quale regola ho applicato e perché", ready for a future BOS
+        // workflow to surface without re-plumbing the pricing engine. Not
+        // itself acted on anywhere yet this phase; purely recorded.
+        pricingRuleProvenance: ratesResolution.provenance,
+        pricingRulesUsedFallback: ratesResolution.usedFallback,
+        pricingRulesInvalidReason: ratesResolution.invalidReason ?? null,
       },
       updatedAt: new Date(),
     })

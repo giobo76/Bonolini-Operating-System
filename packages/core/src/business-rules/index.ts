@@ -4,6 +4,7 @@ export {
   createBusinessRule,
   listBusinessRules,
   getBusinessRule,
+  getBusinessRuleByKey,
   proposeBusinessRuleVersion,
   proposeNewBusinessRule,
   linkEvidenceToVersion,

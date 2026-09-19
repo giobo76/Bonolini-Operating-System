@@ -1,10 +1,10 @@
 # pricing — deterministic, conservative price calculation
 
-**Status:** Core v1 only — point-to-point (fixed airport fares, Como-Tirano, generic km), customer type, minimum fare, toll estimate, hospital waiting-time rule. Hourly/disposal, night/holiday surcharge, GetTransfer, and Viator are all recognized but deliberately return `manual_required` — no formula exists yet for any of them. See "Not implemented" below.
+**Status:** Core v1 (point-to-point fixed airport fares, Como-Tirano, generic km, customer type, minimum fare, toll estimate, hospital waiting-time rule), plus Phase 2 of the BOS Business Intelligence + Autonomy Model: every one of those tariff *values* now lives in the Business Rules system (`../business-rules`) instead of a hardcoded constant — see "Business Rules (Phase 2)" below. Hourly/disposal, night/holiday surcharge, GetTransfer, and Viator are all still recognized but deliberately return `manual_required` — no formula exists for any of them, and Phase 2 deliberately did not invent one (see that section).
 
-**Owns:** nothing persistent — this module has no database access at all. `calculatePrice()` is a pure function: same input always produces the same output, no side effects.
+**Owns:** nothing persistent in `service.ts` itself — `calculatePrice()` is still a pure function: same `(input, rates)` always produces the same output, no side effects, no I/O. The one deliberate exception is `rates-provider.ts`, which does read the database (via `../business-rules`) specifically to assemble the `rates` argument `calculatePrice()` consumes — see below.
 
-**Exposes:** `calculatePrice`, `determineCustomerType`, and every type in `schema.ts`.
+**Exposes:** `calculatePrice`, `determineCustomerType`, `resolvePricingRates`, and every type in `schema.ts` (including `PricingRates`, `DEFAULT_PRICING_RATES`, and the six pricing rule content schemas/keys).
 
 **Emits / Listens to:** — (pure module, not wired into any event flow).
 
@@ -45,6 +45,31 @@ Every constant here is recovered verbatim from `CChiefGrowthAI/ai/booking_bot/pr
 - Viator pass-through (no technical mechanism yet exists to receive the external price)
 - Hospital waiting rate for foreign customers
 
+## Business Rules (Phase 2)
+
+Every tariff *value* in the table above (not the route/destination *classification* logic that decides which value applies — that stays hardcoded, unchanged, in `service.ts`) is now a `category: "pricing"` Business Rule (see `../business-rules`), read at call time by `rates-provider.ts::resolvePricingRates(tenantId)` and assembled into a plain `PricingRates` object:
+
+| Business Rule key | Replaces |
+|---|---|
+| `pricing.minimum_fare` | `MINIMUM_FARE_CENTS` |
+| `pricing.toll_rate` | `TOLL_RATE_PER_KM` |
+| `pricing.distance_rate` | the four `kmRate()` values (italian/foreign × ≤100km/>100km) |
+| `pricing.fixed_fare.airport` | `FIXED_FARE_TABLE_CENTS` |
+| `pricing.fixed_fare.foreign_tirano` | `FOREIGN_FIXED_TIRANO_FARE_CENTS` |
+| `pricing.hospital_waiting.italian` | the italian hospital-waiting free-minutes/rate |
+
+**`calculatePrice(input, rates)` is still pure and synchronous** — `rates` is a plain value the caller resolved beforehand, never fetched inside `calculatePrice()` itself. The second argument defaults to `DEFAULT_PRICING_RATES` (the exact same numbers every constant above used to hold), which is *why* every pre-Phase-2 test/caller that never passed a `rates` argument at all keeps computing the identical price — not "an equivalent one," the identical one, by construction.
+
+**Fallback/safety (never invent a price):**
+- A missing rule, or one with no effective version yet (the expected state before migration `0022` has been applied) → `resolveRuleSlot` falls back to that one slot's value in `DEFAULT_PRICING_RATES`, logs it (`log("pricing.rates_provider.fallback", ...)`), and records `source: "fallback_default"` in the returned provenance — explicit, temporary (until the rule/version exists), and never silent.
+- A rule that exists, has an effective version, but whose `content` fails its own zod schema — or, more than one effective version existing for the same rule (should never happen given business-rules' own state machine) — is a real configuration error, never masked by the fallback above: `resolvePricingRates` returns `rates: null` and logs via `captureException` (`pricing.rates_provider.invalid_content` / `.inconsistent_rule`). `calculatePrice(input, null)` then returns a normal `manual_required` result with `manualRequiredReason: "pricing_rules_invalid"` — no price is ever computed from data that couldn't be trusted.
+
+**Provenance:** every resolution returns, per rule, which source supplied it (`business_rule` with the real `ruleId`/`versionId`/`versionNumber`, or `fallback_default` with why) — `transfer-requests::runPricingForTransferRequest` stores this as `pricingBreakdown.pricingRuleProvenance`, ready for a future "show which rule you applied and why" workflow without needing to touch the pricing engine again.
+
+**Governance:** the BOS can read these rules, apply them (implicitly, by this module existing), analyze them, and propose a new version (`../business-rules`'s `proposeBusinessRuleVersion`/`proposeNewBusinessRule`) — it can never change the price, modify an effective rule, or approve/activate its own proposal. Every change still goes through the founder via `../business-rules`'s `approve`/`reject`. See that module's own README for the full state machine.
+
+**GetTransfer/Viator are deliberately absent from the Business Rules system** — `calculatePrice()` returns `manual_required` for both channels unconditionally (no formula, no constant, in the pre-Phase-2 code or after it). Nothing was migrated for them because nothing existed to migrate; inventing a rule for a formula that was never there would itself be the "guessed price" this whole system exists to prevent.
+
 ## Wiring
 
-Called from `transfer-requests::runPricingForTransferRequest`, which persists the result onto `transfer_requests.pricingStatus`/`calculatedAmountCents`/`pricingBreakdown`, itself triggered automatically by the live WhatsApp webhook via `processTransferRequestForMessageAndPrice`. See [`transfer-requests/README.md`](../transfer-requests/README.md#pricing-connection).
+Called from `transfer-requests::runPricingForTransferRequest`, which resolves `rates` once per pricing attempt (`resolvePricingRates`) and persists the result onto `transfer_requests.pricingStatus`/`calculatedAmountCents`/`pricingBreakdown` (now including `pricingRuleProvenance`/`pricingRulesUsedFallback`), itself triggered automatically by the live WhatsApp webhook via `processTransferRequestForMessageAndPrice`. See [`transfer-requests/README.md`](../transfer-requests/README.md#pricing-connection).
