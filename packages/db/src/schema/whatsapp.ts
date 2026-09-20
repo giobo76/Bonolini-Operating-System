@@ -51,6 +51,16 @@ export const whatsappMessages = pgTable("whatsapp_messages", {
   // Original message text, verbatim, never altered — conserved
   // independently of whatever the parser extracts from it.
   rawText: text("raw_text").notNull(),
+  // Phase 3B — the business phone number Meta actually routed this
+  // message through (`value.metadata.phone_number_id`/`.display_phone_number`
+  // in the real webhook payload — see packages/core/src/whatsapp/schema.ts's
+  // extractMessages). Discovery/persistence only: nothing in this
+  // codebase sends WhatsApp messages, and these two columns are never
+  // read for that purpose here. Both nullable — Meta's own metadata block
+  // is optional in principle and every historical row predates this
+  // column existing at all; never backfilled, never guessed.
+  phoneNumberId: text("phone_number_id"),
+  displayPhoneNumber: text("display_phone_number"),
   // ParsedWhatsappMessage (packages/core/src/whatsapp/schema.ts), or null
   // if parsing hasn't run yet (non-text message types) or found nothing.
   // Every field nullable/absent by construction — the parser never invents

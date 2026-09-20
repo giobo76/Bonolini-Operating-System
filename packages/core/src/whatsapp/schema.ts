@@ -36,6 +36,17 @@ const whatsappChangeValueSchema = z
     // schema validation; the extraction step below simply finds nothing to
     // process for it.
     statuses: z.array(z.unknown()).optional(),
+    // Phase 3B — the business account/number Meta routed this change
+    // through (phone_number_id, display_phone_number). Deliberately
+    // z.unknown() here, not a typed object: this is discovery/persistence
+    // only (see extractPhoneNumberId/extractDisplayPhoneNumber below),
+    // and a malformed or unexpected shape here must never fail validation
+    // for the whole payload — every other message in the same delivery
+    // still needs to process normally. The real, defensive type-checking
+    // happens at extraction time instead, same discipline
+    // parsedWhatsappMessageSchema's dropEmptyStrings already applies one
+    // layer down.
+    metadata: z.unknown().optional(),
   })
   .passthrough();
 
@@ -74,6 +85,26 @@ export interface ExtractedWhatsappMessage {
   rawText: string | null;
   profileName: string | null;
   receivedAt: Date;
+  // Phase 3B — discovery/persistence only (see whatsapp/README.md's own
+  // "Hard constraints": no outbound capability is built from this).
+  // Both null whenever Meta's payload doesn't carry a `metadata` block, or
+  // carries one that doesn't have a valid (non-empty string) value for
+  // this specific field — never guessed, never defaulted to a previously
+  // seen value.
+  phoneNumberId: string | null;
+  displayPhoneNumber: string | null;
+}
+
+// Defensive extraction, not schema validation: `metadata` is typed
+// z.unknown() at the schema level specifically so a malformed shape here
+// never fails validation for the whole webhook payload (see
+// whatsappChangeValueSchema's own comment). Mirrors dropEmptyStrings
+// below — a present-but-not-a-real-string value is treated exactly like
+// an absent one, never invented, never coerced.
+function extractMetadataStringField(metadata: unknown, field: "phone_number_id" | "display_phone_number"): string | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>)[field];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 // entry[].changes[].value.messages[] paired with the matching contacts[]
@@ -86,6 +117,12 @@ export function extractMessages(payload: WhatsappWebhookPayload): ExtractedWhats
     for (const change of entry.changes) {
       const messages = change.value.messages ?? [];
       const contacts = change.value.contacts ?? [];
+      // One metadata block per change (`value.metadata`), applied to
+      // every message extracted from it — Meta's own shape: `metadata`
+      // describes the business account/number the whole `value` block was
+      // routed through, never a per-message field.
+      const phoneNumberId = extractMetadataStringField(change.value.metadata, "phone_number_id");
+      const displayPhoneNumber = extractMetadataStringField(change.value.metadata, "display_phone_number");
 
       for (const message of messages) {
         const contact = contacts.find((c) => c.wa_id === message.from);
@@ -98,6 +135,8 @@ export function extractMessages(payload: WhatsappWebhookPayload): ExtractedWhats
           rawText: message.type === "text" ? (message.text?.body ?? null) : null,
           profileName: contact?.profile?.name ?? null,
           receivedAt: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
+          phoneNumberId,
+          displayPhoneNumber,
         });
       }
     }

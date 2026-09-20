@@ -382,6 +382,8 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
       rawText: "[TEST SIMULATION] transfer Malpensa -> Sondrio, 4 persone, 20 settembre alle 10:00, volo FR1234",
       profileName: null,
       receivedAt: new Date("2026-08-20T09:00:00Z"),
+      phoneNumberId: null,
+      displayPhoneNumber: null,
     });
     expect(inbound.status).toBe("processed");
     expect(inbound.clientId).not.toBeNull();
@@ -460,6 +462,8 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
       rawText: "[TEST SIMULATION] transfer Sondrio -> Malpensa, 4 persone, 20 settembre alle 10:00",
       profileName: null,
       receivedAt: new Date("2026-08-20T09:00:00Z"),
+      phoneNumberId: null,
+      displayPhoneNumber: null,
     });
     expect(inbound.status).toBe("processed");
 
@@ -558,6 +562,8 @@ describe("WhatsApp -> Transfer Request -> Pricing — controlled simulation", ()
       rawText: "[TEST SIMULATION] transfer Sondrio -> Livigno, 4 persone, 25 settembre alle 14:30",
       profileName: null,
       receivedAt: new Date("2026-08-20T09:00:00Z"),
+      phoneNumberId: null,
+      displayPhoneNumber: null,
     });
     expect(inbound.status).toBe("processed");
     expect(inbound.clientId).not.toBeNull();

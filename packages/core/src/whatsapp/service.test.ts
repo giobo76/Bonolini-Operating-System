@@ -153,6 +153,8 @@ function inboundMessage(overrides: Partial<ExtractedWhatsappMessage> = {}): Extr
     rawText: "Hi, I need a transfer from Milan to Tirano tomorrow for 4 people",
     profileName: null,
     receivedAt: new Date("2026-08-18T10:00:00Z"),
+    phoneNumberId: null,
+    displayPhoneNumber: null,
     ...overrides,
   };
 }
@@ -282,6 +284,64 @@ describe("processInboundMessage", () => {
 
     expect(fakeState.insertedClients).toHaveLength(1);
     expect(fakeState.whatsappMessages).toHaveLength(1);
+  });
+
+  // Phase 3B — discovery/persistence of phone_number_id/display_phone_number.
+  describe("phoneNumberId / displayPhoneNumber persistence", () => {
+    // 2. entrambi persistiti correttamente, associati al messaggio corretto
+    it("2: persists both fields on the inserted whatsapp_messages row", async () => {
+      await processInboundMessage(
+        inboundMessage({ waMessageId: "wamid.META1", phoneNumberId: "1234567890", displayPhoneNumber: "393280000000" }),
+      );
+
+      expect(fakeState.whatsappMessages).toHaveLength(1);
+      expect(fakeState.whatsappMessages[0]!.phoneNumberId).toBe("1234567890");
+      expect(fakeState.whatsappMessages[0]!.displayPhoneNumber).toBe("393280000000");
+      expect(fakeState.whatsappMessages[0]!.whatsappMessageId).toBe("wamid.META1"); // same message, correctly associated
+    });
+
+    // 3/4. metadata assente — mai inventato, resta null
+    it("3/4: persists null for both fields when Meta sent no metadata", async () => {
+      await processInboundMessage(inboundMessage({ waMessageId: "wamid.NOMETA" }));
+
+      expect(fakeState.whatsappMessages[0]!.phoneNumberId).toBeNull();
+      expect(fakeState.whatsappMessages[0]!.displayPhoneNumber).toBeNull();
+    });
+
+    // 6. il resto del comportamento (client, idempotenza, parsing) resta invariato
+    it("6: normal inbound processing (client resolution, parsing) is unaffected by carrying metadata", async () => {
+      const withMeta = await processInboundMessage(
+        inboundMessage({ waMessageId: "wamid.WITHMETA", phoneNumberId: "1234567890" }),
+      );
+
+      expect(withMeta.status).toBe("processed");
+      expect(withMeta.clientId).not.toBeNull();
+      expect(fakeState.insertedClients).toHaveLength(1); // same client-resolution behavior as every other test here
+    });
+
+    // 8. una riga storica (pre-migration, senza le due colonne) continua a
+    // essere gestita correttamente dal percorso di idempotenza — nessun
+    // errore, nessun campo inventato per colmare il vuoto.
+    it("8: a historical row with no phoneNumberId/displayPhoneNumber column value is handled without error", async () => {
+      fakeState.whatsappMessages = [
+        {
+          id: "msg-historical",
+          tenantId: "tenant-1",
+          whatsappMessageId: "wamid.HISTORICAL",
+          clientId: "client-existing",
+          parsed: { pickup: "Milan" },
+          rawText: "orig",
+          // Deliberately no phoneNumberId/displayPhoneNumber keys at all —
+          // simulates a row written before this migration existed.
+        },
+      ];
+
+      const result = await processInboundMessage(inboundMessage({ waMessageId: "wamid.HISTORICAL" }));
+
+      expect(result.status).toBe("duplicate");
+      expect(result.messageId).toBe("msg-historical");
+      expect(fakeState.whatsappMessages).toHaveLength(1); // no error, no new row, no invented backfill
+    });
   });
 
   it("12: raw_text is stored verbatim, exactly as received", async () => {

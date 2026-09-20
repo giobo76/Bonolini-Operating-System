@@ -172,6 +172,12 @@ export async function processInboundMessage(
       fromPhone: message.fromPhone,
       rawText: message.rawText ?? `[messaggio di tipo "${message.type}" non supportato in questa fase]`,
       receivedAt: message.receivedAt,
+      // Phase 3B — discovery/persistence only, associated with the exact
+      // message it arrived with; see ExtractedWhatsappMessage's own doc
+      // comment for why these are null whenever Meta's payload doesn't
+      // carry a valid value. Never read for sending anything.
+      phoneNumberId: message.phoneNumberId,
+      displayPhoneNumber: message.displayPhoneNumber,
     })
     // Composite target matching the (tenant_id, whatsapp_message_id) unique
     // index (0008) — a message id is only guaranteed unique within the
