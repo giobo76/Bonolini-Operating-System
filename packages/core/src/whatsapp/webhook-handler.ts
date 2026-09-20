@@ -1,10 +1,14 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { log, captureException } from "../observability";
-import { whatsappWebhookPayloadSchema, extractMessages } from "./schema";
+import { whatsappWebhookPayloadSchema, extractMessages, extractStatuses } from "./schema";
 import { processInboundMessage } from "./service";
 import type { ParsedWhatsappMessage } from "./schema";
 import { processTransferRequestForMessageAndPrice } from "../transfer-requests";
 import type { TransferRequestExtractedFields } from "../transfer-requests";
+import { recordProviderDeliveryStatus } from "../communications";
+
+type KnownProviderStatus = "sent" | "delivered" | "read" | "failed";
+const KNOWN_PROVIDER_STATUSES = new Set<string>(["sent", "delivered", "read", "failed"]);
 
 // The transport-framework-agnostic core of GET/POST
 // /api/whatsapp/webhook (apps/transfer-admin/app/api/whatsapp/webhook/
@@ -152,6 +156,42 @@ export async function handleWhatsappWebhookRequest(
       }
     } catch (error) {
       captureException(error, "whatsapp.webhook.message_failed");
+    }
+  }
+
+  // Phase 3B Step 3 — delivery-status callbacks (statuses[]), always in
+  // the same POST body a real Meta delivery can carry alongside (or
+  // instead of) messages[]. Fail-soft per status, same discipline as the
+  // messages loop above: one malformed/unknown status callback must never
+  // drop the rest of the batch or cause Meta to retry the whole payload.
+  // recordProviderDeliveryStatus itself never throws for an unknown
+  // providerMessageId (returns null) — this try/catch only guards against
+  // a genuinely unexpected failure (e.g. a transient DB error).
+  const statuses = extractStatuses(parsed.data);
+  if (statuses.length > 0) {
+    log("whatsapp.webhook.statuses_received", { statusCount: statuses.length });
+  }
+  for (const status of statuses) {
+    // Only the 4 statuses this codebase understands are ever acted on —
+    // an unrecognized value from Meta (a future addition to their API) is
+    // logged and skipped, never guessed into one of the known 4.
+    if (!KNOWN_PROVIDER_STATUSES.has(status.status)) {
+      log("whatsapp.webhook.status_unrecognized", { providerMessageId: status.providerMessageId, status: status.status });
+      continue;
+    }
+    try {
+      const updated = await recordProviderDeliveryStatus(
+        status.providerMessageId,
+        status.status as KnownProviderStatus,
+        status.occurredAt,
+      );
+      log("whatsapp.webhook.status_processed", {
+        providerMessageId: status.providerMessageId,
+        status: status.status,
+        matched: updated !== null,
+      });
+    } catch (error) {
+      captureException(error, "whatsapp.webhook.status_failed");
     }
   }
 

@@ -145,6 +145,58 @@ export function extractMessages(payload: WhatsappWebhookPayload): ExtractedWhats
   return extracted;
 }
 
+// ── Delivery-status callbacks (Phase 3B Step 3) ───────────────────────────
+// Meta's webhook delivers status updates through the same entry[].changes[]
+// shape as inbound messages, but as change.value.statuses[] instead of
+// .messages[] — see whatsappChangeValueSchema's own `statuses` field
+// (already accepted, previously never read). Each item's `id` is the exact
+// WAMID returned by the original send call (communications.provider_message_id),
+// which is what correlates a callback back to the right communication —
+// see packages/core/src/communications/service.ts's
+// recordProviderDeliveryStatus. Never used to send anything; read-only
+// correlation.
+export interface WhatsappStatusCallback {
+  providerMessageId: string;
+  status: string;
+  occurredAt: Date;
+}
+
+// Defensive extraction, not schema validation — same discipline as
+// extractMetadataStringField above: `statuses` is typed z.array(z.unknown())
+// at the schema level specifically so a malformed status item never fails
+// validation for the whole webhook payload. A status item missing `id` or
+// `status` (or carrying the wrong type for either) is silently skipped,
+// never guessed.
+function extractStatusCallback(raw: unknown): WhatsappStatusCallback | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== "string" || value.id.trim().length === 0) return null;
+  if (typeof value.status !== "string" || value.status.trim().length === 0) return null;
+
+  const timestampMs = typeof value.timestamp === "string" ? Number(value.timestamp) * 1000 : NaN;
+  return {
+    providerMessageId: value.id,
+    status: value.status,
+    occurredAt: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
+  };
+}
+
+export function extractStatuses(payload: WhatsappWebhookPayload): WhatsappStatusCallback[] {
+  const extracted: WhatsappStatusCallback[] = [];
+
+  for (const entry of payload.entry) {
+    for (const change of entry.changes) {
+      const statuses = change.value.statuses ?? [];
+      for (const raw of statuses) {
+        const status = extractStatusCallback(raw);
+        if (status) extracted.push(status);
+      }
+    }
+  }
+
+  return extracted;
+}
+
 // ── Parsed message data (Claude extraction output) ───────────────────────
 // Every field optional/nullable by design — see parser.ts's system prompt.
 // "Do not invent missing information" is enforced by never marking a field

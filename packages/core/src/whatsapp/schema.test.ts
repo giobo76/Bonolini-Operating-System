@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { whatsappWebhookPayloadSchema, extractMessages, parsedWhatsappMessageSchema } from "./schema";
+import { whatsappWebhookPayloadSchema, extractMessages, extractStatuses, parsedWhatsappMessageSchema } from "./schema";
 
 // 1. Schema validation for the inbound webhook payload + extraction logic
 // that flattens Meta's entry[].changes[].value shape into per-message
@@ -302,6 +302,87 @@ describe("extractMessages — metadata (phone_number_id / display_phone_number)"
     expect(keys).not.toContain("metadata");
     expect(keys).not.toContain("unexpected_field");
     expect(JSON.stringify(messages[0])).not.toContain("should-not-leak");
+  });
+});
+
+// Phase 3B Step 3 — delivery-status callbacks (sent/delivered/read/failed).
+describe("extractStatuses", () => {
+  function statusPayload(statuses: unknown[]) {
+    return {
+      object: "whatsapp_business_account",
+      entry: [{ id: "entry-1", changes: [{ field: "messages", value: { statuses } }] }],
+    };
+  }
+
+  it("extracts a well-formed 'delivered' status callback", () => {
+    const payload = whatsappWebhookPayloadSchema.parse(
+      statusPayload([{ id: "wamid.ABC123", status: "delivered", timestamp: "1755500000", recipient_id: "393281234567" }]),
+    );
+
+    const statuses = extractStatuses(payload);
+
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ providerMessageId: "wamid.ABC123", status: "delivered" });
+    expect(statuses[0]!.occurredAt.getTime()).toBe(1755500000 * 1000);
+  });
+
+  it.each(["sent", "delivered", "read", "failed"])("extracts a '%s' status", (status) => {
+    const payload = whatsappWebhookPayloadSchema.parse(
+      statusPayload([{ id: "wamid.X", status, timestamp: "1755500000" }]),
+    );
+    expect(extractStatuses(payload)[0]!.status).toBe(status);
+  });
+
+  it("extracts every status when a payload carries more than one", () => {
+    const payload = whatsappWebhookPayloadSchema.parse(
+      statusPayload([
+        { id: "wamid.ONE", status: "sent", timestamp: "1755500000" },
+        { id: "wamid.TWO", status: "delivered", timestamp: "1755500100" },
+      ]),
+    );
+
+    const statuses = extractStatuses(payload);
+
+    expect(statuses.map((s) => s.providerMessageId)).toEqual(["wamid.ONE", "wamid.TWO"]);
+  });
+
+  it("returns an empty array for a messages-only payload (no statuses)", () => {
+    const payload = whatsappWebhookPayloadSchema.parse({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: "entry-1",
+          changes: [{ field: "messages", value: { messages: [{ from: "1", id: "wamid.M", timestamp: "1", type: "text" }] } }],
+        },
+      ],
+    });
+
+    expect(extractStatuses(payload)).toEqual([]);
+  });
+
+  it("skips a status item missing 'id', never inventing a providerMessageId", () => {
+    const payload = whatsappWebhookPayloadSchema.parse(statusPayload([{ status: "delivered", timestamp: "1755500000" }]));
+    expect(extractStatuses(payload)).toEqual([]);
+  });
+
+  it("skips a status item missing 'status', never guessing one", () => {
+    const payload = whatsappWebhookPayloadSchema.parse(statusPayload([{ id: "wamid.X", timestamp: "1755500000" }]));
+    expect(extractStatuses(payload)).toEqual([]);
+  });
+
+  it("never fails validation for the whole payload when a status item is malformed", () => {
+    const result = whatsappWebhookPayloadSchema.safeParse(statusPayload(["not-an-object", 42, null]));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(extractStatuses(result.data)).toEqual([]);
+    }
+  });
+
+  it("falls back to the current time when timestamp is missing/invalid, never a fabricated past/future date silently trusted as real", () => {
+    const payload = whatsappWebhookPayloadSchema.parse(statusPayload([{ id: "wamid.X", status: "sent" }]));
+    const before = Date.now();
+    const [result] = extractStatuses(payload);
+    expect(result!.occurredAt.getTime()).toBeGreaterThanOrEqual(before);
   });
 });
 

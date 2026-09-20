@@ -120,6 +120,25 @@ async function findOrCreateClientByPhone(
   return { client: existing, isNew: false };
 }
 
+// Phase 3B Step 3 — the deterministic source of truth for WhatsApp's 24h
+// customer service window (packages/core/src/communications's
+// WhatsAppCloudApiProvider). Deliberately NOT deals.lastMessageAt: Meta's
+// own session window is per WHATSAPP CONVERSATION (i.e. per client phone
+// number), a concept this codebase has no notion of independent from
+// "which deal did this message get matched to" — a client can have
+// multiple simultaneous deals (Phase 2.5), and a message answered on a
+// DIFFERENT deal would still keep the WhatsApp session open for this one,
+// something deals.lastMessageAt alone cannot reflect. Queries the real,
+// per-message received_at directly instead of trusting a derived value.
+export async function getLastInboundReceivedAt(tenantId: string, clientId: string): Promise<Date | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({ maxReceivedAt: sql<Date | null>`max(${whatsappMessages.receivedAt})` })
+    .from(whatsappMessages)
+    .where(and(eq(whatsappMessages.tenantId, tenantId), eq(whatsappMessages.clientId, clientId)));
+  return row?.maxReceivedAt ?? null;
+}
+
 // Only fills fields that are currently empty on the client — never
 // overwrites existing data (explicit constraint). fullName is deliberately
 // never touched by this path once a client row exists, even if it was

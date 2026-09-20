@@ -13,7 +13,13 @@
 // changes) do not affect POST /{page-id}/feed. Update this constant (not a
 // scattered literal elsewhere) the next time this is verified against
 // Meta's docs — do not bump it reflexively without checking.
-const GRAPH_API_VERSION = "v26.0";
+// Exported (Phase 3B Step 3) so packages/core/src/communications's
+// WhatsApp Cloud API provider reuses the exact same, already-verified
+// Graph API version instead of duplicating the literal — WhatsApp Cloud
+// API and the Facebook/Instagram endpoints above are the same Graph API
+// family. Bump this one constant (with the same "verify against Meta's
+// changelog first" discipline) and every caller picks it up.
+export const GRAPH_API_VERSION = "v26.0";
 
 export interface PublishPostResult {
   ok: boolean;

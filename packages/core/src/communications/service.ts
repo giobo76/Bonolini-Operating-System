@@ -239,6 +239,8 @@ export async function executeCommunication(
       to: content.to,
       body: content.body,
       idempotencyKey: existing.idempotencyKey,
+      tenantId,
+      clientId: existing.clientId,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -262,23 +264,89 @@ export async function executeCommunication(
     return assertOne(rows, "executeCommunication");
   }
 
-  // VERIFICATION: a real provider's own "sent" result already carries a
-  // providerMessageId — the one and only fact available to confirm
-  // against (no real provider exists yet to poll a delivery-status API
-  // with; see provider.ts). Never invented: verification here means "the
-  // configured provider itself reported this succeeded", nothing stronger
-  // is claimed.
-  const verified = Boolean(result.providerMessageId);
+  // EXECUTED, not verified (Phase 3B Step 3 — the founder's own explicit
+  // correction): a provider's synchronous "sent" result only proves the
+  // provider ACCEPTED the request (for WhatsApp Cloud API, messages[0].id
+  // on the POST response) — it is never proof of delivery or read.
+  // "executed" is the honest ceiling of what this function alone can ever
+  // claim. Reaching "verified" requires a real, separate confirmation —
+  // see recordProviderDeliveryStatus below, driven by Meta's own
+  // asynchronous status webhook callbacks
+  // (packages/core/src/whatsapp/webhook-handler.ts).
   const rows = await db
     .update(communications)
     .set({
-      status: verified ? "verified" : "execution_failed",
+      status: "executed",
       provider: provider.name,
       providerMessageId: result.providerMessageId,
-      error: verified ? null : "provider reported 'sent' but returned no providerMessageId to verify against",
+      error: null,
       updatedAt: new Date(),
     })
     .where(and(eq(communications.tenantId, tenantId), eq(communications.id, id)))
     .returning();
   return assertOne(rows, "executeCommunication");
+}
+
+// Correlates a Meta (or any future provider's) delivery-status callback
+// back to the communication it belongs to. No tenant scoping: the webhook
+// that calls this has no tenant context of its own (same reason
+// whatsapp/service.ts's processInboundMessage resolves its own tenant) —
+// providerMessageId (a WAMID) is Meta-global-unique by its own spec, not
+// merely tenant-unique, so this is safe.
+export async function findCommunicationByProviderMessageId(providerMessageId: string): Promise<Communication | null> {
+  const db = getDb();
+  const [row] = await db.select().from(communications).where(eq(communications.providerMessageId, providerMessageId));
+  return row ?? null;
+}
+
+const DELIVERY_CONFIRMED_STATUSES = new Set(["delivered", "read"]);
+
+// The other half of "executed != verified": called only from
+// packages/core/src/whatsapp/webhook-handler.ts's statuses[] handling,
+// never from executeCommunication itself. Fail-soft by design (returns
+// null instead of throwing) for an unknown providerMessageId — a status
+// callback for a message this system didn't send (or a duplicate Meta
+// retry of an already-processed one) must never break the webhook's ACK
+// to Meta.
+//
+// Idempotent by construction: "sent" never changes `status` at all (just
+// records providerStatus — Meta's own confirmation of the same fact
+// `executed` already represents). "delivered"/"read" only advance
+// `status` to "verified" from "executed" specifically — a callback
+// arriving after the communication is already "verified" (e.g. "read"
+// after "delivered") or already terminal ("execution_failed"/"rejected")
+// only updates the raw providerStatus trail, never re-fires a transition
+// or a second verifiedAt write. "failed" only downgrades an "executed"
+// (not-yet-verified) row to "execution_failed" — never overwrites an
+// already-"verified" outcome, which represents a real confirmed delivery
+// that already happened.
+export async function recordProviderDeliveryStatus(
+  providerMessageId: string,
+  status: "sent" | "delivered" | "read" | "failed",
+  occurredAt: Date,
+): Promise<Communication | null> {
+  const existing = await findCommunicationByProviderMessageId(providerMessageId);
+  if (!existing) return null;
+
+  const db = getDb();
+  const patch: Record<string, unknown> = {
+    providerStatus: status,
+    providerStatusUpdatedAt: occurredAt,
+    updatedAt: new Date(),
+  };
+
+  if (DELIVERY_CONFIRMED_STATUSES.has(status) && existing.status === "executed") {
+    patch.status = "verified";
+    patch.verifiedAt = occurredAt;
+  } else if (status === "failed" && existing.status === "executed") {
+    patch.status = "execution_failed";
+    patch.error = "provider reported delivery failure via status callback";
+  }
+
+  const rows = await db
+    .update(communications)
+    .set(patch)
+    .where(eq(communications.id, existing.id))
+    .returning();
+  return assertOne(rows, "recordProviderDeliveryStatus");
 }

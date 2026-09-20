@@ -13,6 +13,14 @@ vi.mock("../transfer-requests", () => ({
   processTransferRequestForMessageAndPrice: (...args: unknown[]) => processTransferRequestForMessageAndPrice(...args),
 }));
 
+// Phase 3B Step 3 — mocked the same way: this file exercises the webhook's
+// own orchestration of the statuses[] loop, never communications/service.ts's
+// own already-tested recordProviderDeliveryStatus logic.
+const recordProviderDeliveryStatus = vi.fn();
+vi.mock("../communications", () => ({
+  recordProviderDeliveryStatus: (...args: unknown[]) => recordProviderDeliveryStatus(...args),
+}));
+
 const { verifyMetaSignature, handleWhatsappVerification, handleWhatsappWebhookRequest } = await import(
   "./webhook-handler"
 );
@@ -94,6 +102,8 @@ describe("handleWhatsappWebhookRequest (POST)", () => {
     });
     processTransferRequestForMessageAndPrice.mockReset();
     processTransferRequestForMessageAndPrice.mockResolvedValue({ status: "collecting_info", pricingStatus: "not_priced" });
+    recordProviderDeliveryStatus.mockReset();
+    recordProviderDeliveryStatus.mockResolvedValue(null);
   });
 
   it("5: processes the payload and returns 200 when the signature is valid", async () => {
@@ -312,5 +322,94 @@ describe("14: no secrets ever reach the log output", () => {
     const logged = allLoggedText();
     expect(logged).not.toContain(APP_SECRET);
     expect(logged).not.toContain(VALID_PAYLOAD);
+  });
+});
+
+// Phase 3B Step 3 — statuses[] callback wiring (delivery-status
+// correlation, fail-soft per status). recordProviderDeliveryStatus's own
+// logic is tested in communications/service.test.ts; this file only
+// proves the webhook correctly extracts and forwards status callbacks.
+describe("handleWhatsappWebhookRequest (POST) — delivery-status callbacks", () => {
+  beforeEach(() => {
+    processInboundMessage.mockReset();
+    processInboundMessage.mockResolvedValue({ status: "processed", tenantId: "tenant-1", messageId: "msg-1", clientId: "client-1", parsed: {} });
+    processTransferRequestForMessageAndPrice.mockReset();
+    processTransferRequestForMessageAndPrice.mockResolvedValue({ status: "collecting_info", pricingStatus: "not_priced" });
+    recordProviderDeliveryStatus.mockReset();
+    recordProviderDeliveryStatus.mockResolvedValue(null);
+  });
+
+  function statusOnlyPayload(status: string, id = "wamid.ABC123") {
+    return JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ id: "entry-1", changes: [{ field: "messages", value: { statuses: [{ id, status, timestamp: "1755500000" }] } }] }],
+    });
+  }
+
+  it("forwards a 'delivered' status callback to recordProviderDeliveryStatus with the correct providerMessageId", async () => {
+    const body = statusOnlyPayload("delivered");
+    await handleWhatsappWebhookRequest({ rawBody: body, signatureHeader: sign(body, APP_SECRET), appSecret: APP_SECRET });
+
+    expect(recordProviderDeliveryStatus).toHaveBeenCalledWith("wamid.ABC123", "delivered", expect.any(Date));
+  });
+
+  it.each(["sent", "delivered", "read", "failed"])("forwards a '%s' status callback", async (status) => {
+    const body = statusOnlyPayload(status);
+    await handleWhatsappWebhookRequest({ rawBody: body, signatureHeader: sign(body, APP_SECRET), appSecret: APP_SECRET });
+
+    expect(recordProviderDeliveryStatus).toHaveBeenCalledWith("wamid.ABC123", status, expect.any(Date));
+  });
+
+  it("never calls recordProviderDeliveryStatus for a plain inbound message (no statuses present)", async () => {
+    await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(recordProviderDeliveryStatus).not.toHaveBeenCalled();
+  });
+
+  it("still returns 200 and does not fail the batch when recordProviderDeliveryStatus throws", async () => {
+    recordProviderDeliveryStatus.mockRejectedValueOnce(new Error("db down"));
+    const body = statusOnlyPayload("delivered");
+
+    const result = await handleWhatsappWebhookRequest({ rawBody: body, signatureHeader: sign(body, APP_SECRET), appSecret: APP_SECRET });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: true });
+  });
+
+  it("skips an unrecognized status value without calling recordProviderDeliveryStatus", async () => {
+    const body = statusOnlyPayload("some_future_meta_status");
+    await handleWhatsappWebhookRequest({ rawBody: body, signatureHeader: sign(body, APP_SECRET), appSecret: APP_SECRET });
+
+    expect(recordProviderDeliveryStatus).not.toHaveBeenCalled();
+  });
+
+  it("processes both a message and a status callback carried in the same webhook delivery", async () => {
+    const body = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: "entry-1",
+          changes: [
+            {
+              field: "messages",
+              value: {
+                contacts: [{ wa_id: "393281234567" }],
+                messages: [{ from: "393281234567", id: "wamid.NEW", timestamp: "1755500000", type: "text", text: { body: "Hi" } }],
+                statuses: [{ id: "wamid.OLD", status: "read", timestamp: "1755500100" }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await handleWhatsappWebhookRequest({ rawBody: body, signatureHeader: sign(body, APP_SECRET), appSecret: APP_SECRET });
+
+    expect(processInboundMessage).toHaveBeenCalledTimes(1);
+    expect(recordProviderDeliveryStatus).toHaveBeenCalledWith("wamid.OLD", "read", expect.any(Date));
   });
 });

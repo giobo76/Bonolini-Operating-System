@@ -7,6 +7,7 @@ export type { RealPostDataSnapshot, ServedRoute, TransferTypeLabel } from "./con
 export { validatePost } from "./validator";
 export type { PostValidationResult } from "./validator";
 export { socialPublishingInngestFunctions } from "./inngest-functions";
+export { GRAPH_API_VERSION } from "./meta-client";
 export type { SocialPost, NewSocialPost } from "@bos/db";
 
 // Module boundary rule (ADR 0002): other modules/apps import only from here.

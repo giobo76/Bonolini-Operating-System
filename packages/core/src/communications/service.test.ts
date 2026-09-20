@@ -145,6 +145,9 @@ vi.mock("@bos/db", () => {
           rejectedAt: null,
           provider: null,
           providerMessageId: null,
+          providerStatus: null,
+          providerStatusUpdatedAt: null,
+          verifiedAt: null,
           error: null,
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -182,6 +185,8 @@ const {
   rejectCommunication,
   executeCommunication,
   getCommunication,
+  findCommunicationByProviderMessageId,
+  recordProviderDeliveryStatus,
 } = await import("./service");
 const { NotConfiguredOutboundProvider } = await import("./provider");
 import type { OutboundProvider, OutboundSendResult } from "./provider";
@@ -404,16 +409,32 @@ describe("submitCommunicationForApproval", () => {
 
 // 3. approval -> execution
 describe("approveCommunication + executeCommunication", () => {
-  it("3: approval then execution reaches 'verified' with a real (test) provider", async () => {
+  it("3: approval then execution reaches 'executed' (never 'verified' yet) with a real (test) provider", async () => {
     const submitted = await prepareAndSubmit();
     const approved = await approveCommunication(TENANT, submitted.id, ADMIN);
     expect(approved.status).toBe("approved");
     expect(approved.approvedBy).toBe(ADMIN);
 
     const executed = await executeCommunication(TENANT, submitted.id, new FakeSuccessProvider());
-    expect(executed.status).toBe("verified");
+    // 17. executed non diventa automaticamente verified — messages[0].id
+    // only proves the provider ACCEPTED the send, never delivery/read.
+    expect(executed.status).toBe("executed");
     expect(executed.providerMessageId).toBe("wamid.FAKE123");
     expect(executed.provider).toBe("fake_success");
+    expect(executed.verifiedAt).toBeNull();
+  });
+
+  // 17/18. verified solo dopo una conferma reale del provider (status callback)
+  it("17/18: only a 'delivered' or 'read' status callback moves an executed communication to verified", async () => {
+    const submitted = await prepareAndSubmit();
+    await approveCommunication(TENANT, submitted.id, ADMIN);
+    const executed = await executeCommunication(TENANT, submitted.id, new FakeSuccessProvider());
+    expect(executed.status).toBe("executed");
+
+    const delivered = await recordProviderDeliveryStatus("wamid.FAKE123", "delivered", new Date("2026-09-21T10:00:00Z"));
+    expect(delivered?.status).toBe("verified");
+    expect(delivered?.verifiedAt).toEqual(new Date("2026-09-21T10:00:00Z"));
+    expect(delivered?.providerStatus).toBe("delivered");
   });
 
   // 4. execution retry idempotente
@@ -478,21 +499,24 @@ describe("audit fields", () => {
   it("13: every required audit field is present on the final row", async () => {
     const submitted = await prepareAndSubmit();
     await approveCommunication(TENANT, submitted.id, ADMIN);
-    const executed = await executeCommunication(TENANT, submitted.id, new FakeSuccessProvider());
+    await executeCommunication(TENANT, submitted.id, new FakeSuccessProvider());
+    const verified = await recordProviderDeliveryStatus("wamid.FAKE123", "delivered", new Date("2026-09-21T10:00:00Z"));
 
-    expect(executed.tenantId).toBe(TENANT);
-    expect(executed.dealId).toBe(DEAL);
-    expect(executed.quoteId).toBe(QUOTE);
-    expect(executed.agent).toBe("operations");
-    expect(executed.action).toBe("quote_offer");
-    expect(executed.policyDecision).not.toBeNull();
-    expect(executed.approvedBy).toBe(ADMIN);
-    expect(executed.approvedAt).not.toBeNull();
-    expect(executed.status).toBe("verified");
-    expect(executed.createdAt).toBeInstanceOf(Date);
-    expect(executed.updatedAt).toBeInstanceOf(Date);
-    expect(executed.providerMessageId).toBe("wamid.FAKE123");
-    expect(executed.error).toBeNull();
+    expect(verified?.tenantId).toBe(TENANT);
+    expect(verified?.dealId).toBe(DEAL);
+    expect(verified?.quoteId).toBe(QUOTE);
+    expect(verified?.agent).toBe("operations");
+    expect(verified?.action).toBe("quote_offer");
+    expect(verified?.policyDecision).not.toBeNull();
+    expect(verified?.approvedBy).toBe(ADMIN);
+    expect(verified?.approvedAt).not.toBeNull();
+    expect(verified?.status).toBe("verified");
+    expect(verified?.verifiedAt).not.toBeNull();
+    expect(verified?.providerStatus).toBe("delivered");
+    expect(verified?.createdAt).toBeInstanceOf(Date);
+    expect(verified?.updatedAt).toBeInstanceOf(Date);
+    expect(verified?.providerMessageId).toBe("wamid.FAKE123");
+    expect(verified?.error).toBeNull();
   });
 });
 
@@ -528,5 +552,101 @@ describe("customer-reported payment stays unverified (Phase 2.5 boundary)", () =
     // deals write function (recordCustomerReportedPayment, advanceDealStatus,
     // closeDeal), so there is no code path here that could have touched it.
     expect(mockGetDeal).toHaveBeenCalled();
+  });
+});
+
+// Phase 3B Step 3 — provider delivery-status callbacks (Meta's async
+// webhook, correlated by providerMessageId — see
+// packages/core/src/whatsapp/webhook-handler.ts's statuses[] handling).
+describe("recordProviderDeliveryStatus", () => {
+  async function executedCommunication() {
+    const submitted = await prepareAndSubmit();
+    await approveCommunication(TENANT, submitted.id, ADMIN);
+    const executed = await executeCommunication(TENANT, submitted.id, new FakeSuccessProvider());
+    return executed;
+  }
+
+  // 12. status "sent"
+  it("12: a 'sent' callback records providerStatus but never changes communication status", async () => {
+    const executed = await executedCommunication();
+
+    const result = await recordProviderDeliveryStatus("wamid.FAKE123", "sent", new Date("2026-09-21T09:00:00Z"));
+
+    expect(result?.status).toBe("executed"); // unchanged — sent is not a delivery confirmation
+    expect(result?.providerStatus).toBe("sent");
+    expect(result?.verifiedAt).toBeNull();
+    expect(executed.id).toBe(result?.id);
+  });
+
+  // 13. status "delivered"
+  it("13: a 'delivered' callback moves an executed communication to verified", async () => {
+    await executedCommunication();
+
+    const result = await recordProviderDeliveryStatus("wamid.FAKE123", "delivered", new Date("2026-09-21T09:05:00Z"));
+
+    expect(result?.status).toBe("verified");
+    expect(result?.providerStatus).toBe("delivered");
+    expect(result?.verifiedAt).toEqual(new Date("2026-09-21T09:05:00Z"));
+  });
+
+  // 14. status "read" — also counts as a real delivery confirmation
+  it("14: a 'read' callback also moves an executed communication to verified", async () => {
+    await executedCommunication();
+
+    const result = await recordProviderDeliveryStatus("wamid.FAKE123", "read", new Date("2026-09-21T09:10:00Z"));
+
+    expect(result?.status).toBe("verified");
+    expect(result?.providerStatus).toBe("read");
+  });
+
+  it("a 'read' callback arriving after 'delivered' already verified it just updates providerStatus, never re-fires verifiedAt", async () => {
+    await executedCommunication();
+    const delivered = await recordProviderDeliveryStatus("wamid.FAKE123", "delivered", new Date("2026-09-21T09:05:00Z"));
+    const read = await recordProviderDeliveryStatus("wamid.FAKE123", "read", new Date("2026-09-21T09:20:00Z"));
+
+    expect(read?.status).toBe("verified");
+    expect(read?.providerStatus).toBe("read");
+    expect(read?.verifiedAt).toEqual(delivered?.verifiedAt); // unchanged — not overwritten by the later callback
+  });
+
+  // 15. status "failed"
+  it("15: a 'failed' callback downgrades an executed (not yet verified) communication to execution_failed", async () => {
+    await executedCommunication();
+
+    const result = await recordProviderDeliveryStatus("wamid.FAKE123", "failed", new Date("2026-09-21T09:00:00Z"));
+
+    expect(result?.status).toBe("execution_failed");
+    expect(result?.providerStatus).toBe("failed");
+    expect(result?.error).toBeTruthy();
+  });
+
+  it("a 'failed' callback never overwrites an already-verified (real, confirmed delivery) communication", async () => {
+    await executedCommunication();
+    await recordProviderDeliveryStatus("wamid.FAKE123", "delivered", new Date("2026-09-21T09:05:00Z"));
+
+    const result = await recordProviderDeliveryStatus("wamid.FAKE123", "failed", new Date("2026-09-21T09:06:00Z"));
+
+    expect(result?.status).toBe("verified"); // the earlier real confirmation stands
+  });
+
+  // 16. providerMessageId collega lo status alla communication corretta
+  it("16: correlates strictly by providerMessageId — a different id never matches", async () => {
+    await executedCommunication();
+
+    const result = await recordProviderDeliveryStatus("wamid.DOES-NOT-EXIST", "delivered", new Date());
+
+    expect(result).toBeNull();
+  });
+
+  it("findCommunicationByProviderMessageId finds the exact communication a providerMessageId belongs to", async () => {
+    const executed = await executedCommunication();
+
+    const found = await findCommunicationByProviderMessageId("wamid.FAKE123");
+
+    expect(found?.id).toBe(executed.id);
+  });
+
+  it("an unknown providerMessageId is a fail-soft no-op, never throws (a Meta retry or unrelated callback)", async () => {
+    await expect(recordProviderDeliveryStatus("wamid.UNKNOWN", "sent", new Date())).resolves.toBeNull();
   });
 });

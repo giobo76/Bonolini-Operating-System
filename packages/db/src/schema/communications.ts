@@ -74,6 +74,22 @@ export const communications = pgTable(
     // — never invented, never assumed; see communications/provider.ts.
     provider: text("provider"),
     providerMessageId: text("provider_message_id"),
+    // Phase 3B Step 3 — the delivery-status lifecycle a real provider's
+    // async callbacks report, distinct from `status` above:
+    // messages[0].id on the initial POST only proves Meta *accepted* the
+    // request (-> `status: "executed"`), never that a human received or
+    // read it. providerStatus carries Meta's own latest raw value
+    // (sent/delivered/read/failed) as reported via webhook status
+    // callbacks (see packages/core/src/whatsapp/webhook-handler.ts's
+    // statuses[] handling); `status` only ever advances to "verified" once
+    // one of those callbacks actually confirms delivery — see
+    // service.ts's recordProviderDeliveryStatus.
+    providerStatus: text("provider_status"),
+    providerStatusUpdatedAt: timestamp("provider_status_updated_at", { withTimezone: true }),
+    // Set exactly once, the moment status first reaches "verified" — never
+    // touched again after that (a later "read" callback updates
+    // providerStatus/providerStatusUpdatedAt but does not move this).
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
