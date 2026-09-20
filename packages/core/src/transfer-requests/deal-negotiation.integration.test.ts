@@ -390,9 +390,13 @@ vi.mock("../maps-distance", () => ({
     /como/i.test(pickup + destination) && /tirano/i.test(pickup + destination),
 }));
 
-const { processTransferRequestForMessageAndPrice, acceptTransferRequest, getTransferRequest } = await import(
-  "./service"
-);
+const {
+  processTransferRequestForMessageAndPrice,
+  acceptTransferRequest,
+  rejectTransferRequest,
+  getTransferRequest,
+} = await import("./service");
+const { closeDeal, getDeal } = await import("../deals");
 
 const TENANT = fakeState.tenant.id;
 // Real, masked-in-diagnosis phone: +91...11 — foreign (does not start with "39").
@@ -687,5 +691,164 @@ describe("regression: transfer_requests state machine is unchanged", () => {
     expect(priced.pricingStatus).toBe("fixed");
     expect(priced.calculatedAmountCents).toBe(30000);
     expect(priced.currency).toBe("EUR");
+  });
+});
+
+describe("cancelled deal + cancelled transfer_request — no automatic reuse of the old price", () => {
+  // Shared setup for tests 1-5: a deal whose one and only transfer_request
+  // gets rejected (cancelled) and whose deal is then explicitly cancelled
+  // too (closeDeal) — the exact shape reopenRecentClosedDealIfMatching
+  // reopens (deals/service.ts flips the deal back to 'open' but never
+  // rewrites the old, cancelled transfer_request under it).
+  async function setupCancelledDealAndTransferRequest() {
+    const priced = await sendMessage(
+      "Sondrio to Malpensa, 4 pax, 2026-09-20 10:00",
+      new Date("2026-09-01T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", date: "2026-09-20", time: "10:00", passengers: 4, intent: "transfer_request" },
+    );
+    expect(priced.status).toBe("pending_admin_approval");
+    expect(priced.calculatedAmountCents).toBe(25000); // foreign, Malpensa, 4 pax — the "old price"
+
+    await rejectTransferRequest(TENANT, priced.id);
+    const rejected = await getTransferRequest(TENANT, priced.id);
+    expect(rejected?.status).toBe("cancelled");
+
+    const dealId = priced.dealId!;
+    await closeDeal(TENANT, dealId, "cancelled");
+    const cancelledDeal = await getDeal(TENANT, dealId);
+    expect(cancelledDeal?.status).toBe("cancelled");
+
+    return { oldTransferRequestId: priced.id, dealId };
+  }
+
+  // 1. cancelled deal + cancelled transfer_request + nuovo messaggio
+  it("1: a new compatible message reopens the deal instead of creating an unrelated new one", async () => {
+    const { dealId } = await setupCancelledDealAndTransferRequest();
+
+    // Same route (needed for reopenRecentClosedDealIfMatching's strong
+    // match), no date/time/passengers yet — deliberately incomplete so
+    // pricing cannot possibly run on this first follow-up message.
+    const followUp = await sendMessage(
+      "Still interested in that Sondrio to Malpensa transfer",
+      new Date("2026-09-02T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", intent: "transfer_request" },
+    );
+
+    expect(followUp.dealId).toBe(dealId); // reopened, not a new deal
+    const reopenedDeal = await getDeal(TENANT, dealId);
+    expect(reopenedDeal?.status).toBe("open");
+  });
+
+  // 2. nuovo transfer_request creato
+  it("2: a genuinely new transfer_request is created, never the cancelled one reused", async () => {
+    const { oldTransferRequestId } = await setupCancelledDealAndTransferRequest();
+    const beforeCount = fakeState.transferRequests.length;
+
+    const followUp = await sendMessage(
+      "Still interested in that Sondrio to Malpensa transfer",
+      new Date("2026-09-02T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", intent: "transfer_request" },
+    );
+
+    expect(followUp.id).not.toBe(oldTransferRequestId);
+    expect(fakeState.transferRequests).toHaveLength(beforeCount + 1);
+    expect(followUp.status).toBe("collecting_info"); // fresh collection, not the old pending_admin_approval
+  });
+
+  // 3. vecchio transfer_request rimane cancellato
+  it("3: the old transfer_request stays cancelled and completely untouched", async () => {
+    const { oldTransferRequestId } = await setupCancelledDealAndTransferRequest();
+    const beforeReopen = await getTransferRequest(TENANT, oldTransferRequestId);
+
+    await sendMessage("Still interested in that Sondrio to Malpensa transfer", new Date("2026-09-02T09:00:00Z"), {
+      pickup: "Sondrio",
+      destination: "Malpensa",
+      intent: "transfer_request",
+    });
+
+    const afterReopen = await getTransferRequest(TENANT, oldTransferRequestId);
+    expect(afterReopen?.status).toBe("cancelled");
+    expect(afterReopen?.cancelledReason).toBe("rejected_by_admin");
+    expect(afterReopen?.calculatedAmountCents).toBe(beforeReopen?.calculatedAmountCents); // 25000, its own history
+    expect(afterReopen?.pickup).toBe(beforeReopen?.pickup);
+    expect(afterReopen?.updatedAt).toEqual(beforeReopen?.updatedAt); // never written to again
+  });
+
+  // 4. vecchio prezzo non viene riutilizzato automaticamente
+  it("4: the new transfer_request starts with NO price — nothing carried over from the old one", async () => {
+    await setupCancelledDealAndTransferRequest();
+
+    const followUp = await sendMessage(
+      "Still interested in that Sondrio to Malpensa transfer",
+      new Date("2026-09-02T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", intent: "transfer_request" },
+    );
+
+    expect(followUp.calculatedAmountCents).toBeNull();
+    expect(followUp.finalAmountCents).toBeNull();
+    expect(followUp.pricingStatus).toBe("not_priced");
+    expect(followUp.adminApprovedAt).toBeNull();
+    expect(followUp.quoteId).toBeNull();
+  });
+
+  // 5. nuovo pricing può essere eseguito normalmente
+  it("5: completing the new transfer_request runs real pricing again, independently of the old one", async () => {
+    const { oldTransferRequestId, dealId } = await setupCancelledDealAndTransferRequest();
+
+    const followUp = await sendMessage(
+      "Still interested in that Sondrio to Malpensa transfer",
+      new Date("2026-09-02T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", intent: "transfer_request" },
+    );
+    expect(followUp.calculatedAmountCents).toBeNull();
+
+    // Completing the SAME (new) attempt — still collecting_info, so this
+    // is the unchanged OPEN_FOR_MATCHING merge path, not the reopen fix.
+    const completed = await sendMessage("4 passengers, 2026-09-20 at 10:00", new Date("2026-09-02T09:05:00Z"), {
+      date: "2026-09-20",
+      time: "10:00",
+      passengers: 4,
+      intent: "transfer_request",
+    });
+
+    expect(completed.id).toBe(followUp.id); // same fresh attempt, merged
+    expect(completed.id).not.toBe(oldTransferRequestId);
+    expect(completed.status).toBe("pending_admin_approval");
+    expect(completed.pricingStatus).toBe("fixed");
+    expect(completed.calculatedAmountCents).toBe(25000); // recomputed by the real engine, not copied
+    expect(completed.dealId).toBe(dealId);
+
+    // Old transfer_request still exactly as it was.
+    const oldStill = await getTransferRequest(TENANT, oldTransferRequestId);
+    expect(oldStill?.status).toBe("cancelled");
+  });
+
+  // 6. completed deal non viene riaperto
+  it("6: a completed deal is never reopened — a matching new message starts a brand new deal", async () => {
+    const priced = await sendMessage(
+      "Sondrio to Malpensa, 4 pax, 2026-09-20 10:00",
+      new Date("2026-09-01T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", date: "2026-09-20", time: "10:00", passengers: 4, intent: "transfer_request" },
+    );
+    const originalDealId = priced.dealId!;
+    await acceptTransferRequest(TENANT, priced.id, "admin-1");
+    await closeDeal(TENANT, originalDealId, "completed");
+
+    const completedDeal = await getDeal(TENANT, originalDealId);
+    expect(completedDeal?.status).toBe("completed");
+
+    const followUp = await sendMessage(
+      "Same trip again please, Sondrio to Malpensa",
+      new Date("2026-09-02T09:00:00Z"),
+      { pickup: "Sondrio", destination: "Malpensa", intent: "transfer_request" },
+    );
+
+    expect(followUp.dealId).not.toBe(originalDealId); // never reopened
+    const newDeal = await getDeal(TENANT, followUp.dealId!);
+    expect(newDeal?.status).not.toBe("completed");
+
+    // The completed deal's own history is untouched.
+    const stillCompleted = await getDeal(TENANT, originalDealId);
+    expect(stillCompleted?.status).toBe("completed");
   });
 });

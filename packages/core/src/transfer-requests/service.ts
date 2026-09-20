@@ -97,6 +97,20 @@ function toCompletenessFields(extracted: TransferRequestExtractedFields): Comple
 // pending_admin_approval/approved are deliberately excluded).
 const OPEN_FOR_MATCHING = ["collecting_info", "ready_for_pricing"] as const;
 
+// Phase 2.5 edge case fix: the two statuses that represent a REAL, still
+// relevant offer a follow-up message can legitimately continue (a payment
+// question, "you already quoted me") — see the continuation branch in
+// processTransferRequestForMessage below. Deliberately excludes
+// 'cancelled'/'expired'/'converted_to_quote': those are terminal, dead
+// attempts with no live price to continue — a deal reopened by
+// reopenRecentClosedDealIfMatching (deals/service.ts) always has exactly
+// this shape (status flipped back to 'open', but its one and only
+// transfer_request is still the old cancelled one, deliberately never
+// rewritten by the reopen itself). Without this distinction, a message
+// that doesn't conflict on route would silently reuse that cancelled
+// attempt's stale status/price instead of starting a fresh one.
+const LIVE_OFFER_STATUSES = ["pending_admin_approval", "approved"] as const;
+
 // Fetches every request for this client (a small, bounded set over a
 // client's lifetime — the tenant+client index keeps this cheap) and picks
 // the open one in plain JS, rather than an OR-of-statuses WHERE clause.
@@ -382,10 +396,24 @@ export async function processTransferRequestForMessage(
     } else {
       target = await mergeIntoTransferRequest(currentTransferRequest, input.extracted);
     }
+  } else if (!LIVE_OFFER_STATUSES.includes(currentTransferRequest.status as (typeof LIVE_OFFER_STATUSES)[number])) {
+    // Edge case fix: the deal's current attempt is 'cancelled'/'expired'/
+    // 'converted_to_quote' — a terminal, dead attempt, never a live offer
+    // to continue or reuse. This is exactly the shape a deal reopened by
+    // reopenRecentClosedDealIfMatching has (deals/service.ts flips the
+    // deal back to 'open' but deliberately never rewrites its old
+    // transfer_request) — the customer coming back after a cancellation
+    // must get a genuinely fresh attempt, never the old one's stale
+    // status/price silently reused. Always a new attempt under the SAME
+    // deal (never a new deal: the deal itself already correctly
+    // identifies this as the same negotiation resuming) — the old
+    // transfer_request is left completely untouched, staying in the
+    // historical record exactly as it was.
+    target = await createOrMergeAsNewRequest(input.tenantId, input.clientId, input.extracted, deal.id);
   } else if (hasRouteConflict(currentTransferRequest, input.extracted)) {
-    // The deal's current attempt is already priced/approved/closed, and
-    // this message describes a genuinely different trip (both pickup AND
-    // destination present and different — hasRouteConflict's own rule,
+    // The deal's current attempt is a live, already-priced/approved offer,
+    // and this message describes a genuinely different trip (both pickup
+    // AND destination present and different — hasRouteConflict's own rule,
     // unchanged). Unlike the OPEN_FOR_MATCHING branch above (where a route
     // conflict is still just a correction of a not-yet-reviewed request,
     // same deal), an offer has already been made here — reusing this deal
