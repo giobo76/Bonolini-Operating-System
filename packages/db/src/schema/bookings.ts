@@ -3,6 +3,7 @@ import { tenants } from "./tenants";
 import { clients } from "./clients";
 import { quotes } from "./quotes";
 import { transferRequests } from "./transfer-requests";
+import { deals } from "./deals";
 
 // Minimal skeleton — status + money + client link only. No dispatch, driver
 // assignment, or calendar logic (that's the real Booking Management feature,
@@ -25,6 +26,15 @@ export const bookings = pgTable("bookings", {
     .notNull()
     .references(() => clients.id, { onDelete: "cascade" }),
   quoteId: uuid("quote_id").references(() => quotes.id, { onDelete: "set null" }),
+  // Phase 2.5 — the persistent negotiation this booking was confirmed
+  // from. Nullable for the same reasons transfer_requests.deal_id is;
+  // set alongside transferRequestId by ensureBookingForApprovedTransferRequest
+  // (packages/core/src/bookings/service.ts), backfilled 1:1 via
+  // transfer_requests.deal_id for historical rows that have one (see
+  // 0024_deals_backfill.sql) — never set for a booking created via the
+  // pre-existing manual createBooking()/Calendar Sync paths, which have no
+  // transfer_request (and therefore no deal) to derive it from.
+  dealId: uuid("deal_id").references(() => deals.id, { onDelete: "set null" }),
   // Set only by ensureBookingForApprovedTransferRequest (Booking Snapshot
   // milestone) — null for a booking created directly via createBooking()
   // (the pre-existing admin/manual path, untouched by this milestone).

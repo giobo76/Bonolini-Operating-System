@@ -38,6 +38,7 @@ const {
   businessRuleVersionsTable,
   businessRuleVersionEvidenceTable,
   evidenceTable,
+  dealsTable,
 } = vi.hoisted(() => {
   return {
     fakeState: {
@@ -45,8 +46,15 @@ const {
       clients: [] as Array<Record<string, unknown>>,
       whatsappMessages: [] as Array<Record<string, unknown>>,
       transferRequests: [] as Array<Record<string, unknown>>,
+      // Phase 2.5 (deals): each scenario here is a single inbound message
+      // for a brand new client, so exactly one deal is ever created per
+      // test — no multi-deal disambiguation is exercised in this file (see
+      // deals/service.test.ts and deal-negotiation.integration.test.ts for
+      // that).
+      deals: [] as Array<Record<string, unknown>>,
       nextClientId: 1,
       nextRequestId: 1,
+      nextDealId: 1,
     },
     tenantsTable: { __name: "tenants" },
     clientsTable: { __name: "clients" },
@@ -62,6 +70,7 @@ const {
     businessRuleVersionsTable: { __name: "businessRuleVersions" },
     businessRuleVersionEvidenceTable: { __name: "businessRuleVersionEvidence" },
     evidenceTable: { __name: "evidence" },
+    dealsTable: { __name: "deals" },
   };
 });
 
@@ -78,20 +87,39 @@ function sourceFor(table: unknown): Array<Record<string, unknown>> {
   if (table === clientsTable) return fakeState.clients;
   if (table === whatsappMessagesTable) return fakeState.whatsappMessages;
   if (table === transferRequestsTable) return fakeState.transferRequests;
+  if (table === dealsTable) return fakeState.deals;
   return [];
 }
 
 // Same extraction technique proven in whatsapp/service.test.ts and
-// transfer-requests/service.test.ts — eq(column, value) against these
-// mocked placeholder tables (no real Column object) embeds the bound value
-// as a raw chunk rather than a Param instance; handling both shapes keeps
-// this correct either way.
-function extractEqValue(condition: { queryChunks: unknown[] }): string | undefined {
-  const candidate = condition.queryChunks.find(
-    (c) => c !== undefined && c !== null && !(c instanceof StringChunk),
-  );
-  if (candidate instanceof Param) return candidate.value as string;
-  return candidate as string | undefined;
+// transfer-requests/service.test.ts. Recursive: and(eq(...), eq(...)) —
+// used by deals/service.ts's tenant-scoped updates (Phase 2.5) — nests
+// each eq()'s own SQL object one level inside the outer and()'s
+// queryChunks rather than flattening them, so a single non-recursive pass
+// would miss the nested Param entirely. A plain single eq(id, value)
+// still yields exactly one value, so every existing call site below keeps
+// behaving identically — this is a superset, not a behavior change.
+function extractEqValues(condition: unknown): string[] {
+  if (!condition || typeof condition !== "object" || !("queryChunks" in condition)) return [];
+  const chunks = (condition as { queryChunks: unknown[] }).queryChunks;
+  const values: string[] = [];
+  for (const chunk of chunks) {
+    if (chunk instanceof StringChunk) continue;
+    if (chunk instanceof Param) {
+      if (typeof chunk.value === "string") values.push(chunk.value);
+      continue;
+    }
+    if (chunk && typeof chunk === "object" && "queryChunks" in chunk) {
+      values.push(...extractEqValues(chunk));
+      continue;
+    }
+    if (typeof chunk === "string") values.push(chunk);
+  }
+  return values;
+}
+
+function matchesCondition(row: Record<string, unknown>, values: string[]): boolean {
+  return values.length > 0 && values.every((value) => Object.values(row).includes(value));
 }
 
 function normalizePhoneForMock(phone: string): string {
@@ -109,9 +137,15 @@ vi.mock("@bos/db", () => {
           // idempotency lookup by whatsapp_messages.id (cols is present
           // only for that specific call).
           if (table === whatsappMessagesTable && cols) {
-            const targetId = extractEqValue(condition);
-            const filtered = fakeState.whatsappMessages.filter((r) => r.id === targetId);
-            return thenable(filtered.map((row) => ({ transferRequestId: row.transferRequestId })));
+            const values = extractEqValues(condition);
+            const filtered = fakeState.whatsappMessages.filter((r) => matchesCondition(r, values));
+            return thenable(
+              filtered.map((row) => ({
+                transferRequestId: row.transferRequestId,
+                rawText: row.rawText,
+                receivedAt: row.receivedAt,
+              })),
+            );
           }
 
           return thenable(sourceFor(table));
@@ -138,8 +172,8 @@ vi.mock("@bos/db", () => {
       set: (values: Record<string, unknown>) => ({
         where: (condition: { queryChunks: unknown[] }) => {
           const source = sourceFor(table);
-          const targetId = extractEqValue(condition);
-          const target = source.find((r) => r.id === targetId);
+          const conditionValues = extractEqValues(condition);
+          const target = source.find((r) => matchesCondition(r, conditionValues));
           if (target) Object.assign(target, values);
           const result = target ? [target] : [];
           const promise = Promise.resolve(result);
@@ -192,10 +226,10 @@ vi.mock("@bos/db", () => {
 
       if (sqlText.includes("insert into transfer_requests")) {
         const [
-          tenantId, clientId, status, intent, pickup, destination,
+          tenantId, clientId, dealId, status, intent, pickup, destination,
           requestedDate, requestedTime, passengers, luggage,
           flightNumber, trainNumber, hotel, language,
-        ] = params as [string, string, string, ...unknown[]];
+        ] = params as [string, string, string, string, ...unknown[]];
         const OPEN_STATUSES = ["collecting_info", "ready_for_pricing"];
         const conflict = fakeState.transferRequests.some(
           (r) => r.tenantId === tenantId && r.clientId === clientId && OPEN_STATUSES.includes(r.status as string),
@@ -203,7 +237,7 @@ vi.mock("@bos/db", () => {
         if (conflict) return [];
         const row: Record<string, unknown> = {
           id: `request-test-${fakeState.nextRequestId++}`,
-          tenantId, clientId, status, intent, pickup, destination,
+          tenantId, clientId, dealId, status, intent, pickup, destination,
           requestedDate, requestedTime, passengers, luggage,
           flightNumber, trainNumber, hotel, language,
           missingInformation: null,
@@ -222,6 +256,23 @@ vi.mock("@bos/db", () => {
         return [row];
       }
 
+      if (sqlText.includes("insert into deals")) {
+        const [tenantId, clientId] = params as [string, string];
+        const row: Record<string, unknown> = {
+          id: `deal-test-${fakeState.nextDealId++}`,
+          tenantId,
+          clientId,
+          status: "open",
+          lastMessageAt: new Date(),
+          customerReportedPaymentNote: null,
+          customerReportedPaymentAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        fakeState.deals.push(row);
+        return [row];
+      }
+
       return [];
     },
   };
@@ -235,6 +286,7 @@ vi.mock("@bos/db", () => {
     businessRuleVersions: businessRuleVersionsTable,
     businessRuleVersionEvidence: businessRuleVersionEvidenceTable,
     evidence: evidenceTable,
+    deals: dealsTable,
     assertOne: (rows: unknown[]) => rows[0],
     getDb: () => db,
   };
@@ -288,8 +340,10 @@ beforeEach(() => {
   fakeState.clients = [];
   fakeState.whatsappMessages = [];
   fakeState.transferRequests = [];
+  fakeState.deals = [];
   fakeState.nextClientId = 1;
   fakeState.nextRequestId = 1;
+  fakeState.nextDealId = 1;
   vi.mocked(calculateGenericRouteRoundTrip).mockClear();
   vi.mocked(calculateComoTiranoRoundTrip).mockClear();
 });

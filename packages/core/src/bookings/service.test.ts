@@ -147,6 +147,7 @@ vi.mock("@bos/db", () => {
         tenantId,
         clientId,
         transferRequestId,
+        dealId,
         pickup,
         destination,
         pickupAddress,
@@ -155,7 +156,20 @@ vi.mock("@bos/db", () => {
         scheduledAt,
         finalAmountCents,
         currency,
-      ] = params as [string, string, string, string, string, string | null, string | null, number, string, number, string];
+      ] = params as [
+        string,
+        string,
+        string,
+        string | null,
+        string,
+        string,
+        string | null,
+        string | null,
+        number,
+        string,
+        number,
+        string,
+      ];
 
       const conflict = fakeState.bookings.some((b) => b.transferRequestId === transferRequestId);
       if (conflict) return [];
@@ -165,6 +179,7 @@ vi.mock("@bos/db", () => {
         tenantId,
         clientId,
         transferRequestId,
+        dealId,
         calendarEventId: null,
         quoteId: null,
         pickup,

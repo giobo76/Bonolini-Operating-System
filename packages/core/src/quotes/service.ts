@@ -29,6 +29,20 @@ export async function getQuote(tenantId: string, id: string) {
   return row ?? null;
 }
 
+// Phase 2.5 — used by transfer-requests' ACCEPT/MODIFY_PRICE so an
+// approval reuses an already-existing quote for the same deal instead of
+// creating a second one (a deal can only be approved once per
+// transfer_request attempt, but this stays a real, not-assumed lookup
+// rather than trusting the caller never double-calls it).
+export async function getQuoteForDeal(tenantId: string, dealId: string) {
+  const db = getDb();
+  const [row] = await db
+    .select()
+    .from(quotes)
+    .where(and(eq(quotes.tenantId, tenantId), eq(quotes.dealId, dealId)));
+  return row ?? null;
+}
+
 export async function updateQuoteStatus(tenantId: string, id: string, status: Quote["status"]) {
   const db = getDb();
   const [row] = await db

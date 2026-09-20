@@ -2,6 +2,7 @@ import { pgTable, uuid, text, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
 import { clients } from "./clients";
 import { transferRequests } from "./transfer-requests";
+import { deals } from "./deals";
 
 // ── WhatsApp inbound message log ─────────────────────────────────────────
 // One row per inbound WhatsApp message. Exists because idempotency
@@ -32,6 +33,11 @@ export const whatsappMessages = pgTable("whatsapp_messages", {
   // request — see packages/core/src/transfer-requests. Null for messages
   // never routed through that logic (non-text, test messages, etc.).
   transferRequestId: uuid("transfer_request_id").references(() => transferRequests.id, { onDelete: "set null" }),
+  // Phase 2.5 — the persistent negotiation this message was matched to. See
+  // packages/core/src/deals. Nullable for the same reasons
+  // transfer_requests.deal_id is (pre-Phase-2.5 history, non-text messages
+  // never routed through matching at all).
+  dealId: uuid("deal_id").references(() => deals.id, { onDelete: "set null" }),
   // Meta's message id (wamid...). The real idempotency boundary is the
   // composite (tenant_id, whatsapp_message_id) unique index in the SQL
   // migration, not application-level pre-checks — a message id is only

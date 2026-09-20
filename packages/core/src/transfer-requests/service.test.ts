@@ -33,6 +33,7 @@ const {
   businessRuleVersionsTable,
   businessRuleVersionEvidenceTable,
   evidenceTable,
+  dealsTable,
 } = vi.hoisted(() => {
   return {
     fakeState: {
@@ -52,8 +53,19 @@ const {
       businessRuleVersions: [] as Array<Record<string, unknown>>,
       businessRuleVersionEvidence: [] as Array<Record<string, unknown>>,
       evidence: [] as Array<Record<string, unknown>>,
+      // Phase 2.5 (deals): every processTransferRequestForMessage call now
+      // resolves/creates a deal as a side effect. No test in this file
+      // seeds more than one simultaneously active deal per client, so the
+      // select() mock's existing "ignore the where condition, return the
+      // whole seeded array" simplification (see its own comment below)
+      // stays accurate here — real, deal-scoped disambiguation is covered
+      // by deals/service.test.ts (isolated) and
+      // deal-negotiation.integration.test.ts (a mock that filters for
+      // real, needed for that file's multi-deal scenarios).
+      deals: [] as Array<Record<string, unknown>>,
       nextRequestId: 1,
       nextBookingId: 1,
+      nextDealId: 1,
     },
     transferRequestsTable: { __name: "transferRequests" },
     whatsappMessagesTable: { __name: "whatsappMessages" },
@@ -63,6 +75,7 @@ const {
     businessRuleVersionsTable: { __name: "businessRuleVersions" },
     businessRuleVersionEvidenceTable: { __name: "businessRuleVersionEvidence" },
     evidenceTable: { __name: "evidence" },
+    dealsTable: { __name: "deals" },
   };
 });
 
@@ -83,6 +96,7 @@ function sourceFor(table: unknown): Array<Record<string, unknown>> {
   if (table === businessRuleVersionsTable) return fakeState.businessRuleVersions;
   if (table === businessRuleVersionEvidenceTable) return fakeState.businessRuleVersionEvidence;
   if (table === evidenceTable) return fakeState.evidence;
+  if (table === dealsTable) return fakeState.deals;
   return fakeState.messages;
 }
 
@@ -93,15 +107,34 @@ function sourceFor(table: unknown): Array<Record<string, unknown>> {
 // rather than assumed, given the earlier production incident already
 // taught this codebase not to guess at query-builder serialization
 // behavior): the value comes through as a raw chunk instead of a Param.
-// Handling both shapes keeps this correct either way. Only meaningful for
-// a single plain eq(id, value) condition, not a compound and(...) — every
-// call site this is used for below passes exactly that shape.
-function extractEqValue(condition: { queryChunks: unknown[] }): string | undefined {
-  const candidate = condition.queryChunks.find(
-    (c) => c !== undefined && c !== null && !(c instanceof StringChunk),
-  );
-  if (candidate instanceof Param) return candidate.value as string;
-  return candidate as string | undefined;
+// Recursive: and(eq(...), eq(...)) — used by deals/service.ts's tenant-scoped
+// updates (Phase 2.5) — nests each eq()'s own SQL object one level inside
+// the outer and()'s queryChunks rather than flattening them, so a single
+// non-recursive pass would miss the nested Param entirely. Returns every
+// bound value the condition carries; a plain single eq(id, value) still
+// yields exactly one value, so every existing single-eq() call site below
+// keeps behaving identically — this is a superset, not a behavior change.
+function extractEqValues(condition: unknown): string[] {
+  if (!condition || typeof condition !== "object" || !("queryChunks" in condition)) return [];
+  const chunks = (condition as { queryChunks: unknown[] }).queryChunks;
+  const values: string[] = [];
+  for (const chunk of chunks) {
+    if (chunk instanceof StringChunk) continue;
+    if (chunk instanceof Param) {
+      if (typeof chunk.value === "string") values.push(chunk.value);
+      continue;
+    }
+    if (chunk && typeof chunk === "object" && "queryChunks" in chunk) {
+      values.push(...extractEqValues(chunk));
+      continue;
+    }
+    if (typeof chunk === "string") values.push(chunk);
+  }
+  return values;
+}
+
+function matchesCondition(row: Record<string, unknown>, values: string[]): boolean {
+  return values.length > 0 && values.every((value) => Object.values(row).includes(value));
 }
 
 const OPEN_STATUSES = ["collecting_info", "ready_for_pricing"];
@@ -133,8 +166,8 @@ vi.mock("@bos/db", () => {
         where: (condition: { queryChunks: unknown[] }) => {
           const source = sourceFor(table);
           if (!cols) return thenable(source);
-          const targetId = extractEqValue(condition);
-          const filtered = source.filter((r) => r.id === targetId);
+          const values = extractEqValues(condition);
+          const filtered = source.filter((r) => matchesCondition(r, values));
           const projected = filtered.map((row) => {
             const out: Record<string, unknown> = {};
             for (const key of Object.keys(cols)) out[key] = row[key];
@@ -153,8 +186,8 @@ vi.mock("@bos/db", () => {
       set: (values: Record<string, unknown>) => ({
         where: (condition: { queryChunks: unknown[] }) => {
           const source = sourceFor(table);
-          const targetId = extractEqValue(condition);
-          const target = source.find((r) => r.id === targetId);
+          const conditionValues = extractEqValues(condition);
+          const target = source.find((r) => matchesCondition(r, conditionValues));
           if (target) Object.assign(target, values);
           const result = target ? [target] : [];
           const promise = Promise.resolve(result);
@@ -180,11 +213,29 @@ vi.mock("@bos/db", () => {
         .join("");
       const params = query.queryChunks.filter((chunk) => !(chunk instanceof StringChunk));
 
+      if (sqlText.includes("insert into deals")) {
+        const [tenantId, clientId] = params as [string, string];
+        const row: Record<string, unknown> = {
+          id: `deal-${fakeState.nextDealId++}`,
+          tenantId,
+          clientId,
+          status: "open",
+          lastMessageAt: new Date(),
+          customerReportedPaymentNote: null,
+          customerReportedPaymentAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        fakeState.deals.push(row);
+        return [row];
+      }
+
       if (sqlText.includes("insert into bookings")) {
         const [
           tenantId,
           clientId,
           transferRequestId,
+          dealId,
           pickup,
           destination,
           pickupAddress,
@@ -193,7 +244,20 @@ vi.mock("@bos/db", () => {
           scheduledAt,
           finalAmountCents,
           currency,
-        ] = params as [string, string, string, string, string, string | null, string | null, number, string, number, string];
+        ] = params as [
+          string,
+          string,
+          string,
+          string | null,
+          string,
+          string,
+          string | null,
+          string | null,
+          number,
+          string,
+          number,
+          string,
+        ];
 
         const conflict = fakeState.bookings.some((b) => b.transferRequestId === transferRequestId);
         if (conflict) return [];
@@ -203,6 +267,7 @@ vi.mock("@bos/db", () => {
           tenantId,
           clientId,
           transferRequestId,
+          dealId,
           quoteId: null,
           pickup,
           destination,
@@ -231,6 +296,7 @@ vi.mock("@bos/db", () => {
       const [
         tenantId,
         clientId,
+        dealId,
         status,
         intent,
         pickup,
@@ -243,7 +309,7 @@ vi.mock("@bos/db", () => {
         trainNumber,
         hotel,
         language,
-      ] = params as [string, string, string, ...unknown[]];
+      ] = params as [string, string, string, string, ...unknown[]];
 
       const conflict = fakeState.requests.some(
         (r) => r.tenantId === tenantId && r.clientId === clientId && OPEN_STATUSES.includes(r.status as string),
@@ -254,6 +320,7 @@ vi.mock("@bos/db", () => {
         id: `request-${fakeState.nextRequestId++}`,
         tenantId,
         clientId,
+        dealId,
         status,
         intent,
         pickup,
@@ -292,6 +359,7 @@ vi.mock("@bos/db", () => {
     businessRuleVersions: businessRuleVersionsTable,
     businessRuleVersionEvidence: businessRuleVersionEvidenceTable,
     evidence: evidenceTable,
+    deals: dealsTable,
     assertOne: (rows: unknown[]) => {
       if (rows.length === 0) throw new Error("Expected exactly one row, got none");
       return rows[0];
@@ -367,8 +435,10 @@ beforeEach(() => {
   fakeState.messages = [];
   fakeState.clients = [];
   fakeState.bookings = [];
+  fakeState.deals = [];
   fakeState.nextRequestId = 1;
   fakeState.nextBookingId = 1;
+  fakeState.nextDealId = 1;
   calculateGenericRouteRoundTrip.mockClear();
   calculateComoTiranoRoundTrip.mockClear();
   calculateRoute.mockClear();

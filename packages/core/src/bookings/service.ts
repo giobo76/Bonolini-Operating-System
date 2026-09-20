@@ -127,11 +127,11 @@ export async function ensureBookingForApprovedTransferRequest(
 
   const insertedRows = await db.execute<Booking>(sql`
     insert into bookings (
-      tenant_id, client_id, transfer_request_id, pickup, destination,
+      tenant_id, client_id, transfer_request_id, deal_id, pickup, destination,
       pickup_address, destination_address, customer_trip_duration_minutes,
       scheduled_at, final_amount_cents, currency
     ) values (
-      ${tenantId}, ${input.clientId}, ${input.transferRequestId}, ${input.pickup}, ${input.destination},
+      ${tenantId}, ${input.clientId}, ${input.transferRequestId}, ${input.dealId ?? null}, ${input.pickup}, ${input.destination},
       ${input.pickupAddress}, ${input.destinationAddress}, ${input.customerTripDurationMinutes},
       ${input.scheduledAt.toISOString()}, ${input.finalAmountCents}, ${input.currency}
     )

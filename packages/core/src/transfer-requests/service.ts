@@ -12,6 +12,15 @@ import {
 } from "../availability";
 import { getClient } from "../clients";
 import { ensureBookingForApprovedTransferRequest, type Booking } from "../bookings";
+import { createQuote, getQuoteForDeal } from "../quotes";
+import {
+  findMatchingDealForMessage,
+  createDeal,
+  advanceDealStatus,
+  touchDealLastMessageAt,
+  looksLikeCustomerReportedPayment,
+  recordCustomerReportedPayment,
+} from "../deals";
 import type { TransferRequestExtractedFields, AvailabilityBreakdown, SerializedServiceFeasibilityResult } from "./schema";
 
 // ── Airport recognition ──────────────────────────────────────────────────
@@ -143,6 +152,7 @@ async function insertNewTransferRequest(
   tenantId: string,
   clientId: string,
   extracted: TransferRequestExtractedFields,
+  dealId: string,
 ): Promise<TransferRequest | null> {
   const db = getDb();
   const missing = computeMissingInformation(toCompletenessFields(extracted));
@@ -150,11 +160,11 @@ async function insertNewTransferRequest(
 
   const insertedRows = await db.execute<TransferRequest>(sql`
     insert into transfer_requests (
-      tenant_id, client_id, status, intent, pickup, destination,
+      tenant_id, client_id, deal_id, status, intent, pickup, destination,
       requested_date, requested_time, passengers, luggage,
       flight_number, train_number, hotel, language
     ) values (
-      ${tenantId}, ${clientId}, ${status},
+      ${tenantId}, ${clientId}, ${dealId}, ${status},
       ${extracted.intent ?? null}, ${extracted.pickup ?? null}, ${extracted.destination ?? null},
       ${extracted.date ?? null}, ${extracted.time ?? null}, ${extracted.passengers ?? null}, ${extracted.luggage ?? null},
       ${extracted.flight ?? null}, ${extracted.train ?? null}, ${extracted.hotel ?? null}, ${extracted.language ?? null}
@@ -197,10 +207,20 @@ async function createOrMergeAsNewRequest(
   tenantId: string,
   clientId: string,
   extracted: TransferRequestExtractedFields,
+  dealId: string,
 ): Promise<TransferRequest> {
-  const created = await insertNewTransferRequest(tenantId, clientId, extracted);
+  const created = await insertNewTransferRequest(tenantId, clientId, extracted, dealId);
   if (created) return created;
 
+  // Race fallback (rare — see insertNewTransferRequest's own doc comment):
+  // another open request now exists for this client. It may belong to a
+  // *different* deal than the one this call resolved (the concurrent
+  // caller could have raced on its own, separate deal resolution) — merged
+  // into as-is, deal_id left untouched, same "converge on the winner"
+  // philosophy findOrCreateClientByPhone already applies. This window is
+  // narrow enough (two inbound messages for the same client processed by
+  // genuinely concurrent invocations) that reconciling deal ownership here
+  // is deliberately not attempted.
   const existing = await findOpenTransferRequest(tenantId, clientId);
   if (!existing) {
     // Unreachable in practice: a conflict on this index means a matching
@@ -271,6 +291,28 @@ export interface TransferRequestMessageInput {
   extracted: TransferRequestExtractedFields;
 }
 
+// Read-only lookup of the deal's most recent transfer_request attempt —
+// "current" for matching purposes, same "most recent wins" convention
+// findOpenTransferRequest itself already uses. Deliberately local to this
+// module (never exported): the deals module has its own private,
+// near-identical helper for its own matching decisions (disambiguation,
+// reopen eligibility) — the small duplication is what avoids a circular
+// module import (deals -> transfer-requests -> deals), documented on both
+// sides. This one additionally never filters by status: unlike
+// findOpenTransferRequest (only ever OPEN_FOR_MATCHING rows), the caller
+// below needs to see a pending_admin_approval/approved/cancelled attempt
+// too, to decide whether a continuation message needs a new attempt at
+// all.
+async function getCurrentTransferRequestForDeal(tenantId: string, dealId: string): Promise<TransferRequest | null> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(transferRequests)
+    .where(and(eq(transferRequests.tenantId, tenantId), eq(transferRequests.dealId, dealId)))
+    .orderBy(desc(transferRequests.createdAt));
+  return rows[0] ?? null;
+}
+
 // The single entry point this module exposes for turning one inbound
 // WhatsApp message's extracted fields into transfer_requests state.
 //
@@ -283,15 +325,28 @@ export interface TransferRequestMessageInput {
 // twice by mistake), it returns that request unchanged instead of
 // re-merging or creating a second one.
 //
-// NOT wired into the live webhook pipeline in this milestone — see
-// README.md's "Integration is a separate, deliberate next step".
+// Phase 2.5 (BOS Business Intelligence + Autonomy Model — Deal layer):
+// resolves/creates the persistent deals.Deal this message belongs to
+// BEFORE any transfer_request decision — see packages/core/src/deals for
+// the matching algorithm and the real production incident (2026-09-18)
+// this fixes. The state machine below this point is UNCHANGED: hasRouteConflict/
+// mergeIntoTransferRequest/insertNewTransferRequest still decide, exactly
+// as before, what happens to a transfer_request that's still
+// OPEN_FOR_MATCHING. What changed is WHICH transfer_request that logic is
+// scoped to (the deal's current attempt, not a bare client-global lookup)
+// and what happens when the deal's current attempt is no longer
+// OPEN_FOR_MATCHING (see the two new branches below).
 export async function processTransferRequestForMessage(
   input: TransferRequestMessageInput,
 ): Promise<TransferRequest> {
   const db = getDb();
 
   const [messageRow] = await db
-    .select({ transferRequestId: whatsappMessages.transferRequestId })
+    .select({
+      transferRequestId: whatsappMessages.transferRequestId,
+      rawText: whatsappMessages.rawText,
+      receivedAt: whatsappMessages.receivedAt,
+    })
     .from(whatsappMessages)
     .where(eq(whatsappMessages.id, input.whatsappMessageId));
 
@@ -300,26 +355,75 @@ export async function processTransferRequestForMessage(
     if (already) return already;
   }
 
-  const openRequest = await findOpenTransferRequest(input.tenantId, input.clientId);
+  let { deal } = await findMatchingDealForMessage(input.tenantId, input.clientId, {
+    pickup: input.extracted.pickup,
+    destination: input.extracted.destination,
+    date: input.extracted.date,
+  });
+
+  const currentTransferRequest = await getCurrentTransferRequestForDeal(input.tenantId, deal.id);
 
   let target: TransferRequest;
 
-  if (!openRequest) {
-    // Covers: genuinely the first message, OR the client's only request is
-    // locked in pending_admin_approval/approved (invisible to matching by
-    // design), OR their prior request is already converted_to_quote/
-    // cancelled/expired (rules 6/7 of the approved spec).
-    target = await createOrMergeAsNewRequest(input.tenantId, input.clientId, input.extracted);
-  } else if (hasRouteConflict(openRequest, input.extracted)) {
-    await cancelSuperseded(openRequest);
-    target = await createOrMergeAsNewRequest(input.tenantId, input.clientId, input.extracted);
+  if (!currentTransferRequest) {
+    // First attempt under this deal (covers a brand new deal, and a
+    // reopened one whose prior attempts — if any — never got a deal_id,
+    // i.e. predate this phase).
+    target = await createOrMergeAsNewRequest(input.tenantId, input.clientId, input.extracted, deal.id);
+  } else if (OPEN_FOR_MATCHING.includes(currentTransferRequest.status as (typeof OPEN_FOR_MATCHING)[number])) {
+    // Unchanged: the deal's current attempt hasn't been priced/reviewed
+    // yet, so the existing, already-tested decision (supersede on a real
+    // route conflict, merge otherwise) applies exactly as before Phase
+    // 2.5 — only the source of "which transfer_request" changed (deal-scoped
+    // instead of a bare client-global lookup), never the decision itself.
+    if (hasRouteConflict(currentTransferRequest, input.extracted)) {
+      await cancelSuperseded(currentTransferRequest);
+      target = await createOrMergeAsNewRequest(input.tenantId, input.clientId, input.extracted, deal.id);
+    } else {
+      target = await mergeIntoTransferRequest(currentTransferRequest, input.extracted);
+    }
+  } else if (hasRouteConflict(currentTransferRequest, input.extracted)) {
+    // The deal's current attempt is already priced/approved/closed, and
+    // this message describes a genuinely different trip (both pickup AND
+    // destination present and different — hasRouteConflict's own rule,
+    // unchanged). Unlike the OPEN_FOR_MATCHING branch above (where a route
+    // conflict is still just a correction of a not-yet-reviewed request,
+    // same deal), an offer has already been made here — reusing this deal
+    // for an unrelated route would be exactly the kind of silent merge
+    // rule F/9 of the approved design forbids ("due richieste diverse
+    // dello stesso cliente" must produce two deals, never one). A brand
+    // new deal, with its own first attempt, is created instead.
+    deal = await createDeal(input.tenantId, input.clientId);
+    target = await createOrMergeAsNewRequest(input.tenantId, input.clientId, input.extracted, deal.id);
   } else {
-    target = await mergeIntoTransferRequest(openRequest, input.extracted);
+    // THE FIX for the 2026-09-18 production incident: a continuation
+    // message on an already-priced/approved transfer_request (a payment
+    // question, a booking confirmation, "you already quoted me a few
+    // hours ago") now attaches to the deal's existing attempt instead of
+    // silently spawning a new, disconnected one. Deliberately returns the
+    // attempt UNCHANGED rather than calling mergeIntoTransferRequest — that
+    // function always recomputes status from missingInformation (see its
+    // own doc comment — "only ever called against a request in
+    // OPEN_FOR_MATCHING") and would silently regress an already-priced/
+    // approved request back to ready_for_pricing/collecting_info, undoing
+    // real pricing/approval work. There is nothing safe to merge here:
+    // the whole point of this branch is that no new trip data arrived.
+    target = currentTransferRequest;
   }
+
+  // Phase 2.5 — customer-reported payment (never treated as verified; see
+  // packages/core/src/deals/README.md's "Payments" section). Checked
+  // against the parser's own already-extracted intent label, never a new
+  // AI call or a raw-text keyword scan (rule 4 of the approved design).
+  const receivedAt = messageRow?.receivedAt ?? new Date();
+  if (messageRow?.rawText && looksLikeCustomerReportedPayment(input.extracted.intent)) {
+    await recordCustomerReportedPayment(input.tenantId, deal.id, messageRow.rawText, receivedAt);
+  }
+  await touchDealLastMessageAt(input.tenantId, deal.id, receivedAt);
 
   await db
     .update(whatsappMessages)
-    .set({ transferRequestId: target.id })
+    .set({ transferRequestId: target.id, dealId: deal.id })
     .where(eq(whatsappMessages.id, input.whatsappMessageId));
 
   return target;
@@ -774,7 +878,20 @@ export async function processTransferRequestForMessageAndPrice(
   }
 
   const customerType = determineCustomerType(client.phone);
-  return runPricingForTransferRequest(input.tenantId, withAvailability.id, customerType);
+  const priced = await runPricingForTransferRequest(input.tenantId, withAvailability.id, customerType);
+
+  // Phase 2.5 — a real price/offer now exists: the deal moves from "open"
+  // (collecting data) to "quoted" (an offer exists, still active for
+  // matching — see packages/core/src/deals's state machine). Forward-only
+  // (advanceDealStatus never regresses an already-further-along deal), and
+  // guarded on dealId being set at all — never set for a transfer_request
+  // that predates this phase (see 0024_deals_backfill.sql), in which case
+  // this is a safe no-op.
+  if (priced.dealId && priced.status === "pending_admin_approval") {
+    await advanceDealStatus(input.tenantId, priced.dealId, "quoted");
+  }
+
+  return priced;
 }
 
 // ── Booking Snapshot (transfer_request -> booking) ────────────────────────
@@ -959,6 +1076,7 @@ async function ensureBookingForApprovedTransferRequestOrThrow(
   return ensureBookingForApprovedTransferRequest(tenantId, {
     transferRequestId: approved.id,
     clientId: approved.clientId,
+    dealId: approved.dealId ?? undefined,
     pickup: approved.pickup,
     destination: approved.destination,
     pickupAddress: approved.pickupAddress,
@@ -968,6 +1086,62 @@ async function ensureBookingForApprovedTransferRequestOrThrow(
     finalAmountCents: approved.finalAmountCents,
     currency: approved.currency,
   });
+}
+
+// Phase 2.5 — wires the existing, never-used transfer_requests.quote_id
+// column: reuses an existing quotes row for this deal if one already
+// exists (getQuoteForDeal), or creates one otherwise. A no-op (returns
+// null) when the transfer_request has no deal_id at all — a row that
+// predates this phase, or in any future path that doesn't go through the
+// deal layer. Deliberately bookkeeping only: no message is ever sent to
+// the customer here or anywhere else in this codebase — see
+// packages/core/src/deals/README.md's "Quotes" section for why
+// status: "sent" carries no such meaning.
+async function ensureQuoteForDeal(
+  tenantId: string,
+  approved: TransferRequest,
+): Promise<string | null> {
+  if (!approved.dealId) return null;
+
+  const existing = await getQuoteForDeal(tenantId, approved.dealId);
+  if (existing) return existing.id;
+
+  const created = await createQuote(tenantId, {
+    clientId: approved.clientId,
+    dealId: approved.dealId,
+    amountCents: approved.finalAmountCents ?? undefined,
+    currency: approved.currency,
+    status: "sent",
+  });
+  return created.id;
+}
+
+// Shared by acceptTransferRequest and modifyPriceForTransferRequest, both
+// on the fresh-approval path and the idempotent already-approved retry —
+// links transfer_requests.quote_id (ensureQuoteForDeal above), then
+// advances the deal to "confirmed" (advanceDealStatus is itself
+// forward-only and a safe no-op with no dealId, so calling this from the
+// idempotent retry path too is harmless — never re-creates a second quote,
+// never regresses an already-confirmed deal).
+async function linkQuoteAndAdvanceDealForApproval(tenantId: string, approved: TransferRequest): Promise<TransferRequest> {
+  const quoteId = await ensureQuoteForDeal(tenantId, approved);
+
+  let result = approved;
+  if (quoteId && approved.quoteId !== quoteId) {
+    const db = getDb();
+    const rows = await db
+      .update(transferRequests)
+      .set({ quoteId, updatedAt: new Date() })
+      .where(eq(transferRequests.id, approved.id))
+      .returning();
+    result = assertOne(rows, "linkQuoteAndAdvanceDealForApproval");
+  }
+
+  if (result.dealId) {
+    await advanceDealStatus(tenantId, result.dealId, "confirmed");
+  }
+
+  return result;
 }
 
 // ── Admin decision (ACCEPT / REJECT / MODIFY PRICE) ──────────────────────
@@ -1025,8 +1199,9 @@ export async function acceptTransferRequest(
   }
 
   if (existing.status === "approved") {
-    await ensureBookingForApprovedTransferRequestOrThrow(tenantId, existing);
-    return existing;
+    const reconciled = await linkQuoteAndAdvanceDealForApproval(tenantId, existing);
+    await ensureBookingForApprovedTransferRequestOrThrow(tenantId, reconciled);
+    return reconciled;
   }
 
   if (existing.status !== "pending_admin_approval") {
@@ -1050,7 +1225,8 @@ export async function acceptTransferRequest(
     .where(eq(transferRequests.id, id))
     .returning();
 
-  const updated = assertOne(rows, "acceptTransferRequest");
+  const approved = assertOne(rows, "acceptTransferRequest");
+  const updated = await linkQuoteAndAdvanceDealForApproval(tenantId, approved);
   await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated);
 
   // Fire-and-forget, fail-soft — only on the fresh transition to
@@ -1167,7 +1343,8 @@ export async function modifyPriceForTransferRequest(
     .where(eq(transferRequests.id, id))
     .returning();
 
-  const updated = assertOne(rows, "modifyPriceForTransferRequest");
+  const approved = assertOne(rows, "modifyPriceForTransferRequest");
+  const updated = await linkQuoteAndAdvanceDealForApproval(tenantId, approved);
   // A retry of a booking that failed to get created after THIS call
   // succeeded goes through acceptTransferRequest instead (idempotent for
   // any 'approved' status) — modifyPriceForTransferRequest itself stays

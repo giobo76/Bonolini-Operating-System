@@ -46,6 +46,10 @@ export type UpdateBookingInput = z.infer<typeof updateBookingSchema>;
 export const ensureBookingSnapshotSchema = z.object({
   transferRequestId: z.string().uuid(),
   clientId: z.string().uuid(),
+  // Phase 2.5 — the persistent negotiation this booking was confirmed
+  // from. Optional: a transfer_request created before this phase (or in
+  // any future path that doesn't go through the deal layer) has none.
+  dealId: z.string().uuid().optional(),
   pickup: z.string().trim().min(1),
   destination: z.string().trim().min(1),
   pickupAddress: z.string().trim().min(1).nullable(),

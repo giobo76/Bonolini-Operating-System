@@ -4,6 +4,11 @@ export const quoteStatusSchema = z.enum(["draft", "sent", "accepted", "declined"
 
 export const createQuoteSchema = z.object({
   clientId: z.string().uuid(),
+  // Phase 2.5 — the persistent negotiation this quote came from, when
+  // there is one. Optional: a quote created manually via the admin UI
+  // (apps/transfer-admin/app/customers/[id]/actions.ts) has no deal to
+  // link, exactly as before this phase.
+  dealId: z.string().uuid().optional(),
   amountCents: z.number().int().nonnegative().optional(),
   currency: z.string().default("EUR"),
   notes: z.string().trim().optional(),

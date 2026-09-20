@@ -3,6 +3,7 @@ import { tenants } from "./tenants";
 import { clients } from "./clients";
 import { quotes } from "./quotes";
 import { profiles } from "./profiles";
+import { deals } from "./deals";
 
 // ── Transfer request — current normalized commercial request ────────────
 // Sits between whatsapp_messages (immutable per-message log) and quotes
@@ -39,6 +40,14 @@ export const transferRequests = pgTable("transfer_requests", {
   clientId: uuid("client_id")
     .notNull()
     .references(() => clients.id, { onDelete: "cascade" }),
+  // Phase 2.5 — the persistent negotiation this attempt belongs to.
+  // Nullable: a historical row created before this migration (backfilled
+  // 1:1, see 0024_deals_backfill.sql) or, in principle, a row created by a
+  // future caller that doesn't go through the deal layer. Every row
+  // written by transfer-requests/service.ts from this phase onward always
+  // sets it. On delete set null (never cascade) — deleting a deal must
+  // never delete the commercial request history underneath it.
+  dealId: uuid("deal_id").references(() => deals.id, { onDelete: "set null" }),
   status: transferRequestStatusEnum("status").notNull().default("collecting_info"),
   intent: text("intent"),
   pickup: text("pickup"),
