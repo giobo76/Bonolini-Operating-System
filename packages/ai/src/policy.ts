@@ -36,6 +36,18 @@ export const actionCategories = [
   "delete",
   "secret_change",
   "follow_up",
+  // Phase 3 (BOS Agent — Approval/Execution/Verification for outbound
+  // communications, packages/core/src/communications): any message
+  // prepared for a real customer, on any channel. Deliberately always
+  // requires approval (see ALWAYS_REQUIRES_APPROVAL below) — conservative
+  // by design: the founder's own rule is that the BOS may prepare a
+  // communication but never send a commercial offer without approval, and
+  // this category does not attempt to distinguish "commercial offer" from
+  // "purely operational" at the policy layer (that distinction is easy to
+  // get wrong and the cost of requiring approval for a non-commercial
+  // message is low; the cost of skipping approval for one that turns out
+  // to be commercial is not).
+  "customer_communication",
 ] as const;
 
 export type ActionCategory = (typeof actionCategories)[number];
@@ -55,6 +67,7 @@ const ALWAYS_REQUIRES_APPROVAL = new Set<ActionCategory>([
   "spend",
   "delete",
   "booking_mutation",
+  "customer_communication",
 ]);
 
 export interface PolicyThresholds {

@@ -120,6 +120,13 @@
       "when": 1789920060000,
       "tag": "0024_deals_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790006400000,
+      "tag": "0025_communications",
+      "breakpoints": true
     }
   ]
 }

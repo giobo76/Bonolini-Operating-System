@@ -3,6 +3,7 @@ import { marketingAgent } from "./agents/marketing-agent";
 import { socialAgent } from "./agents/social-agent";
 import { operationsAgent } from "./agents/operations-agent";
 import { createRetryFacebookOnlyTool, createPrepareSocialContentTool } from "./tools/social-tools";
+import { createExecuteApprovedCommunicationTool } from "./tools/communication-tools";
 import { getConfiguredImageGenerator } from "./image-generator";
 import { DbSharedMemory } from "./db-memory";
 
@@ -18,6 +19,7 @@ export function getToolRegistry(): ToolRegistry {
   toolRegistry = new ToolRegistry();
   toolRegistry.register(createRetryFacebookOnlyTool());
   toolRegistry.register(createPrepareSocialContentTool(getConfiguredImageGenerator()));
+  toolRegistry.register(createExecuteApprovedCommunicationTool());
 
   return toolRegistry;
 }

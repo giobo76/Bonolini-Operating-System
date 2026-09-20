@@ -123,6 +123,18 @@ describe("evaluatePolicy — hardcoded category deny-list (never trusts the tool
     const decision = evaluatePolicy(action({ category: "booking_mutation", requiresApproval: false }));
     expect(decision.requiresApproval).toBe(true);
   });
+
+  // Phase 3 — outbound customer communications (packages/core/src/communications):
+  // never auto-sent, regardless of what the caller declares, even a
+  // read_only/reversible/no-approval-needed self-declaration.
+  it("always requires approval for customer_communication regardless of self-declaration", () => {
+    const decision = evaluatePolicy(
+      action({ category: "customer_communication", riskLevel: "read_only", requiresApproval: false, reversible: true }),
+    );
+    expect(decision.allowed).toBe(true);
+    expect(decision.requiresApproval).toBe(true);
+    expect(decision.tier).toBe("REQUIRES_APPROVAL");
+  });
 });
 
 describe("evaluatePolicy — riskLevel and reversibility", () => {
