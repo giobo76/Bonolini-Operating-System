@@ -150,7 +150,6 @@ vi.mock("../communications", async () => {
   return {
     ...content,
     sendMissingInfoRequest: (input: { content: { body: string } }) => sendMissingInfoRequest(input),
-    hasCommunicationForTransferRequest: async () => false,
     prepareTransferQuoteOfferCommunication: async (input: { transferRequestId: string; content: unknown }) => {
       const id = `comm-offer-${input.transferRequestId}`;
       if (!state.communications.has(id)) {
@@ -339,7 +338,7 @@ describe("missing information", () => {
       transferRequest: tr,
     });
     const input = sendMissingInfoRequest.mock.calls[0]![0] as unknown as { content: { body: string } };
-    expect(input.content.body).toContain("date of service");
+    expect(input.content.body).toContain("travel date");
     expect(input.content.body).toContain("how many children");
   });
 });

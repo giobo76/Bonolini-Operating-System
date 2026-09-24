@@ -465,26 +465,6 @@ export async function sendMissingInfoRequest(
   return executeCommunication(input.tenantId, row.id, provider);
 }
 
-export async function hasCommunicationForTransferRequest(
-  tenantId: string,
-  transferRequestId: string,
-  action: string,
-): Promise<boolean> {
-  const db = getDb();
-  const rows = await db
-    .select({ id: communications.id })
-    .from(communications)
-    .where(
-      and(
-        eq(communications.tenantId, tenantId),
-        eq(communications.transferRequestId, transferRequestId),
-        eq(communications.action, action),
-      ),
-    )
-    .limit(1);
-  return rows.length > 0;
-}
-
 export interface PrepareTransferQuoteOfferInput {
   tenantId: string;
   clientId: string;

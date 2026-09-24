@@ -39,7 +39,7 @@ The quote reaches the customer **only** from an APPROVA tap. That is the only co
 2. RIFIUTA: the customer receives nothing.
 3. Manual price: notification only. There is no button to enter a manual price yet, because `modifyPriceForTransferRequest` requires `pending_admin_approval` and a `manual_required` request stays at `ready_for_pricing`.
 4. Children (number and ages) and luggage are asked for, but never block pricing.
-5. Customer texts are in Italian or English (`toCustomerLanguage`: Italian or unknown → Italian, any other detected language → English), with a professional private-transfer tone. The word "taxi" is never used.
+5. Customer texts are the founder's own wording (2026-09-24, register "Lei", signature "Bonolini Transfer – Private Transfers", fixed vehicle line "Mercedes V-Class con autista privato", price "per l'intero veicolo"), in `communications/content.ts`, tested verbatim. They are in Italian or English (`toCustomerLanguage`: Italian or unknown → Italian, any other detected language → English), with a professional private-transfer tone. The word "taxi" is never used.
 6. Commands are valid only from `FOUNDER_WHATSAPP_PHONE`, and only through the button. A typed "APPROVA" is answered with "use the buttons".
 
 ## Safety properties

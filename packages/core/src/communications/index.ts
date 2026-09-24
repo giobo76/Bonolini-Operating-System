@@ -10,7 +10,6 @@ export {
   recordProviderDeliveryStatus,
   listCommunicationsForDeal,
   sendMissingInfoRequest,
-  hasCommunicationForTransferRequest,
   prepareTransferQuoteOfferCommunication,
 } from "./service";
 export type { SendMissingInfoRequestInput, PrepareTransferQuoteOfferInput } from "./service";
@@ -25,6 +24,9 @@ export {
   toCustomerLanguage,
   formatAmountForCustomer,
   formatDateForCustomer,
+  formatLongDateTime,
+  formatPassengers,
+  capitalizePlace,
 } from "./content";
 export type { CustomerLanguage, MissingInfoRequestInput, TransferQuoteOfferInput } from "./content";
 export {

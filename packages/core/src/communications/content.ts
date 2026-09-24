@@ -35,9 +35,10 @@ export function buildQuoteOfferContent(client: Client, quote: Quote): Communicat
 }
 
 // ── WhatsApp quote approval flow (packages/core/src/quote-approval) ───────
-// Fixed, founder-approved wording only: no LLM, no invented facts. The
-// missing-information question never mentions a price. Register: private
-// transfer / chauffeur service — never "taxi".
+// Texts supplied by the founder on 2026-09-24 (register "Lei"): no LLM, no
+// invented facts, never the word "taxi". The missing-information question
+// never mentions a price. Lines marked "derived" were not in the supplied
+// texts and follow their wording.
 
 export type CustomerLanguage = "it" | "en";
 
@@ -49,37 +50,52 @@ export function toCustomerLanguage(language: string | null | undefined): Custome
   return /^(it|ita|italian|italiano)\b/i.test(language.trim()) ? "it" : "en";
 }
 
+const SIGNATURE = "Bonolini Transfer – Private Transfers";
+
+// The founder's vehicle, as stated by the founder. Not a database field:
+// BOS has no vehicle model anywhere, and availability assumes one vehicle.
+const VEHICLE: Record<CustomerLanguage, string> = {
+  it: "Mercedes V-Class con autista privato",
+  en: "Mercedes V-Class with private driver",
+};
+
 export type BlockingMissingField = "pickup" | "destination" | "passengers" | "date" | "time" | "flight_number";
+
+// The supplied text's order, independent of the order
+// computeMissingInformation reports the fields in.
+const BLOCKING_ORDER: BlockingMissingField[] = ["pickup", "destination", "date", "time", "passengers", "flight_number"];
 
 const BLOCKING_LABELS: Record<CustomerLanguage, Record<BlockingMissingField, string>> = {
   it: {
     pickup: "luogo di partenza",
     destination: "destinazione",
+    date: "data del viaggio",
+    time: "orario di partenza",
     passengers: "numero di passeggeri",
-    date: "data del servizio",
-    time: "orario",
     flight_number: "numero del volo",
   },
   en: {
     pickup: "pickup location",
     destination: "destination",
+    date: "travel date",
+    time: "pickup time",
     passengers: "number of passengers",
-    date: "date of service",
-    time: "time",
     flight_number: "flight number",
   },
 };
 
 const OPTIONAL_LABELS: Record<CustomerLanguage, { children: string; childrenAges: string; luggage: string }> = {
   it: {
-    children: "quanti bambini viaggiano e la loro età",
-    childrenAges: "l'età dei bambini",
-    luggage: "quanti bagagli avete",
+    children: "quanti bambini viaggiano e la loro età (per i seggiolini)",
+    // derived: number of children known, ages missing
+    childrenAges: "l'età dei bambini (per i seggiolini)",
+    luggage: "quanti bagagli sono previsti (valigie grandi e bagagli a mano)",
   },
   en: {
-    children: "how many children are travelling and their ages",
-    childrenAges: "the ages of the children",
-    luggage: "how many pieces of luggage you have",
+    children: "how many children are travelling and their ages (for child seats)",
+    // derived: number of children known, ages missing
+    childrenAges: "the ages of the children (for child seats)",
+    luggage: "how much luggage you have (large suitcases and carry-ons)",
   },
 };
 
@@ -90,14 +106,13 @@ export interface MissingInfoRequestInput {
   askChildren: boolean;
   askChildrenAges: boolean;
   askLuggage: boolean;
-  isFollowUp: boolean;
 }
 
 export function buildMissingInfoRequestContent(input: MissingInfoRequestInput): CommunicationContent {
   const lang = input.language;
-  const blocking = input.missing
-    .filter((field): field is BlockingMissingField => field in BLOCKING_LABELS[lang])
-    .map((field) => `- ${BLOCKING_LABELS[lang][field]}`);
+  const blocking = BLOCKING_ORDER.filter((field) => input.missing.includes(field)).map(
+    (field) => `- ${BLOCKING_LABELS[lang][field]}`,
+  );
   if (blocking.length === 0) {
     throw new Error("buildMissingInfoRequestContent: no known missing field to ask for");
   }
@@ -107,26 +122,21 @@ export function buildMissingInfoRequestContent(input: MissingInfoRequestInput): 
   else if (input.askChildrenAges) optional.push(`- ${OPTIONAL_LABELS[lang].childrenAges}`);
   if (input.askLuggage) optional.push(`- ${OPTIONAL_LABELS[lang].luggage}`);
 
-  const lines: string[] =
+  const lines =
     lang === "it"
       ? [
-          input.isFollowUp
-            ? "Grazie. Per completare il preventivo ci servono ancora:"
-            : "Buongiorno, grazie per aver contattato Bonolini Transfer. Per preparare il preventivo ci servono ancora:",
+          "Buongiorno e grazie per aver contattato Bonolini Transfer.",
+          "Per preparare il Suo preventivo ci servono ancora:",
           ...blocking,
         ]
-      : [
-          input.isFollowUp
-            ? "Thank you. To complete your quote we still need:"
-            : "Hello, thank you for contacting Bonolini Transfer. To prepare your quote we still need:",
-          ...blocking,
-        ];
+      : ["Hello and thank you for contacting Bonolini Transfer.", "To prepare your quote, we still need:", ...blocking];
 
   if (optional.length > 0) {
-    lines.push("", lang === "it" ? "Se possibile, indicateci anche:" : "If possible, please also let us know:", ...optional);
+    lines.push("", lang === "it" ? "Se possibile, ci indichi anche:" : "If possible, please also let us know:", ...optional);
   }
+  lines.push("", SIGNATURE);
 
-  return { to: input.to, templateName: `missing_info_request_${lang}_v1`, body: lines.join("\n") };
+  return { to: input.to, templateName: `missing_info_request_${lang}_v2`, body: lines.join("\n") };
 }
 
 export function formatAmountForCustomer(amountCents: number, currency: string, language: CustomerLanguage): string {
@@ -139,11 +149,93 @@ export function formatAmountForCustomer(amountCents: number, currency: string, l
   return `${value.toFixed(2)} ${currency}`;
 }
 
-// "2026-10-03" -> "03/10/2026"; anything unexpected is shown verbatim
-// rather than reinterpreted.
+// "2026-10-03" -> "03/10/2026" (founder-facing texts); anything unexpected
+// is shown verbatim rather than reinterpreted.
 export function formatDateForCustomer(isoDate: string): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
   return match ? `${match[3]}/${match[2]}/${match[1]}` : isoDate;
+}
+
+// Fixed here rather than taken from Intl, whose month names depend on the
+// server's ICU data.
+const MONTHS: Record<CustomerLanguage, string[]> = {
+  it: [
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre",
+  ],
+  en: [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ],
+};
+
+// IT "3 ottobre 2026, ore 14:30", EN "3 October 2026 at 14:30".
+export function formatLongDateTime(isoDate: string, time: string, language: CustomerLanguage): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
+  const month = match ? MONTHS[language][Number(match[2]) - 1] : undefined;
+  const date = match && month ? `${Number(match[3])} ${month} ${match[1]}` : isoDate;
+  return language === "it" ? `${date}, ore ${time}` : `${date} at ${time}`;
+}
+
+// Display only: the stored value keeps whatever the customer wrote.
+export function capitalizePlace(place: string): string {
+  const trimmed = place.trim();
+  return trimmed.charAt(0).toLocaleUpperCase("it-IT") + trimmed.slice(1);
+}
+
+function joinList(items: string[], language: CustomerLanguage): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} ${language === "it" ? "e" : "and"} ${items[items.length - 1]}`;
+}
+
+// childrenAges is free text as the customer wrote it ("4 e 7 anni", "4, 7").
+// Reformatted only when it holds exactly one number per child; otherwise
+// shown as written.
+function formatChildrenAges(childrenAges: string, children: number, language: CustomerLanguage): string {
+  const ages = childrenAges.match(/\d+/g) ?? [];
+  if (ages.length === children) {
+    if (language === "it") return `${joinList(ages, "it")} ${ages.length === 1 && ages[0] === "1" ? "anno" : "anni"}`;
+    return `${ages.length === 1 ? "age" : "ages"} ${joinList(ages, "en")}`;
+  }
+  return language === "it" ? `età: ${childrenAges}` : `ages: ${childrenAges}`;
+}
+
+// `passengers` is the total number of people (the parser is told so).
+// "2 adulti + 2 bambini" only when that split is consistent; otherwise the
+// plain total, never a guessed split.
+export function formatPassengers(
+  passengers: number,
+  children: number | null,
+  childrenAges: string | null,
+  language: CustomerLanguage,
+): string {
+  if (!children || children <= 0 || children >= passengers) return String(passengers);
+  const adults = passengers - children;
+  const ages = childrenAges ? ` (${formatChildrenAges(childrenAges, children, language)})` : "";
+  if (language === "it") {
+    return `${adults} ${adults === 1 ? "adulto" : "adulti"} + ${children} ${children === 1 ? "bambino" : "bambini"}${ages}`;
+  }
+  return `${adults} ${adults === 1 ? "adult" : "adults"} + ${children} ${children === 1 ? "child" : "children"}${ages}`;
 }
 
 export interface TransferQuoteOfferInput {
@@ -154,6 +246,9 @@ export interface TransferQuoteOfferInput {
   requestedDate: string;
   requestedTime: string;
   passengers: number;
+  children: number | null;
+  childrenAges: string | null;
+  luggage: string | null;
   flightNumber: string | null;
   amountCents: number;
   currency: string;
@@ -162,34 +257,42 @@ export interface TransferQuoteOfferInput {
 export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): CommunicationContent {
   const lang = input.language;
   const price = formatAmountForCustomer(input.amountCents, input.currency, lang);
-  const date = formatDateForCustomer(input.requestedDate);
+  const route = `${capitalizePlace(input.pickup)} → ${capitalizePlace(input.destination)}`;
+  const when = formatLongDateTime(input.requestedDate, input.requestedTime, lang);
+  const passengers = formatPassengers(input.passengers, input.children, input.childrenAges, lang);
 
   const lines =
     lang === "it"
       ? [
           "Buongiorno,",
-          "grazie per aver scelto Bonolini Transfer. Ecco il preventivo per il servizio richiesto:",
+          "grazie per aver scelto Bonolini Transfer. Ecco il Suo preventivo:",
           "",
-          `Tratta: ${input.pickup} → ${input.destination}`,
-          `Data: ${date} alle ${input.requestedTime}`,
-          `Passeggeri: ${input.passengers}`,
+          `Tratta: ${route}`,
+          `Data: ${when}`,
+          `Passeggeri: ${passengers}`,
+          ...(input.luggage ? [`Bagagli: ${input.luggage}`] : []),
           ...(input.flightNumber ? [`Volo: ${input.flightNumber}`] : []),
-          `Prezzo: ${price}`,
+          `Veicolo: ${VEHICLE.it}`,
+          `Prezzo: ${price} per l'intero veicolo`,
           "",
-          "Per confermare il servizio o per qualsiasi domanda può rispondere direttamente a questo messaggio.",
+          "Per confermare il servizio o per qualsiasi domanda, risponda pure a questo messaggio.",
+          SIGNATURE,
         ]
       : [
           "Hello,",
-          "thank you for choosing Bonolini Transfer. Here is the quote for your requested transfer:",
+          "thank you for choosing Bonolini Transfer. Here is your quote:",
           "",
-          `Route: ${input.pickup} → ${input.destination}`,
-          `Date: ${date} at ${input.requestedTime}`,
-          `Passengers: ${input.passengers}`,
+          `Route: ${route}`,
+          `Date: ${when}`,
+          `Passengers: ${passengers}`,
+          ...(input.luggage ? [`Luggage: ${input.luggage}`] : []),
           ...(input.flightNumber ? [`Flight: ${input.flightNumber}`] : []),
-          `Price: ${price}`,
+          `Vehicle: ${VEHICLE.en}`,
+          `Price: ${price} for the entire vehicle`,
           "",
           "To confirm the service or for any question, simply reply to this message.",
+          SIGNATURE,
         ];
 
-  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v1`, body: lines.join("\n") };
+  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v2`, body: lines.join("\n") };
 }

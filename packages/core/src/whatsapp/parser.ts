@@ -25,7 +25,10 @@ const EXTRACTION_TOOL = {
           "ISO date (YYYY-MM-DD), only if reliably resolvable from the message plus the reference date given below (e.g. 'tomorrow' relative to the reference date). Omit if the date is ambiguous or cannot be resolved with confidence.",
       },
       time: { type: "string", description: "Only if an explicit time is stated" },
-      passengers: { type: "integer", description: "Only if a passenger count is stated" },
+      passengers: {
+        type: "integer",
+        description: "Total number of people travelling, children included, only if stated",
+      },
       luggage: { type: "string", description: "Only if luggage quantity/type is mentioned" },
       children: {
         type: "integer",

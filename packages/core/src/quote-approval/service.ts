@@ -8,7 +8,6 @@ import {
 import { getClient } from "../clients";
 import {
   sendMissingInfoRequest,
-  hasCommunicationForTransferRequest,
   prepareTransferQuoteOfferCommunication,
   submitCommunicationForApproval,
   approveCommunication,
@@ -112,7 +111,6 @@ async function askCustomerForMissingInfo(input: CustomerMessageOutcome): Promise
   const digits = normalizePhone(input.fromPhone);
   if (!digits) return;
 
-  const isFollowUp = await hasCommunicationForTransferRequest(input.tenantId, tr.id, "missing_info_request");
   const content = buildMissingInfoRequestContent({
     to: `+${digits}`,
     language: toCustomerLanguage(tr.language),
@@ -120,7 +118,6 @@ async function askCustomerForMissingInfo(input: CustomerMessageOutcome): Promise
     askChildren: tr.children === null,
     askChildrenAges: (tr.children ?? 0) > 0 && !tr.childrenAges,
     askLuggage: !tr.luggage,
-    isFollowUp,
   });
 
   const communication = await sendMissingInfoRequest({
@@ -219,6 +216,9 @@ function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, to:
     requestedDate: tr.requestedDate,
     requestedTime: tr.requestedTime,
     passengers: tr.passengers,
+    children: tr.children,
+    childrenAges: tr.childrenAges,
+    luggage: tr.luggage,
     flightNumber: tr.flightNumber,
     amountCents,
     currency: tr.currency,
