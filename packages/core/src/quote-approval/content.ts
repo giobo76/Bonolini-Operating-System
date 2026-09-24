@@ -149,12 +149,36 @@ export function buildManualPriceText(tr: TransferRequest, client: Client): strin
   ].join("\n");
 }
 
+// Alert when a message to the customer did not go out (24h window closed,
+// Meta error, provider not configured). Sent once per failed send.
+export function buildCustomerSendFailureText(input: {
+  what: string;
+  ref: string;
+  clientName: string;
+  clientPhone: string;
+  error: string;
+  body: string;
+}): string {
+  return [
+    "INVIO AL CLIENTE NON RIUSCITO",
+    `Rif. ${input.ref}`,
+    "",
+    `Cliente: ${input.clientName} (${displayPhone(input.clientPhone)})`,
+    `Messaggio: ${input.what}`,
+    `Motivo: ${input.error}`,
+    "",
+    "Il cliente NON ha ricevuto questo testo; contattalo a mano:",
+    "",
+    input.body,
+  ].join("\n");
+}
+
 export const FOUNDER_TEXTS = {
   askPrice: (ref: string) => `MODIFICA ${ref}: scrivi il nuovo prezzo in euro (solo la cifra, es. 280 oppure 280,50).`,
   awaitingPriceReminder: (ref: string) =>
     `Aspetto ancora il nuovo prezzo per ${ref}: scrivi solo la cifra, es. 280.`,
   approvedSent: (ref: string) =>
-    `✅ ${ref} approvato. Preventivo consegnato a WhatsApp per l'invio al cliente (la conferma di consegna arriva a parte).`,
+    `✅ ${ref} approvato. Preventivo inviato al cliente su WhatsApp (la conferma di consegna arriva a parte).`,
   approvedSendFailed: (ref: string, error: string) =>
     `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}\nContatta il cliente a mano.`,
   approvedSendInProgress: (ref: string) => `${ref} approvato: invio al cliente già in corso.`,
@@ -163,12 +187,12 @@ export const FOUNDER_TEXTS = {
   alreadyRejected: (ref: string) => `${ref} è già rifiutato.`,
   inProgress: (ref: string) => `Sto già elaborando ${ref}, attendi qualche secondo.`,
   superseded: (ref: string) =>
-    `Questo messaggio per ${ref} non è più valido (è stato sostituito). Usa l'ultimo PREVENTIVO PRONTO.`,
+    `Questo preventivo ${ref} non è più valido: è stato sostituito da uno più recente. Usa l'ultimo.`,
   noLongerPending: (ref: string, status: string) =>
     `${ref} non è più in attesa di approvazione (stato: ${status}). Nessun invio al cliente.`,
   priceMismatch: (ref: string) =>
     `${ref} risulta già approvato con un prezzo diverso da questo messaggio. Nessun invio al cliente: controlla dal pannello.`,
-  error: (ref: string, error: string) => `Errore su ${ref}: ${error}\nNiente è stato inviato al cliente. Puoi riprovare con lo stesso pulsante.`,
+  error: (ref: string, error: string) => `Errore su ${ref}: ${error}\nNiente è stato inviato al cliente. Puoi riprovare.`,
   notATestPhone: (ref: string) =>
     `${ref}: il cliente non è tra i numeri di prova (QUOTE_APPROVAL_TEST_PHONES). Nessuna approvazione, nessun invio.`,
   unknownButton: "Pulsante non riconosciuto. Scrivi un messaggio qualsiasi per ricevere di nuovo i preventivi in attesa.",
@@ -176,6 +200,14 @@ export const FOUNDER_TEXTS = {
   useButtons: "I comandi valgono solo tramite i pulsanti sotto ogni PREVENTIVO PRONTO. Te li rimando qui sotto.",
   nothingPending: "Nessun preventivo in attesa di approvazione.",
   configError: (what: string) => `Configurazione mancante: ${what}. Nessuna azione eseguita.`,
+  disabled: "Flusso preventivi disattivato (QUOTE_APPROVAL_ENABLED). Nessuna azione eseguita.",
+  invalidPrice: "Prezzo non valido: scrivi un importo in euro maggiore di zero, es. 280 oppure 280,50.",
+  revised: (ref: string, price: string) =>
+    `Nuovo preventivo ${ref} a ${price}: controlla l'anteprima e approva. Il preventivo precedente non è più valido.`,
+  noAdminLink:
+    "Per decidere apri il pannello admin → Preventivi in attesa. (ADMIN_BASE_URL non è configurato, quindi manca il link diretto.)",
+  openQuoteLink: "Apri il preventivo nel pannello",
+  openPendingLink: "Apri i preventivi in attesa",
   emailFooter:
     "Per usare i pulsanti APPROVA / MODIFICA / RIFIUTA scrivi un messaggio qualsiasi al numero WhatsApp aziendale: ti rimando tutti i preventivi in attesa.",
 } as const;

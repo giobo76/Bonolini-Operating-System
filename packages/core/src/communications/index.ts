@@ -4,6 +4,7 @@ export {
   approveCommunication,
   rejectCommunication,
   executeCommunication,
+  executeCommunicationDetailed,
   getCommunication,
   findCommunicationByIdempotencyKey,
   findCommunicationByProviderMessageId,
@@ -12,7 +13,7 @@ export {
   sendMissingInfoRequest,
   prepareTransferQuoteOfferCommunication,
 } from "./service";
-export type { SendMissingInfoRequestInput, PrepareTransferQuoteOfferInput } from "./service";
+export type { SendMissingInfoRequestInput, PrepareTransferQuoteOfferInput, ExecutionResult } from "./service";
 export * from "./schema";
 export type { OutboundProvider, OutboundMessageRequest, OutboundSendResult } from "./provider";
 export { NotConfiguredOutboundProvider, getConfiguredOutboundProvider } from "./provider";

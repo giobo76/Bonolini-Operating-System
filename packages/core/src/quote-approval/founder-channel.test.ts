@@ -131,3 +131,46 @@ describe("sendToFounder", () => {
     expect(result.error).toContain("domain not verified");
   });
 });
+
+describe("sendToFounder — no founder WhatsApp number (default)", () => {
+  beforeEach(() => {
+    delete process.env.FOUNDER_WHATSAPP_PHONE;
+    delete process.env.FOUNDER_NOTIFICATION_EMAIL;
+  });
+
+  it("goes straight to email, never attempts WhatsApp, and adds no 'WhatsApp non partito' note", async () => {
+    const result = await sendToFounder("tenant-1", {
+      parts: ["PREVENTIVO PRONTO dettagli", "anteprima"],
+      buttons: BUTTONS,
+      link: { label: "Apri il preventivo nel pannello", url: "https://admin.example/preventivi/1" },
+      emailSubject: "PREVENTIVO PRONTO #abc",
+    });
+
+    expect(result).toEqual({ channel: "email", error: null });
+    expect(state.posted).toHaveLength(0);
+    expect(state.emails[0]!.text).toContain("PREVENTIVO PRONTO dettagli");
+    expect(state.emails[0]!.text).toContain("Apri il preventivo nel pannello:\nhttps://admin.example/preventivi/1");
+    expect(state.emails[0]!.text).not.toContain("WhatsApp");
+  });
+
+  it("sends to FOUNDER_NOTIFICATION_EMAIL when set, else to MARKETING_ALERT_EMAIL", async () => {
+    await sendToFounder("tenant-1", { parts: ["x"], emailSubject: "s" });
+    expect(state.emails[0]!.to).toBe("founder@example.com");
+
+    process.env.FOUNDER_NOTIFICATION_EMAIL = "titolare@example.com";
+    await sendToFounder("tenant-1", { parts: ["x"], emailSubject: "s" });
+    expect(state.emails[1]!.to).toBe("titolare@example.com");
+  });
+
+  it("without ADMIN_BASE_URL the email says where to decide instead of linking", async () => {
+    await sendToFounder("tenant-1", { parts: ["x"], buttons: BUTTONS, link: null, emailSubject: "s" });
+    expect(state.emails[0]!.text).toContain("Preventivi in attesa");
+    expect(state.emails[0]!.text).toContain("ADMIN_BASE_URL");
+  });
+
+  it("reports a failure (never a fake success) when the email can't be sent", async () => {
+    state.emailError = { message: "domain not verified" };
+    const result = await sendToFounder("tenant-1", { parts: ["x"], emailSubject: "s" });
+    expect(result).toEqual({ channel: "none", error: "Email: domain not verified" });
+  });
+});

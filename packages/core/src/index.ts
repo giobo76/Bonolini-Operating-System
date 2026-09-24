@@ -15,6 +15,14 @@ export * from "./availability";
 export * from "./calendar";
 export * from "./social-publishing";
 export * from "./bos-agent";
+export type {
+  DecisionResult,
+  DecisionOutcome,
+  PanelPending,
+  PanelRound,
+  PanelRoundDetail,
+  PanelManualPrice,
+} from "./quote-approval";
 
 // Boundary rule (ADR 0002): other modules/apps import only from here (or
 // from a module's own index.ts, e.g. "./clients") — never reach into a

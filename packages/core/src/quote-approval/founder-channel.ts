@@ -3,14 +3,18 @@ import { getWhatsappCloudApiCredentials, isE164, postWhatsappCloudApiMessage } f
 import { normalizePhone } from "../whatsapp";
 import { log, captureException } from "../observability";
 import { getFounderLastInboundAt } from "./repository";
+import { getFounderNotificationEmail } from "./config";
 import { FOUNDER_TEXTS } from "./content";
 
-// Delivery of messages to the founder. WhatsApp free-form/interactive
-// messages only reach someone who wrote to the business number in the last
-// 24h (Meta's customer service window, which applies to the founder too).
-// Outside it — or if the WhatsApp send fails for any other reason — the same
-// content goes by email via Resend to MARKETING_ALERT_EMAIL. Buttons don't
-// exist in email, so the email tells the founder how to get them back.
+// Delivery of messages to the founder.
+//
+// Default (FOUNDER_WHATSAPP_PHONE empty, the founder's decision of
+// 2026-09-24): email only, via Resend, to FOUNDER_NOTIFICATION_EMAIL (or
+// MARKETING_ALERT_EMAIL). No WhatsApp attempt of any kind, no error logged
+// for it. Decisions are taken in the admin panel, linked from the email.
+//
+// If FOUNDER_WHATSAPP_PHONE is ever set: WhatsApp first (only inside Meta's
+// 24h window, which applies to the founder too), email as fallback.
 
 const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 // Meta's limit for an interactive message body.
@@ -25,6 +29,8 @@ export interface FounderMessage {
   // Sent in order. When `buttons` is set they are attached to the last part.
   parts: string[];
   buttons?: FounderButton[];
+  // Link to the admin panel page for this message, when ADMIN_BASE_URL is set.
+  link?: { label: string; url: string } | null;
   emailSubject: string;
 }
 
@@ -35,7 +41,7 @@ export type FounderDeliveryResult =
 
 export function getFounderPhoneE164(): string | null {
   const raw = process.env.FOUNDER_WHATSAPP_PHONE;
-  if (!raw) return null;
+  if (!raw || !raw.trim()) return null;
   const e164 = `+${normalizePhone(raw)}`;
   return isE164(e164) ? e164 : null;
 }
@@ -62,25 +68,28 @@ function interactivePayload(to: string, body: string, buttons: FounderButton[]) 
   };
 }
 
+function withLink(message: FounderMessage): string[] {
+  return message.link ? [...message.parts, `${message.link.label}: ${message.link.url}`] : message.parts;
+}
+
 // Button messages carry one body of at most 1024 chars: parts are merged
 // into it when they fit, otherwise the earlier parts go first as plain text.
 function planWhatsappMessages(to: string, message: FounderMessage): Record<string, unknown>[] {
+  const parts = withLink(message);
   if (!message.buttons || message.buttons.length === 0) {
-    return message.parts.map((part) => textPayload(to, part));
+    return parts.map((part) => textPayload(to, part));
   }
-  const merged = message.parts.join("\n\n");
+  const merged = parts.join("\n\n");
   if (merged.length <= INTERACTIVE_BODY_MAX) {
     return [interactivePayload(to, merged, message.buttons)];
   }
-  const leading = message.parts.slice(0, -1).map((part) => textPayload(to, part));
-  const last = message.parts[message.parts.length - 1] ?? "";
+  const leading = parts.slice(0, -1).map((part) => textPayload(to, part));
+  const last = parts[parts.length - 1] ?? "";
   const lastBody = last.length <= INTERACTIVE_BODY_MAX ? last : `${last.slice(0, INTERACTIVE_BODY_MAX - 1)}…`;
   return [...leading, interactivePayload(to, lastBody, message.buttons)];
 }
 
-async function sendWhatsapp(tenantId: string, message: FounderMessage): Promise<string | null> {
-  const to = getFounderPhoneE164();
-  if (!to) return "FOUNDER_WHATSAPP_PHONE non configurato o non valido";
+async function sendWhatsapp(tenantId: string, to: string, message: FounderMessage): Promise<string | null> {
   const credentials = getWhatsappCloudApiCredentials();
   if (!credentials) return "WHATSAPP_ACCESS_TOKEN/WHATSAPP_PHONE_NUMBER_ID non configurati";
 
@@ -102,19 +111,23 @@ async function sendWhatsapp(tenantId: string, message: FounderMessage): Promise<
   }
 }
 
-async function sendEmail(message: FounderMessage, whatsappError: string): Promise<string | null> {
+async function sendEmail(message: FounderMessage, whatsappError: string | null): Promise<string | null> {
   const apiKey = process.env.RESEND_API_KEY;
-  const to = process.env.MARKETING_ALERT_EMAIL;
-  if (!apiKey || !to) return "RESEND_API_KEY o MARKETING_ALERT_EMAIL non configurati";
+  const to = getFounderNotificationEmail();
+  if (!apiKey || !to) return "RESEND_API_KEY o FOUNDER_NOTIFICATION_EMAIL/MARKETING_ALERT_EMAIL non configurati";
 
-  const text = [
-    ...message.parts,
-    "",
-    `(Inviato per email perché il WhatsApp non è partito: ${whatsappError})`,
-    message.buttons ? FOUNDER_TEXTS.emailFooter : "",
-  ]
-    .join("\n\n")
-    .trim();
+  const footer: string[] = [];
+  if (message.link) {
+    footer.push(`${message.link.label}:\n${message.link.url}`);
+  } else if (message.buttons) {
+    footer.push(FOUNDER_TEXTS.noAdminLink);
+  }
+  if (whatsappError) {
+    footer.push(`(Inviato per email perché il WhatsApp non è partito: ${whatsappError})`);
+    if (message.buttons) footer.push(FOUNDER_TEXTS.emailFooter);
+  }
+
+  const text = [...message.parts, ...footer].join("\n\n").trim();
 
   try {
     const { error } = await new Resend(apiKey).emails.send({
@@ -130,18 +143,23 @@ async function sendEmail(message: FounderMessage, whatsappError: string): Promis
 }
 
 export async function sendToFounder(tenantId: string, message: FounderMessage): Promise<FounderDeliveryResult> {
-  const whatsappError = await sendWhatsapp(tenantId, message);
-  if (whatsappError === null) {
-    return { channel: "whatsapp", error: null };
+  const founderPhone = getFounderPhoneE164();
+
+  let whatsappError: string | null = null;
+  if (founderPhone) {
+    whatsappError = await sendWhatsapp(tenantId, founderPhone, message);
+    if (whatsappError === null) {
+      return { channel: "whatsapp", error: null };
+    }
+    log("quote_approval.founder_whatsapp_not_sent", { reason: whatsappError });
   }
 
-  log("quote_approval.founder_whatsapp_not_sent", { reason: whatsappError });
   const emailError = await sendEmail(message, whatsappError);
   if (emailError === null) {
     return { channel: "email", error: whatsappError };
   }
 
-  const combined = `WhatsApp: ${whatsappError} | Email: ${emailError}`;
+  const combined = whatsappError ? `WhatsApp: ${whatsappError} | Email: ${emailError}` : `Email: ${emailError}`;
   captureException(new Error(combined), "quote_approval.founder_notification_failed");
   return { channel: "none", error: combined };
 }

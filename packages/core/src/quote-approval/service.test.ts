@@ -17,6 +17,7 @@ const { state } = vi.hoisted(() => ({
     customerSends: 0,
     adminProfile: true,
     customerPhone: "+393331234567",
+    sendResult: "executed" as "executed" | "execution_failed",
   },
 }));
 
@@ -108,7 +109,7 @@ vi.mock("./founder-channel", () => ({
   },
 }));
 
-const acceptTransferRequest = vi.fn(async (_t: string, id: string) => {
+const acceptTransferRequest = vi.fn(async (_t: string, id: string, _approver?: string) => {
   const tr = state.transferRequests.get(id)!;
   Object.assign(tr, { status: "approved", finalAmountCents: tr.finalAmountCents ?? tr.calculatedAmountCents });
   return tr;
@@ -125,7 +126,7 @@ const rejectTransferRequest = vi.fn(async (_t: string, id: string) => {
 });
 vi.mock("../transfer-requests", () => ({
   getTransferRequest: async (_t: string, id: string) => state.transferRequests.get(id) ?? null,
-  acceptTransferRequest: (...args: [string, string]) => acceptTransferRequest(...args),
+  acceptTransferRequest: (...args: [string, string, string]) => acceptTransferRequest(...args),
   modifyPriceForTransferRequest: (...args: [string, string, string, number]) => modifyPriceForTransferRequest(...args),
   rejectTransferRequest: (...args: [string, string]) => rejectTransferRequest(...args),
 }));
@@ -139,11 +140,18 @@ vi.mock("../whatsapp", () => ({
   normalizePhone: (phone: string) => phone.replace(/[^0-9]/g, ""),
 }));
 
-const sendMissingInfoRequest = vi.fn(async (input: { content: { body: string } }) => ({
-  id: "comm-missing",
-  status: "executed",
-  content: input.content,
-}));
+const sendMissingInfoRequest = vi.fn(async (input: { content: { body: string } }) => {
+  const failed = state.sendResult === "execution_failed";
+  return {
+    communication: {
+      id: "comm-missing",
+      status: state.sendResult,
+      error: failed ? "24h window closed" : null,
+      content: input.content,
+    },
+    attempted: true,
+  };
+});
 
 vi.mock("../communications", async () => {
   const content = await vi.importActual<typeof import("../communications/content")>("../communications/content");
@@ -167,18 +175,26 @@ vi.mock("../communications", async () => {
       if (c.status === "pending_approval") c.status = "approved";
       return c;
     },
-    executeCommunication: async (_t: string, id: string) => {
+    executeCommunicationDetailed: async (_t: string, id: string) => {
       const c = state.communications.get(id)!;
-      if (c.status === "approved") {
-        state.customerSends++;
-        c.status = "executed";
-      }
-      return c;
+      if (c.status !== "approved") return { communication: c, attempted: false };
+      state.customerSends++;
+      c.status = state.sendResult;
+      c.error = state.sendResult === "execution_failed" ? "24h window closed" : null;
+      return { communication: c, attempted: true };
     },
   };
 });
 
-const { handleCustomerMessageOutcome, handleFounderMessage } = await import("./service");
+const {
+  handleCustomerMessageOutcome,
+  handleFounderMessage,
+  approveQuoteRound,
+  rejectQuoteRound,
+  reviseQuoteRound,
+  listPendingForPanel,
+  getRoundForPanel,
+} = await import("./service");
 
 function transferRequest(overrides: Partial<TransferRequest> = {}): TransferRequest {
   return {
@@ -271,6 +287,7 @@ beforeEach(() => {
   state.customerSends = 0;
   state.adminProfile = true;
   state.customerPhone = "+393331234567";
+  state.sendResult = "executed";
   process.env.QUOTE_APPROVAL_ENABLED = "true";
   delete process.env.QUOTE_APPROVAL_TEST_PHONES;
   process.env.FOUNDER_PROFILE_ID = "profile-founder";
@@ -606,5 +623,167 @@ describe("QUOTE_APPROVAL_TEST_PHONES", () => {
 
     expect(state.founderOutbox).toHaveLength(1);
     expect(state.founderOutbox[0]!.parts.join("")).toContain("Nessun preventivo in attesa");
+  });
+});
+
+describe("admin panel decisions", () => {
+  const STAFF = "profile-staff";
+
+  function openRound() {
+    return state.rows.find((r) => r.status === "awaiting_decision")!;
+  }
+
+  it("Approva approves with the logged-in profile and sends the quote; a double click sends nothing more", async () => {
+    await notifyQuoteReady(transferRequest());
+    const id = openRound().id;
+
+    const first = await approveQuoteRound("tenant-1", id, STAFF);
+    const second = await approveQuoteRound("tenant-1", id, STAFF);
+
+    expect(first.outcome).toBe("done");
+    expect(first.message).toContain("approvato");
+    expect(second.outcome).toBe("already");
+    expect(second.message).toContain("già approvato");
+    expect(acceptTransferRequest).toHaveBeenCalledTimes(1);
+    expect(acceptTransferRequest.mock.calls[0]![2]).toBe(STAFF);
+    expect(state.customerSends).toBe(1);
+  });
+
+  it("Rifiuta rejects and sends nothing", async () => {
+    await notifyQuoteReady(transferRequest());
+    const result = await rejectQuoteRound("tenant-1", openRound().id);
+    expect(result.outcome).toBe("done");
+    expect(state.customerSends).toBe(0);
+    expect(rejectTransferRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("Modifica opens a new round without emailing it; the old round can no longer be approved", async () => {
+    await notifyQuoteReady(transferRequest());
+    const oldId = openRound().id;
+    const outboxBefore = state.founderOutbox.length;
+
+    const revised = await reviseQuoteRound("tenant-1", oldId, 28000, { notify: false });
+
+    expect(revised.outcome).toBe("done");
+    expect(revised.newRoundId).toBeDefined();
+    expect(state.founderOutbox).toHaveLength(outboxBefore);
+    expect((await approveQuoteRound("tenant-1", oldId, STAFF)).message).toContain("non è più valido");
+
+    const approved = await approveQuoteRound("tenant-1", revised.newRoundId!, STAFF);
+    expect(approved.outcome).toBe("done");
+    expect(modifyPriceForTransferRequest).toHaveBeenCalledWith("tenant-1", expect.any(String), STAFF, 28000, expect.any(String));
+    expect(state.customerSends).toBe(1);
+  });
+
+  it("Modifica refuses a non-positive price", async () => {
+    await notifyQuoteReady(transferRequest());
+    const result = await reviseQuoteRound("tenant-1", openRound().id, 0, { notify: false });
+    expect(result.outcome).toBe("refused");
+    expect(state.rows).toHaveLength(1);
+  });
+
+  it("with the flow off every decision is refused and nothing happens", async () => {
+    await notifyQuoteReady(transferRequest());
+    const id = openRound().id;
+    process.env.QUOTE_APPROVAL_ENABLED = "false";
+
+    for (const result of [
+      await approveQuoteRound("tenant-1", id, STAFF),
+      await rejectQuoteRound("tenant-1", id),
+      await reviseQuoteRound("tenant-1", id, 28000, { notify: false }),
+    ]) {
+      expect(result.outcome).toBe("refused");
+      expect(result.message).toContain("disattivato");
+    }
+    expect(acceptTransferRequest).not.toHaveBeenCalled();
+    expect(rejectTransferRequest).not.toHaveBeenCalled();
+    expect((await listPendingForPanel("tenant-1")).enabled).toBe(false);
+  });
+
+  it("test mode: Approva refuses a customer outside QUOTE_APPROVAL_TEST_PHONES and approves nothing", async () => {
+    await notifyQuoteReady(transferRequest());
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+    const result = await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    expect(result.outcome).toBe("refused");
+    expect(acceptTransferRequest).not.toHaveBeenCalled();
+    expect(openRound()).toBeDefined();
+  });
+});
+
+describe("alerts when a message to the customer does not go out", () => {
+  function alerts() {
+    return state.founderOutbox.filter((m) => m.parts.join("").includes("INVIO AL CLIENTE NON RIUSCITO"));
+  }
+
+  it("alerts once when the missing-information question fails", async () => {
+    state.sendResult = "execution_failed";
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: { pickup: "Malpensa" },
+      transferRequest: transferRequest({ status: "collecting_info", missingInformation: ["date"] }),
+    });
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.parts.join("")).toContain("la domanda sui dati mancanti");
+    expect(alerts()[0]!.parts.join("")).toContain("24h window closed");
+  });
+
+  it("alerts once when the quote fails, and not again on a later click", async () => {
+    await notifyQuoteReady(transferRequest());
+    const id = state.rows[0]!.id;
+    state.sendResult = "execution_failed";
+
+    const result = await approveQuoteRound("tenant-1", id, "profile-staff");
+    await approveQuoteRound("tenant-1", id, "profile-staff");
+
+    expect(result.message).toContain("NON è partito");
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.parts.join("")).toContain("il preventivo");
+  });
+
+  it("no alert when the send goes out", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", state.rows[0]!.id, "profile-staff");
+    expect(alerts()).toHaveLength(0);
+  });
+});
+
+describe("panel views and email links", () => {
+  it("lists pending quotes with the exact customer text", async () => {
+    await notifyQuoteReady(transferRequest());
+    const pending = await listPendingForPanel("tenant-1");
+    expect(pending.enabled).toBe(true);
+    expect(pending.quotes).toHaveLength(1);
+    expect(pending.quotes[0]!.view.customerPreview).toContain("Prezzo: 300,00 € per l'intero veicolo");
+    expect(pending.quotes[0]!.view.founderDetails).toContain("PREVENTIVO PRONTO");
+  });
+
+  it("a superseded round points to the newest open one", async () => {
+    await notifyQuoteReady(transferRequest());
+    const oldId = state.rows[0]!.id;
+    const revised = await reviseQuoteRound("tenant-1", oldId, 28000, { notify: false });
+
+    const oldView = await getRoundForPanel("tenant-1", oldId);
+    const newView = await getRoundForPanel("tenant-1", revised.newRoundId!);
+    expect(oldView?.open).toBe(false);
+    expect(oldView?.latestOpenRoundId).toBe(revised.newRoundId);
+    expect(newView?.open).toBe(true);
+    expect(newView?.view.amountCents).toBe(28000);
+  });
+
+  it("PREVENTIVO PRONTO links to the quote page when ADMIN_BASE_URL is set, and has no link otherwise", async () => {
+    process.env.ADMIN_BASE_URL = "https://bonolini-operating-system-transfer.vercel.app/";
+    await notifyQuoteReady(transferRequest());
+    const withLink = state.founderOutbox[0] as { link?: { url: string } | null };
+    expect(withLink.link?.url).toBe(
+      `https://bonolini-operating-system-transfer.vercel.app/preventivi/${state.rows[0]!.id}`,
+    );
+
+    delete process.env.ADMIN_BASE_URL;
+    await notifyQuoteReady(transferRequest({ id: "b1b2c3d4-0000-4000-8000-000000000002" }));
+    const withoutLink = state.founderOutbox[1] as { link?: { url: string } | null };
+    expect(withoutLink.link).toBeNull();
   });
 });

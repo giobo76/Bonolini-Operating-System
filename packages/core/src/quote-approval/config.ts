@@ -37,6 +37,28 @@ function getTestPhones(): Set<string> | null {
   return phones;
 }
 
+// Base URL of the admin panel, for the links in the founder's emails (e.g.
+// https://bonolini-operating-system-transfer.vercel.app). null = emails go
+// out without links.
+export function getAdminBaseUrl(): string | null {
+  const raw = process.env.ADMIN_BASE_URL?.trim();
+  if (!raw || !/^https?:\/\//.test(raw)) return null;
+  return raw.replace(/\/+$/, "");
+}
+
+export function adminLink(path: string): string | null {
+  const base = getAdminBaseUrl();
+  return base ? `${base}${path}` : null;
+}
+
+// FOUNDER_NOTIFICATION_EMAIL, falling back to MARKETING_ALERT_EMAIL.
+export function getFounderNotificationEmail(): string | null {
+  const own = process.env.FOUNDER_NOTIFICATION_EMAIL?.trim();
+  if (own) return own;
+  const fallback = process.env.MARKETING_ALERT_EMAIL?.trim();
+  return fallback ? fallback : null;
+}
+
 export function isCustomerPhoneAllowed(phone: string): boolean {
   const testPhones = getTestPhones();
   if (testPhones === null) return true;
