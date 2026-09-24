@@ -1,4 +1,5 @@
 import { getLastInboundReceivedAt } from "../whatsapp";
+import { toValidDate } from "../dates";
 import { postWhatsappCloudApiMessage } from "./whatsapp-cloud-api-client";
 import type { OutboundMessageRequest, OutboundProvider, OutboundSendResult } from "./provider";
 
@@ -60,7 +61,9 @@ export class WhatsAppCloudApiProvider implements OutboundProvider {
     // message's own timestamp (rule of the approved spec: the window
     // depends on the client's last INBOUND message, not on anything
     // about this send attempt itself).
-    const lastInboundAt = await getLastInboundReceivedAt(request.tenantId, request.clientId);
+    // toValidDate: robust even if the lookup ever hands back Postgres'
+    // raw timestamp text instead of a Date (the 2026-09-24 production bug).
+    const lastInboundAt = toValidDate(await getLastInboundReceivedAt(request.tenantId, request.clientId));
     const windowOpen = lastInboundAt !== null && Date.now() - lastInboundAt.getTime() < SESSION_WINDOW_MS;
 
     const payload = windowOpen

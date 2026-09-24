@@ -2,6 +2,7 @@ import { Resend } from "resend";
 import { getWhatsappCloudApiCredentials, isE164, postWhatsappCloudApiMessage } from "../communications";
 import { normalizePhone } from "../whatsapp";
 import { log, captureException } from "../observability";
+import { toValidDate } from "../dates";
 import { getFounderLastInboundAt } from "./repository";
 import { getFounderNotificationEmail } from "./config";
 import { FOUNDER_TEXTS } from "./content";
@@ -93,7 +94,7 @@ async function sendWhatsapp(tenantId: string, to: string, message: FounderMessag
   const credentials = getWhatsappCloudApiCredentials();
   if (!credentials) return "WHATSAPP_ACCESS_TOKEN/WHATSAPP_PHONE_NUMBER_ID non configurati";
 
-  const lastInbound = await getFounderLastInboundAt(tenantId);
+  const lastInbound = toValidDate(await getFounderLastInboundAt(tenantId));
   if (!lastInbound || Date.now() - lastInbound.getTime() >= SESSION_WINDOW_MS) {
     return "finestra WhatsApp di 24 ore chiusa (nessun tuo messaggio al numero aziendale nelle ultime 24 ore)";
   }
