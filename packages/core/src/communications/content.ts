@@ -239,24 +239,32 @@ export function formatPassengers(
 }
 
 // ── Deposit texts ─────────────────────────────────────────────────────────
-// DRAFT — NOT YET APPROVED BY THE FOUNDER. The three price lines of the
-// quote and the whole booking confirmation below were proposed by Claude
-// on 2026-09-24; the founder's approved wording is still to be pasted in.
-// Do not open the flow to all customers until these texts are replaced.
+// Founder's final wording (2026-09-24). The amounts are the real values of
+// each quote/booking.
 
 const DEPOSIT_LINES: Record<
   CustomerLanguage,
-  { total: (v: string) => string; deposit: (v: string) => string; balance: (v: string) => string }
+  {
+    total: (v: string) => string;
+    deposit: (v: string) => string;
+    balance: (v: string) => string;
+    paymentLink: string;
+    driverDetails: string;
+  }
 > = {
   it: {
     total: (v) => `Prezzo totale: ${v} per l'intero veicolo`,
-    deposit: (v) => `Acconto per confermare: ${v}`,
-    balance: (v) => `Saldo all'autista il giorno del servizio: ${v}`,
+    deposit: (v) => `Acconto per confermare la prenotazione: ${v}`,
+    balance: (v) => `Saldo all'autista il giorno del servizio: ${v} (preferibilmente in contanti)`,
+    paymentLink: "Se il preventivo Le va bene, Le invieremo il link per il pagamento dell'acconto.",
+    driverDetails: "Il giorno prima del servizio Le invieremo nome e contatto dell'autista.",
   },
   en: {
     total: (v) => `Total price: ${v} for the entire vehicle`,
-    deposit: (v) => `Deposit to confirm: ${v}`,
-    balance: (v) => `Balance to the driver on the day of service: ${v}`,
+    deposit: (v) => `Deposit to confirm the booking: ${v}`,
+    balance: (v) => `Balance to the driver on the day of service: ${v} (preferably in cash)`,
+    paymentLink: "If the quote works for you, we will send you the link to pay the deposit.",
+    driverDetails: "The day before your transfer we will send you the driver's name and contact details.",
   },
 };
 
@@ -311,6 +319,8 @@ export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): 
     DEPOSIT_LINES[lang].total(money(input.amountCents)),
     DEPOSIT_LINES[lang].deposit(money(input.depositCents)),
     DEPOSIT_LINES[lang].balance(money(input.amountCents - input.depositCents)),
+    "",
+    DEPOSIT_LINES[lang].paymentLink,
   ];
 
   const lines =
@@ -336,7 +346,7 @@ export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): 
           SIGNATURE,
         ];
 
-  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v3`, body: lines.join("\n") };
+  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v4`, body: lines.join("\n") };
 }
 
 export interface BookingConfirmationInput extends TripDetails {
@@ -345,7 +355,6 @@ export interface BookingConfirmationInput extends TripDetails {
   currency: string;
 }
 
-// DRAFT — see the note above DEPOSIT_LINES.
 export function buildBookingConfirmationContent(input: BookingConfirmationInput): CommunicationContent {
   const lang = input.language;
   const balance = formatAmountForCustomer(input.balanceCents, input.currency, lang);
@@ -358,6 +367,7 @@ export function buildBookingConfirmationContent(input: BookingConfirmationInput)
           ...tripLines(input),
           DEPOSIT_LINES.it.balance(balance),
           "",
+          DEPOSIT_LINES.it.driverDetails,
           "Per qualsiasi domanda, risponda pure a questo messaggio.",
           SIGNATURE,
         ]
@@ -368,9 +378,10 @@ export function buildBookingConfirmationContent(input: BookingConfirmationInput)
           ...tripLines(input),
           DEPOSIT_LINES.en.balance(balance),
           "",
+          DEPOSIT_LINES.en.driverDetails,
           "For any question, simply reply to this message.",
           SIGNATURE,
         ];
 
-  return { to: input.to, templateName: `booking_confirmation_${lang}_v1`, body: lines.join("\n") };
+  return { to: input.to, templateName: `booking_confirmation_${lang}_v2`, body: lines.join("\n") };
 }

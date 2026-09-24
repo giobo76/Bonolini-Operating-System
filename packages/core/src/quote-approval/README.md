@@ -41,7 +41,7 @@ founder writes anything else ─▶ every pending PREVENTIVO PRONTO and every bo
 
 **Confirmation to the customer** (founder decision, 2026-09-24): automatic after ACCONTO RICEVUTO, fixed text in IT/EN with the booking's date and time. It follows the same switches, 24h window and double-send protection as every other message (idempotency key `booking_confirmation:<booking id>`). If it doesn't go out, the founder's reply says so. "Deposit received" in the admin panel confirms the booking but sends no message.
 
-> **Draft texts:** the three price lines of the quote and the whole confirmation message in `communications/content.ts` are Claude's drafts, pending the founder's wording. Replace them before opening the flow to all customers.
+**Texts:** the price lines of the quote (total, deposit to confirm the booking, balance "preferibilmente in contanti", and the line announcing the deposit payment link) and the confirmation message (balance line, "driver's name and contact the day before") are the founder's final wording, 2026-09-24. They live in `communications/content.ts` and are tested verbatim.
 
 The quote reaches the customer **only** from an APPROVA tap. That is the only code path that calls `approveCommunication` for a `quote_offer`.
 

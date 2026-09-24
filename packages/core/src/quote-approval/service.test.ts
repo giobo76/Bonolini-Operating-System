@@ -436,7 +436,7 @@ describe("PREVENTIVO PRONTO", () => {
     const offer = [...state.communications.values()][0]!.content as { to: string; body: string };
     expect(offer.to).toBe("+393331234567");
     expect(offer.body).toContain("Prezzo totale: 300,00 €");
-    expect(offer.body).toContain("Acconto per confermare: 150,00 €");
+    expect(offer.body).toContain("Acconto per confermare la prenotazione: 150,00 €");
     expect(offer.body).not.toMatch(/taxi/i);
     const replies = state.founderOutbox.slice(1).map((m) => m.parts.join(""));
     expect(replies[0]).toContain("approvato");
@@ -496,7 +496,7 @@ describe("PREVENTIVO PRONTO", () => {
     expect(state.customerSends).toBe(1);
     const offer = [...state.communications.values()][0]!.content as { body: string };
     expect(offer.body).toContain("Prezzo totale: 280,00 €");
-    expect(offer.body).toContain("Acconto per confermare: 140,00 €");
+    expect(offer.body).toContain("Acconto per confermare la prenotazione: 140,00 €");
   });
 
   it("any other founder message re-sends every pending PREVENTIVO PRONTO", async () => {
@@ -687,7 +687,7 @@ describe("deposit", () => {
     await notifyQuoteReady(transferRequest({ calculatedAmountCents: 39000 }));
     const text = state.founderOutbox[0]!.parts.join("\n");
     expect(text).toContain("Acconto: 200,00 € (50%, arrotondato) — saldo all'autista 190,00 €");
-    expect(text).toContain("Acconto per confermare: 200,00 €");
+    expect(text).toContain("Acconto per confermare la prenotazione: 200,00 €");
   });
 
   it("APPROVA creates a booking waiting for the deposit and offers ACCONTO RICEVUTO; nothing is confirmed yet", async () => {
@@ -719,7 +719,7 @@ describe("deposit", () => {
       10000,
     );
     const offer = [...state.communications.values()][0]!.content as { body: string };
-    expect(offer.body).toContain("Acconto per confermare: 100,00 €");
+    expect(offer.body).toContain("Acconto per confermare la prenotazione: 100,00 €");
     expect(offer.body).toContain("Saldo all'autista il giorno del servizio: 180,00 €");
   });
 
