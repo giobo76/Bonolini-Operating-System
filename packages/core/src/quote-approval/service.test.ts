@@ -16,6 +16,7 @@ const { state } = vi.hoisted(() => ({
     founderOutbox: [] as Array<{ parts: string[]; buttons?: Array<{ id: string; title: string }> }>,
     customerSends: 0,
     adminProfile: true,
+    customerPhone: "+393331234567",
   },
 }));
 
@@ -134,7 +135,7 @@ vi.mock("../clients", () => ({
 }));
 
 vi.mock("../whatsapp", () => ({
-  getLastInboundWhatsappPhoneE164: async () => "+393331234567",
+  getLastInboundWhatsappPhoneE164: async () => state.customerPhone,
   normalizePhone: (phone: string) => phone.replace(/[^0-9]/g, ""),
 }));
 
@@ -270,6 +271,9 @@ beforeEach(() => {
   state.founderOutbox = [];
   state.customerSends = 0;
   state.adminProfile = true;
+  state.customerPhone = "+393331234567";
+  process.env.QUOTE_APPROVAL_ENABLED = "true";
+  delete process.env.QUOTE_APPROVAL_TEST_PHONES;
   process.env.FOUNDER_PROFILE_ID = "profile-founder";
   acceptTransferRequest.mockClear();
   modifyPriceForTransferRequest.mockClear();
@@ -508,5 +512,100 @@ describe("PREZZO DA INSERIRE", () => {
     expect(state.founderOutbox).toHaveLength(1);
     expect(state.founderOutbox[0]!.parts.join("")).toContain("PREZZO DA INSERIRE");
     expect(state.founderOutbox[0]!.buttons).toBeUndefined();
+  });
+});
+
+describe("QUOTE_APPROVAL_ENABLED", () => {
+  it("off: no question, no PREVENTIVO PRONTO, founder messages ignored", async () => {
+    process.env.QUOTE_APPROVAL_ENABLED = "false";
+
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: { pickup: "Malpensa" },
+      transferRequest: transferRequest({ status: "collecting_info", missingInformation: ["date"] }),
+    });
+    await notifyQuoteReady(transferRequest());
+    await founderText("ciao");
+
+    expect(sendMissingInfoRequest).not.toHaveBeenCalled();
+    expect(state.rows).toHaveLength(0);
+    expect(state.founderOutbox).toHaveLength(0);
+    expect(state.founderMessages.size).toBe(0);
+  });
+
+  it("turned off after a PREVENTIVO PRONTO: a later APPROVA tap sends nothing", async () => {
+    await notifyQuoteReady(transferRequest());
+    const approve = buttonFor("APPROVA");
+    process.env.QUOTE_APPROVAL_ENABLED = "false";
+
+    await founderTap(approve);
+
+    expect(acceptTransferRequest).not.toHaveBeenCalled();
+    expect(state.customerSends).toBe(0);
+  });
+});
+
+describe("QUOTE_APPROVAL_TEST_PHONES", () => {
+  it("a listed customer gets the full flow", async () => {
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393331234567";
+
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: { pickup: "Malpensa" },
+      transferRequest: transferRequest({ status: "collecting_info", missingInformation: ["date"] }),
+    });
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+
+    expect(sendMissingInfoRequest).toHaveBeenCalledTimes(1);
+    expect(state.customerSends).toBe(1);
+  });
+
+  it("any other customer gets nothing automatic and produces no PREVENTIVO PRONTO", async () => {
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: { pickup: "Malpensa" },
+      transferRequest: transferRequest({ status: "collecting_info", missingInformation: ["date"] }),
+    });
+    await notifyQuoteReady(transferRequest());
+
+    expect(sendMissingInfoRequest).not.toHaveBeenCalled();
+    expect(state.rows).toHaveLength(0);
+    expect(state.founderOutbox).toHaveLength(0);
+  });
+
+  it("APPROVA never approves or sends to a customer outside the list", async () => {
+    await notifyQuoteReady(transferRequest());
+    const approve = buttonFor("APPROVA");
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+
+    await founderTap(approve);
+
+    expect(acceptTransferRequest).not.toHaveBeenCalled();
+    expect(state.customerSends).toBe(0);
+    expect(state.rows[0]!.status).toBe("awaiting_decision");
+    expect(state.founderOutbox[state.founderOutbox.length - 1]!.parts.join("")).toContain("numeri di prova");
+  });
+
+  it("re-sending pending quotes skips customers outside the list", async () => {
+    await notifyQuoteReady(transferRequest());
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+    state.founderOutbox = [];
+
+    await founderText("ciao");
+
+    expect(state.founderOutbox).toHaveLength(1);
+    expect(state.founderOutbox[0]!.parts.join("")).toContain("Nessun preventivo in attesa");
   });
 });

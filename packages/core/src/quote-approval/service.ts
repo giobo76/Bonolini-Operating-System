@@ -21,6 +21,7 @@ import { getLastInboundWhatsappPhoneE164, normalizePhone } from "../whatsapp";
 import { log, captureException } from "../observability";
 import * as repo from "./repository";
 import { sendToFounder } from "./founder-channel";
+import { isCustomerPhoneAllowed, isQuoteApprovalEnabled } from "./config";
 import {
   APPROVAL_BUTTONS,
   FOUNDER_TEXTS,
@@ -79,6 +80,11 @@ function looksLikeTripMessage(extracted: CustomerMessageOutcome["extracted"]): b
 // Called by the WhatsApp webhook after every customer message has gone
 // through transfer-requests (and pricing, when it became complete).
 export async function handleCustomerMessageOutcome(input: CustomerMessageOutcome): Promise<void> {
+  if (!isQuoteApprovalEnabled()) return;
+  if (!isCustomerPhoneAllowed(input.fromPhone)) {
+    log("quote_approval.customer_not_in_test_phones", { transferRequestId: input.transferRequest.id });
+    return;
+  }
   const tr = input.transferRequest;
 
   if (tr.status === "collecting_info") {
@@ -236,6 +242,7 @@ async function reply(tenantId: string, text: string): Promise<void> {
 // Entry point for every message from FOUNDER_WHATSAPP_PHONE. These never go
 // through client matching or transfer_requests.
 export async function handleFounderMessage(message: FounderInboundMessage): Promise<void> {
+  if (!isQuoteApprovalEnabled()) return;
   const tenantId = await repo.getDefaultTenantId();
   const isNew = await repo.recordFounderMessage(tenantId, message);
   if (!isNew) return;
@@ -282,6 +289,8 @@ async function resendPending(tenantId: string): Promise<void> {
       await repo.transitionApprovalRequest(tenantId, row.id, ["awaiting_decision", "awaiting_price"], "superseded");
       continue;
     }
+    const customerPhone = await getLastInboundWhatsappPhoneE164(tenantId, tr.clientId);
+    if (!customerPhone || !isCustomerPhoneAllowed(customerPhone)) continue;
     if (row.status === "awaiting_price") {
       await reply(tenantId, FOUNDER_TEXTS.awaitingPriceReminder(shortRef(tr.id)));
     } else {
@@ -439,6 +448,21 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
     return;
   }
 
+  // Resolved and checked BEFORE approving: in test mode a customer outside
+  // QUOTE_APPROVAL_TEST_PHONES must not end up with an approved request (and
+  // a booking) that nobody sends.
+  const to = await getLastInboundWhatsappPhoneE164(tenantId, tr.clientId);
+  if (!to) {
+    await releaseClaim(tenantId, row, "no customer WhatsApp number");
+    await reply(tenantId, FOUNDER_TEXTS.error(ref, "nessun numero WhatsApp del cliente trovato"));
+    return;
+  }
+  if (!isCustomerPhoneAllowed(to)) {
+    await releaseClaim(tenantId, row, "customer not in QUOTE_APPROVAL_TEST_PHONES");
+    await reply(tenantId, FOUNDER_TEXTS.notATestPhone(ref));
+    return;
+  }
+
   let approved: TransferRequest;
   let communicationId: string;
   let communicationStatus: string;
@@ -463,11 +487,6 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
     if (approved.finalAmountCents === null) {
       throw new Error("approved transfer_request has no final_amount_cents");
     }
-    const to = await getLastInboundWhatsappPhoneE164(tenantId, approved.clientId);
-    if (!to) {
-      throw new Error("nessun numero WhatsApp del cliente trovato");
-    }
-
     const prepared = await prepareTransferQuoteOfferCommunication({
       tenantId,
       clientId: approved.clientId,

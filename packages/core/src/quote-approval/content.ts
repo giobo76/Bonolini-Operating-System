@@ -169,6 +169,8 @@ export const FOUNDER_TEXTS = {
   priceMismatch: (ref: string) =>
     `${ref} risulta già approvato con un prezzo diverso da questo messaggio. Nessun invio al cliente: controlla dal pannello.`,
   error: (ref: string, error: string) => `Errore su ${ref}: ${error}\nNiente è stato inviato al cliente. Puoi riprovare con lo stesso pulsante.`,
+  notATestPhone: (ref: string) =>
+    `${ref}: il cliente non è tra i numeri di prova (QUOTE_APPROVAL_TEST_PHONES). Nessuna approvazione, nessun invio.`,
   unknownButton: "Pulsante non riconosciuto. Scrivi un messaggio qualsiasi per ricevere di nuovo i preventivi in attesa.",
   notFound: "Preventivo non trovato.",
   useButtons: "I comandi valgono solo tramite i pulsanti sotto ogni PREVENTIVO PRONTO. Te li rimando qui sotto.",

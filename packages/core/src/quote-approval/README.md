@@ -8,6 +8,13 @@
 
 **Emits / listens to:** nothing. Called inline from the WhatsApp webhook, the same way `transfer-requests` is.
 
+## Switches (`config.ts`)
+
+- `QUOTE_APPROVAL_ENABLED` — only the exact string `"true"` turns the flow on. Anything else: the webhook behaves exactly as before this module existed. The founder's number is treated like any other sender, no automatic question, no PREVENTIVO PRONTO, and buttons tapped on old messages do nothing.
+- `QUOTE_APPROVAL_TEST_PHONES` — comma-separated E.164 list. When set, the automatic question, PREVENTIVO PRONTO, re-sends and the quote to the customer only happen for these customers. APPROVA refuses (and does not approve) for anyone else. Fails closed: set but with no valid number = nobody. Empty/unset = everyone.
+
+Both are read on every call; on Vercel a change takes effect with the next deploy.
+
 ## The flow
 
 ```

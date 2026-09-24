@@ -24,10 +24,12 @@ vi.mock("../communications", () => ({
 const handleCustomerMessageOutcome = vi.fn();
 const handleFounderMessage = vi.fn();
 const isFounderPhone = vi.fn();
+const isQuoteApprovalEnabled = vi.fn();
 vi.mock("../quote-approval", () => ({
   handleCustomerMessageOutcome: (...args: unknown[]) => handleCustomerMessageOutcome(...args),
   handleFounderMessage: (...args: unknown[]) => handleFounderMessage(...args),
   isFounderPhone: (...args: unknown[]) => isFounderPhone(...args),
+  isQuoteApprovalEnabled: () => isQuoteApprovalEnabled(),
 }));
 
 const { verifyMetaSignature, handleWhatsappVerification, handleWhatsappWebhookRequest } = await import(
@@ -117,6 +119,8 @@ describe("handleWhatsappWebhookRequest (POST)", () => {
     handleFounderMessage.mockReset();
     isFounderPhone.mockReset();
     isFounderPhone.mockReturnValue(false);
+    isQuoteApprovalEnabled.mockReset();
+    isQuoteApprovalEnabled.mockReturnValue(false);
   });
 
   it("5: processes the payload and returns 200 when the signature is valid", async () => {
@@ -442,6 +446,24 @@ describe("handleWhatsappWebhookRequest — quote approval routing", () => {
     handleCustomerMessageOutcome.mockReset();
     handleFounderMessage.mockReset();
     isFounderPhone.mockReset();
+    isQuoteApprovalEnabled.mockReset();
+    isQuoteApprovalEnabled.mockReturnValue(true);
+  });
+
+  it("QUOTE_APPROVAL_ENABLED off: the founder's number is processed exactly as before, nothing automatic runs", async () => {
+    isQuoteApprovalEnabled.mockReturnValue(false);
+    isFounderPhone.mockReturnValue(true);
+    const result = await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    expect(handleFounderMessage).not.toHaveBeenCalled();
+    expect(processInboundMessage).toHaveBeenCalledTimes(1);
+    expect(processTransferRequestForMessageAndPrice).toHaveBeenCalledTimes(1);
+    expect(handleCustomerMessageOutcome).not.toHaveBeenCalled();
   });
 
   it("sends a founder message only to the founder handler, never to client matching", async () => {
