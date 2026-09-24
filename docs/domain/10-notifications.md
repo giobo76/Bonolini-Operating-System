@@ -13,6 +13,17 @@ Owned by the `notifications` module. Per [ADR 0002](../adr/0002-modular-monolith
 
 Phase 1 ships SMS + email only — sufficient to fully replace the current manual WhatsApp/email process, and avoids taking on a WhatsApp Business API integration before the core booking flow is proven.
 
+**Update (2026-09-24) — WhatsApp quote approval flow, built ahead of the table above.** WhatsApp now goes out directly through Meta's Cloud API (`packages/core/src/communications`), not Twilio, for one flow only (`packages/core/src/quote-approval`, see its README):
+
+| Trigger | Recipient | Channel | Content | Approval |
+|---|---|---|---|---|
+| Customer WhatsApp leaves the request `collecting_info` | customer | WhatsApp | Fixed-text question for the missing trip data, plus children (with ages) and luggage — never a price | None (founder decision: fixed text only, no AI, no price) |
+| Request reaches `pending_admin_approval` | founder | WhatsApp buttons APPROVA / MODIFICA / RIFIUTA; email (Resend → `MARKETING_ALERT_EMAIL`) if WhatsApp can't be sent, e.g. 24h window closed | "PREVENTIVO PRONTO": trip, price, availability, and the exact customer text | — |
+| Price is `manual_required` | founder | same as above, no buttons | "PREZZO DA INSERIRE" | — |
+| Founder taps APPROVA | customer | WhatsApp | The quote (Italian or English), at the approved price | The tap itself |
+
+Nothing in this flow goes through the `notifications` module/table (not built yet); customer messages are logged in `communications`, founder notifications in `quote_approval_requests`.
+
 ## Event → notification map
 
 | Trigger event | Recipient | Channel(s) | Content |

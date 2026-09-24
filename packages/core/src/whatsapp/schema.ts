@@ -23,6 +23,14 @@ const whatsappInboundMessageSchema = z
     timestamp: z.string().min(1),
     type: z.string().min(1),
     text: z.object({ body: z.string() }).passthrough().optional(),
+    // Reply-button tap on an interactive message we sent (type "interactive")
+    // or a template quick-reply (type "button"). Only ever acted on for
+    // FOUNDER_WHATSAPP_PHONE — see packages/core/src/quote-approval.
+    interactive: z
+      .object({ button_reply: z.object({ id: z.string() }).passthrough().optional() })
+      .passthrough()
+      .optional(),
+    button: z.object({ payload: z.string().optional() }).passthrough().optional(),
   })
   .passthrough();
 
@@ -93,6 +101,8 @@ export interface ExtractedWhatsappMessage {
   // seen value.
   phoneNumberId: string | null;
   displayPhoneNumber: string | null;
+  // Present only for a reply-button tap (see whatsappInboundMessageSchema).
+  buttonId?: string;
 }
 
 // Defensive extraction, not schema validation: `metadata` is typed
@@ -127,6 +137,7 @@ export function extractMessages(payload: WhatsappWebhookPayload): ExtractedWhats
       for (const message of messages) {
         const contact = contacts.find((c) => c.wa_id === message.from);
         const timestampMs = Number(message.timestamp) * 1000;
+        const buttonId = message.interactive?.button_reply?.id ?? message.button?.payload;
 
         extracted.push({
           waMessageId: message.id,
@@ -137,6 +148,7 @@ export function extractMessages(payload: WhatsappWebhookPayload): ExtractedWhats
           receivedAt: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
           phoneNumberId,
           displayPhoneNumber,
+          ...(buttonId ? { buttonId } : {}),
         });
       }
     }
@@ -212,6 +224,8 @@ const parsedWhatsappMessageObjectSchema = z.object({
   time: z.string().trim().min(1).optional(),
   passengers: z.number().int().positive().optional(),
   luggage: z.string().trim().min(1).optional(),
+  children: z.number().int().min(0).optional(),
+  childrenAges: z.string().trim().min(1).optional(),
   flight: z.string().trim().min(1).optional(),
   train: z.string().trim().min(1).optional(),
   hotel: z.string().trim().min(1).optional(),

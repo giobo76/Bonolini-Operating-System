@@ -33,6 +33,8 @@ export const transferRequestExtractedFieldsSchema = z.object({
   time: z.string().trim().min(1).optional(),
   passengers: z.number().int().positive().optional(),
   luggage: z.string().trim().min(1).optional(),
+  children: z.number().int().min(0).optional(),
+  childrenAges: z.string().trim().min(1).optional(),
   flight: z.string().trim().min(1).optional(),
   train: z.string().trim().min(1).optional(),
   hotel: z.string().trim().min(1).optional(),

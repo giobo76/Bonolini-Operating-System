@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { getDb, communications, assertOne, type Communication } from "@bos/db";
 import { evaluatePolicy } from "@bos/ai";
 import { getClient } from "../clients";
@@ -6,7 +6,7 @@ import { getQuote } from "../quotes";
 import { getDeal } from "../deals";
 import { getConfiguredOutboundProvider, type OutboundProvider } from "./provider";
 import { buildQuoteOfferContent } from "./content";
-import type { PrepareQuoteOfferCommunicationInput } from "./schema";
+import type { CommunicationContent, PrepareQuoteOfferCommunicationInput } from "./schema";
 
 // The tool name recorded against @bos/ai's Policy Engine for every
 // communication this module prepares — a stable identity for
@@ -230,6 +230,30 @@ export async function executeCommunication(
     );
   }
 
+  // Atomic claim before calling the provider: two concurrent calls (a
+  // founder double-tap, a Meta webhook retry racing the original) can both
+  // read status 'approved' above, but only one can set `provider` from
+  // null. The loser returns the row as-is and never sends a second time.
+  // Accepted trade-off: a process dying between this claim and the status
+  // update below leaves the row 'approved' with provider set, and it is
+  // never re-sent automatically — a missed message is recoverable by hand,
+  // a duplicate one is not.
+  const claimed = await db
+    .update(communications)
+    .set({ provider: provider.name, updatedAt: new Date() })
+    .where(
+      and(
+        eq(communications.tenantId, tenantId),
+        eq(communications.id, id),
+        eq(communications.status, "approved"),
+        isNull(communications.provider),
+      ),
+    )
+    .returning();
+  if (claimed.length === 0) {
+    return (await getCommunication(tenantId, id)) ?? existing;
+  }
+
   const content = existing.content as { to: string; body: string };
 
   let result: Awaited<ReturnType<OutboundProvider["send"]>>;
@@ -349,4 +373,148 @@ export async function recordProviderDeliveryStatus(
     .where(eq(communications.id, existing.id))
     .returning();
   return assertOne(rows, "recordProviderDeliveryStatus");
+}
+
+// ── WhatsApp quote approval flow (packages/core/src/quote-approval) ───────
+
+interface InsertCommunicationRow {
+  tenantId: string;
+  clientId: string;
+  dealId: string | null;
+  transferRequestId: string | null;
+  quoteId: string | null;
+  action: string;
+  agent: string;
+  idempotencyKey: string;
+  content: CommunicationContent;
+  status: "prepared" | "approved";
+  policyDecision: Record<string, unknown> | null;
+}
+
+// INSERT ... ON CONFLICT DO NOTHING on the (tenant_id, idempotency_key)
+// unique constraint, falling back to the existing row — same pattern as
+// prepareQuoteOfferCommunication above.
+async function insertCommunicationOnce(row: InsertCommunicationRow, caller: string): Promise<Communication> {
+  const db = getDb();
+  const insertedRows = await db.execute<Communication>(sql`
+    insert into communications (
+      tenant_id, client_id, deal_id, transfer_request_id, quote_id, booking_id,
+      channel, action, agent, correlation_id, idempotency_key, content, status, policy_decision
+    ) values (
+      ${row.tenantId}, ${row.clientId}, ${row.dealId}, ${row.transferRequestId}, ${row.quoteId}, ${null},
+      ${"whatsapp"}, ${row.action}, ${row.agent}, ${null}, ${row.idempotencyKey},
+      ${JSON.stringify(row.content)}::jsonb, ${row.status},
+      ${row.policyDecision ? JSON.stringify(row.policyDecision) : null}::jsonb
+    )
+    on conflict (tenant_id, idempotency_key) do nothing
+    returning *
+  `);
+
+  if (insertedRows.length > 0) {
+    return assertOne(insertedRows, caller);
+  }
+
+  const existing = await findCommunicationByIdempotencyKey(row.tenantId, row.idempotencyKey);
+  if (!existing) {
+    throw new Error(`${caller}: insert conflicted but no existing communication was found`);
+  }
+  return existing;
+}
+
+export interface SendMissingInfoRequestInput {
+  tenantId: string;
+  clientId: string;
+  dealId: string | null;
+  transferRequestId: string;
+  // whatsapp_messages.id of the customer message being answered — at most
+  // one question per inbound message, including across Meta retries.
+  inboundMessageRowId: string;
+  content: CommunicationContent;
+}
+
+// The one customer-facing message that skips human approval, by explicit
+// founder decision (2026-09-24): a fixed-text question listing missing trip
+// data, never a price. Recorded as 'approved' with that rule as its policy
+// decision, then sent through the same executeCommunication path as
+// everything else.
+export async function sendMissingInfoRequest(
+  input: SendMissingInfoRequestInput,
+  provider: OutboundProvider = getConfiguredOutboundProvider(),
+): Promise<Communication> {
+  const row = await insertCommunicationOnce(
+    {
+      tenantId: input.tenantId,
+      clientId: input.clientId,
+      dealId: input.dealId,
+      transferRequestId: input.transferRequestId,
+      quoteId: null,
+      action: "missing_info_request",
+      agent: "system",
+      idempotencyKey: `missing_info:${input.inboundMessageRowId}`,
+      content: input.content,
+      status: "approved",
+      policyDecision: {
+        allowed: true,
+        requiresApproval: false,
+        rule: "founder_decision_2026_09_24_missing_info_auto",
+        reason: "fixed-text request for missing trip data; contains no price",
+      },
+    },
+    "sendMissingInfoRequest",
+  );
+  return executeCommunication(input.tenantId, row.id, provider);
+}
+
+export async function hasCommunicationForTransferRequest(
+  tenantId: string,
+  transferRequestId: string,
+  action: string,
+): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .select({ id: communications.id })
+    .from(communications)
+    .where(
+      and(
+        eq(communications.tenantId, tenantId),
+        eq(communications.transferRequestId, transferRequestId),
+        eq(communications.action, action),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+export interface PrepareTransferQuoteOfferInput {
+  tenantId: string;
+  clientId: string;
+  dealId: string | null;
+  transferRequestId: string;
+  quoteId: string | null;
+  content: CommunicationContent;
+}
+
+// Keyed by transfer_request, not quote: ensureQuoteForDeal (transfer-requests)
+// reuses a deal's existing quote row, so a quote id can be shared by two
+// attempts and would dedupe the second offer away. The caller builds the
+// content from transfer_requests.final_amount_cents (the approved price).
+export async function prepareTransferQuoteOfferCommunication(
+  input: PrepareTransferQuoteOfferInput,
+): Promise<Communication> {
+  return insertCommunicationOnce(
+    {
+      tenantId: input.tenantId,
+      clientId: input.clientId,
+      dealId: input.dealId,
+      transferRequestId: input.transferRequestId,
+      quoteId: input.quoteId,
+      action: "quote_offer",
+      agent: "operations",
+      idempotencyKey: `transfer_quote_offer:${input.transferRequestId}`,
+      content: input.content,
+      status: "prepared",
+      policyDecision: null,
+    },
+    "prepareTransferQuoteOfferCommunication",
+  );
 }

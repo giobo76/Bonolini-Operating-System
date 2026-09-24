@@ -583,6 +583,25 @@ describe("processTransferRequestForMessage", () => {
     expect(second.requestedDate).toBe("2026-08-25");
   });
 
+  it("children/luggage are stored and merged but never block ready_for_pricing", async () => {
+    seedMessage("msg-1");
+    seedMessage("msg-2");
+
+    const first = await processTransferRequestForMessage(
+      inputFor("msg-1", { pickup: "Milano", destination: "Tirano", date: "2026-08-25", time: "10:00", passengers: 2 }),
+    );
+    expect(first.status).toBe("ready_for_pricing");
+    expect(first.missingInformation).toEqual([]);
+
+    seedMessage("msg-3");
+    await processTransferRequestForMessage(inputFor("msg-2", { pickup: "Como", destination: "Lugano" }));
+    const merged = await processTransferRequestForMessage(
+      inputFor("msg-3", { children: 2, childrenAges: "3 e 7 anni", luggage: "3 valigie" }),
+    );
+    expect(merged).toMatchObject({ children: 2, childrenAges: "3 e 7 anni", luggage: "3 valigie" });
+    expect(merged.missingInformation).toEqual(["passengers", "date", "time"]);
+  });
+
   // F. a request already pending_admin_approval is never modified by a new message
   it("F: a pending_admin_approval request is left untouched; the new message starts a new request", async () => {
     seedMessage("msg-1");

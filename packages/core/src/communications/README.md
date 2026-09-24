@@ -47,6 +47,16 @@ Every communication is linked to `deal_id` (and, when relevant, `transfer_reques
 
 `content.ts`'s `buildQuoteOfferContent` reads `client.fullName`/`quote.amountCents`/`quote.currency`/`quote.notes` — real, already-persisted values — and throws rather than proceed if `quote.amountCents` is `null` (a draft quote with no price yet). Nothing in this module ever marks a customer-reported payment (`deals.customerReportedPaymentNote`, Phase 2.5) as verified, confirms a booking, or invents client data — those rules are enforced by construction: this module has no function that could do any of them.
 
+## Quote approval flow (2026-09-24)
+
+Used by [quote-approval](../quote-approval/README.md):
+
+- `sendMissingInfoRequest` — the one customer message that skips human approval (founder decision: fixed text, no price). Inserted directly as `approved` with that rule as its `policy_decision`, then sent via `executeCommunication`. Idempotency key `missing_info:<whatsapp_messages.id>`.
+- `prepareTransferQuoteOfferCommunication` — the quote, built from `transfer_requests.final_amount_cents`, keyed `transfer_quote_offer:<transfer_request_id>` (not by quote id: `ensureQuoteForDeal` reuses one quote row per deal). Goes through the normal submit → approve (founder) → execute path.
+- `executeCommunication` now claims the row atomically (`provider IS NULL`) before calling the provider, so two concurrent calls can never both send.
+- The recipient is always Meta's own `from` of the client's latest inbound message, in E.164 (`whatsapp.getLastInboundWhatsappPhoneE164`). `clients.phone` is stored without `+` and would be rejected by the provider — **`prepareQuoteOfferCommunication`/`buildQuoteOfferContent` still use `clients.phone` and are not used by this flow.**
+- `postWhatsappCloudApiMessage` (`whatsapp-cloud-api-client.ts`) is the single Graph API POST, shared by the provider and the founder channel.
+
 ## Known gap (deliberately out of scope this pass)
 
 `bos-agent/tools/communication-tools.ts` registers a thin `communication.execute_approved` tool wrapper (mirroring `tools/social-tools.ts`) so a future Operations Agent decision cycle *could* propose executing an already-approved communication through the full orchestrator loop — but no agent currently does. Nothing in this codebase automatically calls `prepareQuoteOfferCommunication` when a quote is approved (no Inngest listener wired) — every call in this phase is explicit (a router, a script, a future admin UI action), same "wiring is a separate, deliberate next step" caveat `transfer-requests/README.md` already documents for its own Phase-1-era integration. No tRPC router or admin UI page was built in this pass either — the service layer is complete and fully tested; exposing it is a scoped-out follow-up.

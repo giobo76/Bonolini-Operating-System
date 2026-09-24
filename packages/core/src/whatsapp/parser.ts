@@ -27,6 +27,12 @@ const EXTRACTION_TOOL = {
       time: { type: "string", description: "Only if an explicit time is stated" },
       passengers: { type: "integer", description: "Only if a passenger count is stated" },
       luggage: { type: "string", description: "Only if luggage quantity/type is mentioned" },
+      children: {
+        type: "integer",
+        description:
+          "Number of children travelling, only if stated. 0 only if the customer explicitly says there are no children.",
+      },
+      childrenAges: { type: "string", description: "Ages of the children, only as stated (e.g. '3 e 7 anni')" },
       flight: { type: "string", description: "Flight number, only if mentioned" },
       train: { type: "string", description: "Train number, only if mentioned" },
       hotel: { type: "string", description: "Only if a hotel name is mentioned" },

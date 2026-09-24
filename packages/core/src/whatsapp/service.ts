@@ -139,6 +139,24 @@ export async function getLastInboundReceivedAt(tenantId: string, clientId: strin
   return row?.maxReceivedAt ?? null;
 }
 
+// The recipient for any outbound WhatsApp to this client, in E.164. Taken
+// from Meta's own `from` on the client's latest inbound message (always the
+// full international number, digits only) — never from clients.phone, which
+// is stored digits-only without the "+" the Cloud API provider requires, or
+// hand-typed via the web form in an unknown format.
+export async function getLastInboundWhatsappPhoneE164(tenantId: string, clientId: string): Promise<string | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({ fromPhone: whatsappMessages.fromPhone })
+    .from(whatsappMessages)
+    .where(and(eq(whatsappMessages.tenantId, tenantId), eq(whatsappMessages.clientId, clientId)))
+    .orderBy(desc(whatsappMessages.receivedAt))
+    .limit(1);
+  if (!row) return null;
+  const digits = normalizePhone(row.fromPhone);
+  return digits.length > 0 ? `+${digits}` : null;
+}
+
 // Only fills fields that are currently empty on the client — never
 // overwrites existing data (explicit constraint). fullName is deliberately
 // never touched by this path once a client row exists, even if it was

@@ -37,6 +37,8 @@ These were genuine judgment calls not fully specified by the approved design —
 4. **Non-text message types** (image, location, etc.) still get a `whatsapp_messages` row (for idempotency/audit) and still trigger client find-or-create (needs only the phone), but are never sent to Claude and store a placeholder `raw_text` — Phase 1 only interprets text.
 5. **New client's `notes`** is left untouched (unlike `clients.submitLead`, which prefixes the initial message into `notes`) — the raw message text already lives in `whatsapp_messages.raw_text`; reusing `notes` for this would give it a second, inconsistent meaning.
 
+> **Superseded in part (2026-09-24, founder decision):** outbound WhatsApp now exists for the quote approval flow — see [quote-approval](../quote-approval/README.md). The webhook routes messages from `FOUNDER_WHATSAPP_PHONE` there (never to client matching), sends the customer a fixed-text question for missing trip data, and sends a quote only after the founder taps APPROVA. The parser also extracts `children`/`childrenAges`.
+
 ## Hard constraints (Phase 1 — do not relax without the founder reopening this decision)
 
 - No outbound WhatsApp messages, ever (no `WHATSAPP_ACCESS_TOKEN` configured — intentionally not requested this phase).

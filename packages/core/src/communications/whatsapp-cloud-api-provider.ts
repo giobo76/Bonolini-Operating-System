@@ -1,6 +1,5 @@
-import { GRAPH_API_VERSION } from "../social-publishing";
 import { getLastInboundReceivedAt } from "../whatsapp";
-import { log, captureException } from "../observability";
+import { postWhatsappCloudApiMessage } from "./whatsapp-cloud-api-client";
 import type { OutboundMessageRequest, OutboundProvider, OutboundSendResult } from "./provider";
 
 // The real Meta WhatsApp Cloud API provider — same Graph API family, same
@@ -35,14 +34,6 @@ const E164_PATTERN = /^\+[1-9]\d{1,14}$/;
 
 export function isE164(phone: string): boolean {
   return E164_PATTERN.test(phone);
-}
-
-interface GraphApiErrorBody {
-  error?: { message?: string };
-}
-
-interface WhatsAppSendSuccessBody {
-  messages?: Array<{ id?: string }>;
 }
 
 export class WhatsAppCloudApiProvider implements OutboundProvider {
@@ -84,49 +75,10 @@ export class WhatsAppCloudApiProvider implements OutboundProvider {
       );
     }
 
-    const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${this.phoneNumberId}/messages`;
-
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // NEVER logged — see this class's own doc comment and
-          // README.md's "Security" section. Placed only in this one
-          // outgoing request header, never in a log call, a thrown
-          // error's message, or a returned value.
-          Authorization: `Bearer ${this.accessToken}`,
-        },
-        body: JSON.stringify(payload),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      captureException(error, "communications.whatsapp_provider.network_error", {
-        provider: this.name,
-        httpStatus: null,
-      });
-      throw new Error(`WhatsAppCloudApiProvider: network error calling Graph API — ${message}`);
-    }
-
-    const body = (await response.json().catch(() => null)) as (WhatsAppSendSuccessBody & GraphApiErrorBody) | null;
-    const providerMessageId = body?.messages?.[0]?.id;
-
-    if (!response.ok || !providerMessageId) {
-      const reason = body?.error?.message ?? `Graph API returned HTTP ${response.status}`;
-      captureException(new Error(reason), "communications.whatsapp_provider.send_failed", {
-        provider: this.name,
-        httpStatus: response.status,
-      });
-      throw new Error(`WhatsAppCloudApiProvider: ${reason}`);
-    }
-
-    log("communications.whatsapp_provider.sent", {
-      provider: this.name,
-      providerMessageId,
-      httpStatus: response.status,
+    const providerMessageId = await postWhatsappCloudApiMessage(this.accessToken, this.phoneNumberId, payload, {
+      label: "WhatsAppCloudApiProvider",
+      logName: this.name,
     });
-
     return { status: "sent", providerMessageId };
   }
 

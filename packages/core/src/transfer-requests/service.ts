@@ -193,7 +193,11 @@ async function insertNewTransferRequest(
   const created = assertOne(insertedRows, "insertNewTransferRequest");
   const [withMissing] = await db
     .update(transferRequests)
-    .set({ missingInformation: missing })
+    .set({
+      missingInformation: missing,
+      children: extracted.children ?? null,
+      childrenAges: extracted.childrenAges ?? null,
+    })
     .where(eq(transferRequests.id, created.id))
     .returning();
   const result = withMissing ?? created;
@@ -261,6 +265,8 @@ async function mergeIntoTransferRequest(
     requestedTime: extracted.time ?? existing.requestedTime,
     passengers: extracted.passengers ?? existing.passengers,
     luggage: extracted.luggage ?? existing.luggage,
+    children: extracted.children ?? existing.children,
+    childrenAges: extracted.childrenAges ?? existing.childrenAges,
     flightNumber: extracted.flight ?? existing.flightNumber,
     trainNumber: extracted.train ?? existing.trainNumber,
     hotel: extracted.hotel ?? existing.hotel,

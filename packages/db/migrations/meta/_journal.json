@@ -141,6 +141,13 @@
       "when": 1790179200000,
       "tag": "0027_communications_delivery_status",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1790265600000,
+      "tag": "0028_quote_approval",
+      "breakpoints": true
     }
   ]
 }
