@@ -4,6 +4,7 @@ export {
   approveCommunication,
   rejectCommunication,
   executeCommunication,
+  executeCommunicationDetailed,
   getCommunication,
   findCommunicationByIdempotencyKey,
   findCommunicationByProviderMessageId,
@@ -17,6 +18,7 @@ export type {
   SendMissingInfoRequestInput,
   SendBookingConfirmationInput,
   PrepareTransferQuoteOfferInput,
+  ExecutionResult,
 } from "./service";
 export * from "./schema";
 export type { OutboundProvider, OutboundMessageRequest, OutboundSendResult } from "./provider";

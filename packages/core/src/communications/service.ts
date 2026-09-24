@@ -215,6 +215,22 @@ export async function executeCommunication(
   id: string,
   provider: OutboundProvider = getConfiguredOutboundProvider(),
 ): Promise<Communication> {
+  return (await executeCommunicationDetailed(tenantId, id, provider)).communication;
+}
+
+export interface ExecutionResult {
+  communication: Communication;
+  // true only for the one call that actually called the provider (it won
+  // the atomic claim below). Lets a caller alert about a failed send exactly
+  // once, even when retries or duplicate webhooks call this again.
+  attempted: boolean;
+}
+
+export async function executeCommunicationDetailed(
+  tenantId: string,
+  id: string,
+  provider: OutboundProvider = getConfiguredOutboundProvider(),
+): Promise<ExecutionResult> {
   const db = getDb();
   const existing = await getCommunication(tenantId, id);
   if (!existing) {
@@ -222,7 +238,7 @@ export async function executeCommunication(
   }
 
   if (existing.status === "executed" || existing.status === "verified" || existing.status === "execution_failed") {
-    return existing;
+    return { communication: existing, attempted: false };
   }
   if (existing.status !== "approved") {
     throw new Error(
@@ -251,7 +267,7 @@ export async function executeCommunication(
     )
     .returning();
   if (claimed.length === 0) {
-    return (await getCommunication(tenantId, id)) ?? existing;
+    return { communication: (await getCommunication(tenantId, id)) ?? existing, attempted: false };
   }
 
   const content = existing.content as { to: string; body: string };
@@ -273,7 +289,7 @@ export async function executeCommunication(
       .set({ status: "execution_failed", provider: provider.name, error: message, updatedAt: new Date() })
       .where(and(eq(communications.tenantId, tenantId), eq(communications.id, id)))
       .returning();
-    return assertOne(rows, "executeCommunication");
+    return { communication: assertOne(rows, "executeCommunication"), attempted: true };
   }
 
   if (result.status === "not_configured") {
@@ -285,7 +301,7 @@ export async function executeCommunication(
       .set({ status: "execution_failed", provider: provider.name, error: result.reason, updatedAt: new Date() })
       .where(and(eq(communications.tenantId, tenantId), eq(communications.id, id)))
       .returning();
-    return assertOne(rows, "executeCommunication");
+    return { communication: assertOne(rows, "executeCommunication"), attempted: true };
   }
 
   // EXECUTED, not verified (Phase 3B Step 3 — the founder's own explicit
@@ -308,7 +324,7 @@ export async function executeCommunication(
     })
     .where(and(eq(communications.tenantId, tenantId), eq(communications.id, id)))
     .returning();
-  return assertOne(rows, "executeCommunication");
+  return { communication: assertOne(rows, "executeCommunication"), attempted: true };
 }
 
 // Correlates a Meta (or any future provider's) delivery-status callback
@@ -441,7 +457,7 @@ export interface SendMissingInfoRequestInput {
 export async function sendMissingInfoRequest(
   input: SendMissingInfoRequestInput,
   provider: OutboundProvider = getConfiguredOutboundProvider(),
-): Promise<Communication> {
+): Promise<ExecutionResult> {
   const row = await insertCommunicationOnce(
     {
       tenantId: input.tenantId,
@@ -463,7 +479,7 @@ export async function sendMissingInfoRequest(
     },
     "sendMissingInfoRequest",
   );
-  return executeCommunication(input.tenantId, row.id, provider);
+  return executeCommunicationDetailed(input.tenantId, row.id, provider);
 }
 
 export interface SendBookingConfirmationInput {
@@ -483,7 +499,7 @@ export interface SendBookingConfirmationInput {
 export async function sendBookingConfirmation(
   input: SendBookingConfirmationInput,
   provider: OutboundProvider = getConfiguredOutboundProvider(),
-): Promise<Communication> {
+): Promise<ExecutionResult> {
   const row = await insertCommunicationOnce(
     {
       tenantId: input.tenantId,
@@ -506,7 +522,7 @@ export async function sendBookingConfirmation(
     },
     "sendBookingConfirmation",
   );
-  return executeCommunication(input.tenantId, row.id, provider);
+  return executeCommunicationDetailed(input.tenantId, row.id, provider);
 }
 
 export interface PrepareTransferQuoteOfferInput {

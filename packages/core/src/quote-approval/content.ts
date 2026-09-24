@@ -187,6 +187,55 @@ export function buildManualPriceText(tr: TransferRequest, client: Client): strin
   ].join("\n");
 }
 
+// Alert when a message to the customer did not go out (24h window closed,
+// Meta error, provider not configured). Sent once per failed send.
+export function buildCustomerSendFailureText(input: {
+  what: string;
+  ref: string;
+  clientName: string;
+  clientPhone: string;
+  error: string;
+  body: string;
+}): string {
+  return [
+    "INVIO AL CLIENTE NON RIUSCITO",
+    `Rif. ${input.ref}`,
+    "",
+    `Cliente: ${input.clientName} (${displayPhone(input.clientPhone)})`,
+    `Messaggio: ${input.what}`,
+    `Motivo: ${input.error}`,
+    "",
+    "Il cliente NON ha ricevuto questo testo; contattalo a mano:",
+    "",
+    input.body,
+  ].join("\n");
+}
+
+// Email after an approval: the booking now waits for the deposit (the
+// founder sends the SumUp link and presses "Acconto ricevuto" when paid).
+export function buildDepositPendingText(input: {
+  tr: TransferRequest;
+  client: Client;
+  totalCents: number;
+  depositCents: number;
+  currency: string;
+}): string {
+  const { tr, client } = input;
+  return [
+    "IN ATTESA DI ACCONTO",
+    `Rif. ${shortRef(tr.id)}`,
+    "",
+    `Cliente: ${client.fullName} (${displayPhone(client.phone)})`,
+    `Tratta: ${tr.pickup ?? "?"} → ${tr.destination ?? "?"}`,
+    `Data: ${tr.requestedDate ? formatDateForCustomer(tr.requestedDate) : "?"} ore ${tr.requestedTime ?? "?"}`,
+    `Totale: ${formatEuro(input.totalCents, input.currency)}`,
+    `Acconto da ricevere: ${formatEuro(input.depositCents, input.currency)}`,
+    `Saldo all'autista: ${formatEuro(input.totalCents - input.depositCents, input.currency)}`,
+    "",
+    "Il preventivo è partito. Manda al cliente il link SumUp per l'acconto; quando lo ricevi premi \"Acconto ricevuto\": la prenotazione diventa confermata e il cliente riceve la conferma automatica.",
+  ].join("\n");
+}
+
 export const FOUNDER_TEXTS = {
   askPrice: (ref: string) =>
     `MODIFICA ${ref}: scrivi il nuovo prezzo in euro (es. 280 — acconto calcolato al 50%) oppure prezzo e acconto (es. 280 100).`,
@@ -195,12 +244,14 @@ export const FOUNDER_TEXTS = {
   invalidDeposit: (ref: string) =>
     `${ref}: l'acconto deve essere maggiore di zero e non superiore al prezzo. Riscrivi prezzo e acconto, es. 280 100.`,
   approvedSent: (ref: string, deposit: string) =>
-    `✅ ${ref} approvato. Preventivo consegnato a WhatsApp per l'invio al cliente (la conferma di consegna arriva a parte).\nPrenotazione in attesa di acconto (${deposit}): quando lo ricevi premi ACCONTO RICEVUTO.`,
+    `✅ ${ref} approvato. Preventivo inviato al cliente su WhatsApp (la conferma di consegna arriva a parte).
+Prenotazione in attesa di acconto (${deposit}): quando lo ricevi premi "Acconto ricevuto".`,
   approvedSendFailed: (ref: string, error: string, deposit: string) =>
-    `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}\nContatta il cliente a mano. Prenotazione in attesa di acconto (${deposit}): quando lo ricevi premi ACCONTO RICEVUTO.`,
+    `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}
+Contatta il cliente a mano. Prenotazione in attesa di acconto (${deposit}): quando lo ricevi premi "Acconto ricevuto".`,
   approvedSendInProgress: (ref: string) => `${ref} approvato: invio al cliente già in corso.`,
   depositPending: (ref: string, deposit: string) =>
-    `IN ATTESA DI ACCONTO ${ref}: ${deposit}. Quando lo ricevi premi ACCONTO RICEVUTO.`,
+    `IN ATTESA DI ACCONTO ${ref}: ${deposit}. Quando lo ricevi premi "Acconto ricevuto".`,
   depositConfirmedSent: (ref: string) =>
     `✅ ${ref}: acconto registrato, prenotazione CONFERMATA. Conferma consegnata a WhatsApp per l'invio al cliente.`,
   depositConfirmedSendFailed: (ref: string, error: string) =>
@@ -211,17 +262,18 @@ export const FOUNDER_TEXTS = {
   bookingNotConfirmable: (ref: string, status: string) =>
     `${ref}: la prenotazione è in stato "${status}", non si può confermare. Nessun invio al cliente.`,
   bookingNotFound: "Prenotazione non trovata.",
+  openBookingLink: "Apri la prenotazione nel pannello",
   rejected: (ref: string) => `❌ ${ref} rifiutato. Al cliente non è stato inviato nulla.`,
   alreadyApproved: (ref: string) => `${ref} è già approvato. Nessun nuovo invio al cliente.`,
   alreadyRejected: (ref: string) => `${ref} è già rifiutato.`,
   inProgress: (ref: string) => `Sto già elaborando ${ref}, attendi qualche secondo.`,
   superseded: (ref: string) =>
-    `Questo messaggio per ${ref} non è più valido (è stato sostituito). Usa l'ultimo PREVENTIVO PRONTO.`,
+    `Questo preventivo ${ref} non è più valido: è stato sostituito da uno più recente. Usa l'ultimo.`,
   noLongerPending: (ref: string, status: string) =>
     `${ref} non è più in attesa di approvazione (stato: ${status}). Nessun invio al cliente.`,
   priceMismatch: (ref: string) =>
     `${ref} risulta già approvato con un prezzo diverso da questo messaggio. Nessun invio al cliente: controlla dal pannello.`,
-  error: (ref: string, error: string) => `Errore su ${ref}: ${error}\nNiente è stato inviato al cliente. Puoi riprovare con lo stesso pulsante.`,
+  error: (ref: string, error: string) => `Errore su ${ref}: ${error}\nNiente è stato inviato al cliente. Puoi riprovare.`,
   notATestPhone: (ref: string) =>
     `${ref}: il cliente non è tra i numeri di prova (QUOTE_APPROVAL_TEST_PHONES). Nessuna approvazione, nessun invio.`,
   unknownButton: "Pulsante non riconosciuto. Scrivi un messaggio qualsiasi per ricevere di nuovo i preventivi in attesa.",
@@ -229,6 +281,14 @@ export const FOUNDER_TEXTS = {
   useButtons: "I comandi valgono solo tramite i pulsanti sotto ogni PREVENTIVO PRONTO. Te li rimando qui sotto.",
   nothingPending: "Nessun preventivo in attesa di approvazione e nessuna prenotazione in attesa di acconto.",
   configError: (what: string) => `Configurazione mancante: ${what}. Nessuna azione eseguita.`,
+  disabled: "Flusso preventivi disattivato (QUOTE_APPROVAL_ENABLED). Nessuna azione eseguita.",
+  invalidPrice: "Prezzo non valido: scrivi un importo in euro maggiore di zero, es. 280 oppure 280,50.",
+  revised: (ref: string, price: string) =>
+    `Nuovo preventivo ${ref} a ${price}: controlla l'anteprima e approva. Il preventivo precedente non è più valido.`,
+  noAdminLink:
+    "Per decidere apri il pannello admin → Preventivi in attesa. (ADMIN_BASE_URL non è configurato, quindi manca il link diretto.)",
+  openQuoteLink: "Apri il preventivo nel pannello",
+  openPendingLink: "Apri i preventivi in attesa",
   emailFooter:
     "Per usare i pulsanti (APPROVA / MODIFICA / RIFIUTA, ACCONTO RICEVUTO) scrivi un messaggio qualsiasi al numero WhatsApp aziendale: ti rimando tutto ciò che è in attesa.",
 } as const;

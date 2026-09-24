@@ -18,9 +18,10 @@ Phase 1 ships SMS + email only — sufficient to fully replace the current manua
 | Trigger | Recipient | Channel | Content | Approval |
 |---|---|---|---|---|
 | Customer WhatsApp leaves the request `collecting_info` | customer | WhatsApp | Fixed-text question for the missing trip data, plus children (with ages) and luggage — never a price | None (founder decision: fixed text only, no AI, no price) |
-| Request reaches `pending_admin_approval` | founder | WhatsApp buttons APPROVA / MODIFICA / RIFIUTA; email (Resend → `MARKETING_ALERT_EMAIL`) if WhatsApp can't be sent, e.g. 24h window closed | "PREVENTIVO PRONTO": trip, price, availability, and the exact customer text | — |
-| Price is `manual_required` | founder | same as above, no buttons | "PREZZO DA INSERIRE" | — |
-| Founder taps APPROVA | customer | WhatsApp | The quote (Italian or English), at the approved price | The tap itself |
+| Request reaches `pending_admin_approval` | founder | Email (Resend → `FOUNDER_NOTIFICATION_EMAIL`, else `MARKETING_ALERT_EMAIL`), link to the admin panel page | "PREVENTIVO PRONTO": trip, price, availability, and the exact customer text | — |
+| Price is `manual_required` | founder | Email, link to "Preventivi in attesa" | "PREZZO DA INSERIRE" | — |
+| Founder presses Approva in the admin panel (`/preventivi/<id>`) | customer | WhatsApp | The quote (Italian or English), at the approved price | The click itself |
+| Any automatic or approved message to the customer fails (24h window, Meta error) | founder | Email, once per failed send | "INVIO AL CLIENTE NON RIUSCITO": reason and the text to send by hand | — |
 
 Nothing in this flow goes through the `notifications` module/table (not built yet); customer messages are logged in `communications`, founder notifications in `quote_approval_requests`.
 

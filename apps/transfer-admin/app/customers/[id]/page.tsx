@@ -4,8 +4,8 @@ import { notFound } from "next/navigation";
 import { createServerCaller } from "@bos/core";
 import { PermissionDenied } from "../permission-denied";
 import { archiveCustomerAction, restoreCustomerAction } from "../actions";
+import { confirmDepositAction } from "../../preventivi/actions";
 import {
-  confirmBookingDepositAction,
   createBookingAction,
   createQuoteAction,
   updateBookingAction,
@@ -37,10 +37,16 @@ function acquisitionSourceLabel(client: {
 
 export default async function CustomerDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const sp = await searchParams;
+  // Result of "Acconto ricevuto" (see preventivi/actions.ts).
+  const esito = typeof sp.esito === "string" ? sp.esito : undefined;
+  const esitoOk = sp.tipo === "done" || sp.tipo === "already";
   const caller = await createServerCaller();
 
   let client;
@@ -71,6 +77,18 @@ export default async function CustomerDetailPage({
           ← Customers
         </Link>
       </div>
+
+      {esito ? (
+        <p
+          className={`whitespace-pre-wrap rounded border p-3 text-sm ${
+            esitoOk
+              ? "border-green-300 bg-green-50 text-green-900 dark:border-green-800 dark:bg-green-950 dark:text-green-200"
+              : "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+          }`}
+        >
+          {esito}
+        </p>
+      ) : null}
 
       <header className="flex items-start justify-between">
         <div>
@@ -276,27 +294,26 @@ export default async function CustomerDetailPage({
                 <div className="flex flex-wrap gap-3 pt-1">
                   {booking.status === "pending_deposit" ? (
                     <>
-                      <form action={confirmBookingDepositAction} className="flex items-end gap-1">
-                        <input type="hidden" name="clientId" value={id} />
-                        <input type="hidden" name="id" value={booking.id} />
+                      <form action={confirmDepositAction} className="flex items-end gap-1">
+                        <input type="hidden" name="bookingId" value={booking.id} />
+                        <input type="hidden" name="back" value={`/customers/${id}`} />
                         <input
-                          type="number"
-                          step="0.01"
-                          name="depositAmount"
+                          name="importo"
+                          inputMode="decimal"
                           defaultValue={
-                            booking.depositAmountCents !== null ? (booking.depositAmountCents / 100).toFixed(2) : undefined
+                            booking.depositAmountCents !== null
+                              ? (booking.depositAmountCents / 100).toFixed(2).replace(".", ",")
+                              : undefined
                           }
-                          placeholder="Deposit €"
-                          required
+                          placeholder="Acconto €"
                           className="w-24 rounded border px-2 py-1 text-xs"
                         />
                         <button type="submit" className="text-xs underline">
-                          Deposit received — confirm booking
+                          Acconto ricevuto
                         </button>
                       </form>
                       <span className="self-end text-xs text-neutral-500 dark:text-neutral-400">
-                        (no message is sent to the customer from here; the WhatsApp button ACCONTO RICEVUTO sends the
-                        confirmation)
+                        (conferma la prenotazione e manda al cliente la conferma automatica su WhatsApp)
                       </span>
                       <form action={updateBookingAction}>
                         <input type="hidden" name="clientId" value={id} />

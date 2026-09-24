@@ -17,6 +17,7 @@ const { state } = vi.hoisted(() => ({
     customerSends: 0,
     adminProfile: true,
     customerPhone: "+393331234567",
+    sendResult: "executed" as "executed" | "execution_failed",
     bookings: [] as Array<Record<string, unknown>>,
     confirmations: new Map<string, { id: string; status: string; error: string | null; content: unknown }>(),
     confirmationSendResult: "executed" as "executed" | "execution_failed",
@@ -132,7 +133,7 @@ vi.mock("./founder-channel", () => ({
   },
 }));
 
-const acceptTransferRequest = vi.fn(async (_t: string, id: string, _p: string, deposit: number) => {
+const acceptTransferRequest = vi.fn(async (_t: string, id: string, _approver: string, deposit: number) => {
   const tr = state.transferRequests.get(id)!;
   Object.assign(tr, { status: "approved", finalAmountCents: tr.finalAmountCents ?? tr.calculatedAmountCents });
   createBookingFor(id, tr.finalAmountCents!, deposit);
@@ -183,11 +184,18 @@ vi.mock("../whatsapp", () => ({
   normalizePhone: (phone: string) => phone.replace(/[^0-9]/g, ""),
 }));
 
-const sendMissingInfoRequest = vi.fn(async (input: { content: { body: string } }) => ({
-  id: "comm-missing",
-  status: "executed",
-  content: input.content,
-}));
+const sendMissingInfoRequest = vi.fn(async (input: { content: { body: string } }) => {
+  const failed = state.sendResult === "execution_failed";
+  return {
+    communication: {
+      id: "comm-missing",
+      status: state.sendResult,
+      error: failed ? "24h window closed" : null,
+      content: input.content,
+    },
+    attempted: true,
+  };
+});
 
 vi.mock("../communications", async () => {
   const content = await vi.importActual<typeof import("../communications/content")>("../communications/content");
@@ -211,19 +219,19 @@ vi.mock("../communications", async () => {
       if (c.status === "pending_approval") c.status = "approved";
       return c;
     },
-    executeCommunication: async (_t: string, id: string) => {
+    executeCommunicationDetailed: async (_t: string, id: string) => {
       const c = state.communications.get(id)!;
-      if (c.status === "approved") {
-        state.customerSends++;
-        c.status = "executed";
-      }
-      return c;
+      if (c.status !== "approved") return { communication: c, attempted: false };
+      state.customerSends++;
+      c.status = state.sendResult;
+      c.error = state.sendResult === "execution_failed" ? "24h window closed" : null;
+      return { communication: c, attempted: true };
     },
     // Same idempotency as the real one: one confirmation per booking, sent
-    // once.
+    // (attempted) once.
     sendBookingConfirmation: async (input: { bookingId: string; content: unknown }) => {
       const existing = state.confirmations.get(input.bookingId);
-      if (existing) return existing;
+      if (existing) return { communication: existing, attempted: false };
       const failed = state.confirmationSendResult === "execution_failed";
       const c = {
         id: `comm-confirm-${input.bookingId}`,
@@ -232,12 +240,21 @@ vi.mock("../communications", async () => {
         content: input.content,
       };
       state.confirmations.set(input.bookingId, c);
-      return c;
+      return { communication: c, attempted: true };
     },
   };
 });
 
-const { handleCustomerMessageOutcome, handleFounderMessage } = await import("./service");
+const {
+  handleCustomerMessageOutcome,
+  handleFounderMessage,
+  approveQuoteRound,
+  rejectQuoteRound,
+  reviseQuoteRound,
+  listPendingForPanel,
+  getRoundForPanel,
+  confirmDepositReceived,
+} = await import("./service");
 
 function transferRequest(overrides: Partial<TransferRequest> = {}): TransferRequest {
   return {
@@ -330,6 +347,7 @@ beforeEach(() => {
   state.customerSends = 0;
   state.adminProfile = true;
   state.customerPhone = "+393331234567";
+  state.sendResult = "executed";
   state.bookings = [];
   state.confirmations = new Map();
   state.confirmationSendResult = "executed";
@@ -438,9 +456,14 @@ describe("PREVENTIVO PRONTO", () => {
     expect(offer.body).toContain("Prezzo totale: 300,00 €");
     expect(offer.body).toContain("Acconto per confermare la prenotazione: 150,00 €");
     expect(offer.body).not.toMatch(/taxi/i);
-    const replies = state.founderOutbox.slice(1).map((m) => m.parts.join(""));
+    // Besides the replies, one "IN ATTESA DI ACCONTO" notice for the new booking.
+    const replies = state.founderOutbox
+      .slice(1)
+      .map((m) => m.parts.join(""))
+      .filter((text) => !text.startsWith("IN ATTESA DI ACCONTO"));
     expect(replies[0]).toContain("approvato");
     expect(replies[1]).toContain("già approvato");
+    expect(state.founderOutbox.filter((m) => m.parts.join("").startsWith("IN ATTESA DI ACCONTO"))).toHaveLength(1);
   });
 
   it("a Meta retry of the same tap is ignored", async () => {
@@ -450,7 +473,8 @@ describe("PREVENTIVO PRONTO", () => {
     await handleFounderMessage(tap);
     await handleFounderMessage(tap);
     expect(acceptTransferRequest).toHaveBeenCalledTimes(1);
-    expect(state.founderOutbox).toHaveLength(2);
+    // PREVENTIVO PRONTO, IN ATTESA DI ACCONTO, the reply — nothing for the retry.
+    expect(state.founderOutbox).toHaveLength(3);
   });
 
   it("RIFIUTA rejects and sends nothing to the customer", async () => {
@@ -675,12 +699,186 @@ describe("QUOTE_APPROVAL_TEST_PHONES", () => {
   });
 });
 
+describe("admin panel decisions", () => {
+  const STAFF = "profile-staff";
+
+  function openRound() {
+    return state.rows.find((r) => r.status === "awaiting_decision")!;
+  }
+
+  it("Approva approves with the logged-in profile and sends the quote; a double click sends nothing more", async () => {
+    await notifyQuoteReady(transferRequest());
+    const id = openRound().id;
+
+    const first = await approveQuoteRound("tenant-1", id, STAFF);
+    const second = await approveQuoteRound("tenant-1", id, STAFF);
+
+    expect(first.outcome).toBe("done");
+    expect(first.message).toContain("approvato");
+    expect(second.outcome).toBe("already");
+    expect(second.message).toContain("già approvato");
+    expect(acceptTransferRequest).toHaveBeenCalledTimes(1);
+    expect(acceptTransferRequest.mock.calls[0]![2]).toBe(STAFF);
+    expect(state.customerSends).toBe(1);
+  });
+
+  it("Rifiuta rejects and sends nothing", async () => {
+    await notifyQuoteReady(transferRequest());
+    const result = await rejectQuoteRound("tenant-1", openRound().id);
+    expect(result.outcome).toBe("done");
+    expect(state.customerSends).toBe(0);
+    expect(rejectTransferRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("Modifica opens a new round without emailing it; the old round can no longer be approved", async () => {
+    await notifyQuoteReady(transferRequest());
+    const oldId = openRound().id;
+    const outboxBefore = state.founderOutbox.length;
+
+    const revised = await reviseQuoteRound("tenant-1", oldId, 28000, null, { notify: false });
+
+    expect(revised.outcome).toBe("done");
+    expect(revised.newRoundId).toBeDefined();
+    expect(state.founderOutbox).toHaveLength(outboxBefore);
+    expect((await approveQuoteRound("tenant-1", oldId, STAFF)).message).toContain("non è più valido");
+
+    const approved = await approveQuoteRound("tenant-1", revised.newRoundId!, STAFF);
+    expect(approved.outcome).toBe("done");
+    expect(modifyPriceForTransferRequest).toHaveBeenCalledWith(
+      "tenant-1",
+      expect.any(String),
+      STAFF,
+      28000,
+      expect.any(String),
+      14000,
+    );
+    expect(state.customerSends).toBe(1);
+  });
+
+  it("Modifica refuses a non-positive price", async () => {
+    await notifyQuoteReady(transferRequest());
+    const result = await reviseQuoteRound("tenant-1", openRound().id, 0, null, { notify: false });
+    expect(result.outcome).toBe("refused");
+    expect(state.rows).toHaveLength(1);
+  });
+
+  it("with the flow off every decision is refused and nothing happens", async () => {
+    await notifyQuoteReady(transferRequest());
+    const id = openRound().id;
+    process.env.QUOTE_APPROVAL_ENABLED = "false";
+
+    for (const result of [
+      await approveQuoteRound("tenant-1", id, STAFF),
+      await rejectQuoteRound("tenant-1", id),
+      await reviseQuoteRound("tenant-1", id, 28000, null, { notify: false }),
+    ]) {
+      expect(result.outcome).toBe("refused");
+      expect(result.message).toContain("disattivato");
+    }
+    expect(acceptTransferRequest).not.toHaveBeenCalled();
+    expect(rejectTransferRequest).not.toHaveBeenCalled();
+    expect((await listPendingForPanel("tenant-1")).enabled).toBe(false);
+  });
+
+  it("test mode: Approva refuses a customer outside QUOTE_APPROVAL_TEST_PHONES and approves nothing", async () => {
+    await notifyQuoteReady(transferRequest());
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+    const result = await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    expect(result.outcome).toBe("refused");
+    expect(acceptTransferRequest).not.toHaveBeenCalled();
+    expect(openRound()).toBeDefined();
+  });
+});
+
+describe("alerts when a message to the customer does not go out", () => {
+  function alerts() {
+    return state.founderOutbox.filter((m) => m.parts.join("").includes("INVIO AL CLIENTE NON RIUSCITO"));
+  }
+
+  it("alerts once when the missing-information question fails", async () => {
+    state.sendResult = "execution_failed";
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: { pickup: "Malpensa" },
+      transferRequest: transferRequest({ status: "collecting_info", missingInformation: ["date"] }),
+    });
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.parts.join("")).toContain("la domanda sui dati mancanti");
+    expect(alerts()[0]!.parts.join("")).toContain("24h window closed");
+  });
+
+  it("alerts once when the quote fails, and not again on a later click", async () => {
+    await notifyQuoteReady(transferRequest());
+    const id = state.rows[0]!.id;
+    state.sendResult = "execution_failed";
+
+    const result = await approveQuoteRound("tenant-1", id, "profile-staff");
+    await approveQuoteRound("tenant-1", id, "profile-staff");
+
+    expect(result.message).toContain("NON è partito");
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.parts.join("")).toContain("il preventivo");
+  });
+
+  it("no alert when the send goes out", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", state.rows[0]!.id, "profile-staff");
+    expect(alerts()).toHaveLength(0);
+  });
+});
+
+describe("panel views and email links", () => {
+  it("lists pending quotes with the exact customer text", async () => {
+    await notifyQuoteReady(transferRequest());
+    const pending = await listPendingForPanel("tenant-1");
+    expect(pending.enabled).toBe(true);
+    expect(pending.quotes).toHaveLength(1);
+    expect(pending.quotes[0]!.view.customerPreview).toContain("Prezzo totale: 300,00 € per l'intero veicolo");
+    expect(pending.quotes[0]!.view.founderDetails).toContain("PREVENTIVO PRONTO");
+  });
+
+  it("a superseded round points to the newest open one", async () => {
+    await notifyQuoteReady(transferRequest());
+    const oldId = state.rows[0]!.id;
+    const revised = await reviseQuoteRound("tenant-1", oldId, 28000, null, { notify: false });
+
+    const oldView = await getRoundForPanel("tenant-1", oldId);
+    const newView = await getRoundForPanel("tenant-1", revised.newRoundId!);
+    expect(oldView?.open).toBe(false);
+    expect(oldView?.latestOpenRoundId).toBe(revised.newRoundId);
+    expect(newView?.open).toBe(true);
+    expect(newView?.view.amountCents).toBe(28000);
+  });
+
+  it("PREVENTIVO PRONTO links to the quote page when ADMIN_BASE_URL is set, and has no link otherwise", async () => {
+    process.env.ADMIN_BASE_URL = "https://bonolini-operating-system-transfer.vercel.app/";
+    await notifyQuoteReady(transferRequest());
+    const withLink = state.founderOutbox[0] as { link?: { url: string } | null };
+    expect(withLink.link?.url).toBe(
+      `https://bonolini-operating-system-transfer.vercel.app/preventivi/${state.rows[0]!.id}`,
+    );
+
+    delete process.env.ADMIN_BASE_URL;
+    await notifyQuoteReady(transferRequest({ id: "b1b2c3d4-0000-4000-8000-000000000002" }));
+    const withoutLink = state.founderOutbox[1] as { link?: { url: string } | null };
+    expect(withoutLink.link).toBeNull();
+  });
+});
+
 describe("deposit", () => {
+  const STAFF = "profile-staff";
+
   function lastOutbox() {
     return state.founderOutbox[state.founderOutbox.length - 1]!;
   }
-  function depositButtonId() {
-    return lastFounderButtons().find((b) => b.title === "ACCONTO RICEVUTO")!.id;
+  function openRound() {
+    return state.rows.find((r) => r.status === "awaiting_decision")!;
+  }
+  function confirmationsSent() {
+    return [...state.confirmations.values()];
   }
 
   it("PREVENTIVO PRONTO shows the proposed deposit (50%, nearest 10 €) and the balance", async () => {
@@ -690,30 +888,31 @@ describe("deposit", () => {
     expect(text).toContain("Acconto per confermare la prenotazione: 200,00 €");
   });
 
-  it("APPROVA creates a booking waiting for the deposit and offers ACCONTO RICEVUTO; nothing is confirmed yet", async () => {
+  it("Approva creates the booking waiting for the deposit and emails IN ATTESA DI ACCONTO with a link", async () => {
+    process.env.ADMIN_BASE_URL = "https://admin.example";
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("APPROVA"));
+    const result = await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    delete process.env.ADMIN_BASE_URL;
 
-    expect(acceptTransferRequest).toHaveBeenCalledWith("tenant-1", expect.any(String), "profile-founder", 15000);
+    expect(result.message).toContain("in attesa di acconto (150,00 €)");
+    expect(acceptTransferRequest).toHaveBeenCalledWith("tenant-1", expect.any(String), STAFF, 15000);
     expect(state.bookings[0]).toMatchObject({ status: "pending_deposit", depositAmountCents: 15000 });
-    expect(lastOutbox().parts.join("")).toContain("in attesa di acconto (150,00 €)");
-    expect(lastOutbox().buttons).toEqual([{ id: expect.stringMatching(/^bk:.+:deposit_received$/), title: "ACCONTO RICEVUTO" }]);
+    const notice = lastOutbox() as { parts: string[]; link?: { url: string } | null };
+    expect(notice.parts.join("")).toContain("IN ATTESA DI ACCONTO");
+    expect(notice.parts.join("")).toContain("Acconto da ricevere: 150,00 €");
+    expect(notice.link?.url).toBe("https://admin.example/customers/client-1");
     expect(confirmBookingDeposit).not.toHaveBeenCalled();
-    expect(state.confirmations.size).toBe(0);
   });
 
-  it("MODIFICA '280 100' sets price and deposit; the approval and the customer quote use both", async () => {
+  it("Modifica with price and deposit: the approval and the customer quote use both", async () => {
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("MODIFICA"));
-    await founderText("280 100");
+    const revised = await reviseQuoteRound("tenant-1", openRound().id, 28000, 10000, { notify: false });
+    await approveQuoteRound("tenant-1", revised.newRoundId!, STAFF);
 
-    expect(lastOutbox().parts.join("\n")).toContain("Acconto: 100,00 € (scelto da te) — saldo all'autista 180,00 €");
-
-    await founderTap(buttonFor("APPROVA"));
     expect(modifyPriceForTransferRequest).toHaveBeenCalledWith(
       "tenant-1",
       expect.any(String),
-      "profile-founder",
+      STAFF,
       28000,
       expect.any(String),
       10000,
@@ -723,83 +922,107 @@ describe("deposit", () => {
     expect(offer.body).toContain("Saldo all'autista il giorno del servizio: 180,00 €");
   });
 
-  it("MODIFICA refuses a deposit above the price and keeps waiting for a valid one", async () => {
+  it("Modifica refuses a deposit above the price and changes nothing", async () => {
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("MODIFICA"));
-    await founderText("280 300");
-
-    expect(lastOutbox().parts.join("")).toContain("l'acconto deve essere maggiore di zero e non superiore al prezzo");
-    expect(state.rows.filter((r) => r.status === "awaiting_price")).toHaveLength(1);
+    const result = await reviseQuoteRound("tenant-1", openRound().id, 28000, 30000, { notify: false });
+    expect(result.outcome).toBe("refused");
+    expect(result.message).toContain("acconto deve essere maggiore di zero e non superiore al prezzo");
     expect(state.rows).toHaveLength(1);
   });
 
-  it("ACCONTO RICEVUTO confirms the booking and sends the confirmation once, even on a double tap", async () => {
+  it("Acconto ricevuto (panel) confirms the booking and sends the confirmation once, even on a double click", async () => {
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("APPROVA"));
-    const deposit = depositButtonId();
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const bookingId = state.bookings[0]!.id as string;
 
-    await founderTap(deposit);
-    await founderTap(deposit);
+    const first = await confirmDepositReceived("tenant-1", bookingId);
+    const second = await confirmDepositReceived("tenant-1", bookingId);
 
+    expect(first.outcome).toBe("done");
+    expect(first.message).toContain("prenotazione CONFERMATA");
+    expect(second.outcome).toBe("already");
+    expect(second.message).toContain("era già confermata");
     expect(state.bookings[0]!.status).toBe("confirmed");
-    expect(state.confirmations.size).toBe(1);
-    const confirmation = [...state.confirmations.values()][0]!.content as { to: string; body: string };
+    expect(confirmationsSent()).toHaveLength(1);
+    const confirmation = confirmationsSent()[0]!.content as { to: string; body: string };
     expect(confirmation.to).toBe("+393331234567");
     expect(confirmation.body).toContain("Data: 3 ottobre 2026, ore 14:30");
-    expect(confirmation.body).toContain("Saldo all'autista il giorno del servizio: 150,00 €");
-    const replies = state.founderOutbox.slice(-2).map((m) => m.parts.join(""));
-    expect(replies[0]).toContain("prenotazione CONFERMATA");
-    expect(replies[1]).toContain("era già confermata");
+    expect(confirmation.body).toContain(
+      "Saldo all'autista il giorno del servizio: 150,00 € (preferibilmente in contanti)",
+    );
   });
 
-  it("tells the founder when the confirmation to the customer does not go out", async () => {
+  it("records a different amount received when given", async () => {
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("APPROVA"));
-    state.confirmationSendResult = "execution_failed";
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    await confirmDepositReceived("tenant-1", state.bookings[0]!.id as string, 12000);
+    expect(confirmBookingDeposit).toHaveBeenCalledWith("tenant-1", state.bookings[0]!.id, 12000);
+  });
 
-    await founderTap(depositButtonId());
+  it("emails INVIO AL CLIENTE NON RIUSCITO once when the confirmation does not go out", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    state.confirmationSendResult = "execution_failed";
+    const bookingId = state.bookings[0]!.id as string;
+
+    const result = await confirmDepositReceived("tenant-1", bookingId);
+    await confirmDepositReceived("tenant-1", bookingId);
 
     expect(state.bookings[0]!.status).toBe("confirmed");
-    expect(lastOutbox().parts.join("")).toContain("NON è partito: 24h window closed");
+    expect(result.message).toContain("NON è partito: 24h window closed");
+    const alerts = state.founderOutbox.filter((m) => m.parts.join("").includes("INVIO AL CLIENTE NON RIUSCITO"));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.parts.join("")).toContain("la conferma della prenotazione");
   });
 
   it("never confirms a cancelled booking and sends nothing", async () => {
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("APPROVA"));
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
     state.bookings[0]!.status = "cancelled";
 
-    await founderTap(depositButtonId());
+    const result = await confirmDepositReceived("tenant-1", state.bookings[0]!.id as string);
 
-    expect(state.confirmations.size).toBe(0);
-    expect(lastOutbox().parts.join("")).toContain('in stato "cancelled"');
+    expect(result.outcome).toBe("refused");
+    expect(result.message).toContain('in stato "cancelled"');
+    expect(confirmationsSent()).toHaveLength(0);
   });
 
-  it("respects the switches: off -> ignored; customer outside the test list -> refused", async () => {
+  it("respects the switches: off -> refused; customer outside the test list -> refused, booking untouched", async () => {
     await notifyQuoteReady(transferRequest());
-    await founderTap(buttonFor("APPROVA"));
-    const deposit = depositButtonId();
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const bookingId = state.bookings[0]!.id as string;
 
     process.env.QUOTE_APPROVAL_ENABLED = "false";
-    await founderTap(deposit);
-    expect(confirmBookingDeposit).not.toHaveBeenCalled();
+    expect((await confirmDepositReceived("tenant-1", bookingId)).message).toContain("disattivato");
 
     process.env.QUOTE_APPROVAL_ENABLED = "true";
     process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
-    await founderTap(deposit);
+    expect((await confirmDepositReceived("tenant-1", bookingId)).message).toContain("numeri di prova");
+
     expect(confirmBookingDeposit).not.toHaveBeenCalled();
     expect(state.bookings[0]!.status).toBe("pending_deposit");
-    expect(lastOutbox().parts.join("")).toContain("numeri di prova");
   });
 
-  it("any founder message re-sends the bookings waiting for a deposit, with the button", async () => {
+  it("the panel lists bookings waiting for their deposit", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const pending = await listPendingForPanel("tenant-1");
+    expect(pending.quotes).toHaveLength(0);
+    expect(pending.pendingDeposits).toHaveLength(1);
+    expect(pending.pendingDeposits[0]!.depositLabel).toBe("150,00 €");
+  });
+
+  it("dormant WhatsApp path: the ACCONTO RICEVUTO button does the same as the panel", async () => {
     await notifyQuoteReady(transferRequest());
     await founderTap(buttonFor("APPROVA"));
-    state.founderOutbox = [];
+    const depositButton = state.founderOutbox
+      .flatMap((m) => m.buttons ?? [])
+      .find((b) => b.title === "ACCONTO RICEVUTO")!;
 
-    await founderText("ciao");
+    await founderTap(depositButton.id);
+    await founderTap(depositButton.id);
 
-    expect(state.founderOutbox).toHaveLength(1);
-    expect(state.founderOutbox[0]!.parts.join("")).toContain("IN ATTESA DI ACCONTO");
-    expect(state.founderOutbox[0]!.buttons![0]!.title).toBe("ACCONTO RICEVUTO");
+    expect(state.bookings[0]!.status).toBe("confirmed");
+    expect(confirmationsSent()).toHaveLength(1);
   });
 });
