@@ -1,5 +1,6 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { getDb, clients, whatsappMessages, tenants, assertOne, type Client } from "@bos/db";
+import { toValidDate } from "../dates";
 import { parseWhatsappMessage } from "./parser";
 import type { ExtractedWhatsappMessage, ParsedWhatsappMessage } from "./schema";
 // Legitimate cross-module call through marketing's public boundary (../marketing),
@@ -130,13 +131,22 @@ async function findOrCreateClientByPhone(
 // DIFFERENT deal would still keep the WhatsApp session open for this one,
 // something deals.lastMessageAt alone cannot reflect. Queries the real,
 // per-message received_at directly instead of trusting a derived value.
+//
+// Selects the column itself (latest row), not `max(...)`: drizzle maps a
+// selected timestamptz column to a Date, but a raw `sql\`max(...)\``
+// expression comes back as Postgres' text ("2026-09-24 10:15:30.123+00"),
+// which is what made every customer send fail with "getTime is not a
+// function" (2026-09-24). toValidDate also guards the result, so this never
+// returns a string or an Invalid Date.
 export async function getLastInboundReceivedAt(tenantId: string, clientId: string): Promise<Date | null> {
   const db = getDb();
   const [row] = await db
-    .select({ maxReceivedAt: sql<Date | null>`max(${whatsappMessages.receivedAt})` })
+    .select({ receivedAt: whatsappMessages.receivedAt })
     .from(whatsappMessages)
-    .where(and(eq(whatsappMessages.tenantId, tenantId), eq(whatsappMessages.clientId, clientId)));
-  return row?.maxReceivedAt ?? null;
+    .where(and(eq(whatsappMessages.tenantId, tenantId), eq(whatsappMessages.clientId, clientId)))
+    .orderBy(desc(whatsappMessages.receivedAt))
+    .limit(1);
+  return toValidDate(row?.receivedAt ?? null);
 }
 
 // The recipient for any outbound WhatsApp to this client, in E.164. Taken

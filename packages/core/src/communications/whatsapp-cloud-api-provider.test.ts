@@ -134,6 +134,40 @@ describe("24h customer service window", () => {
     expect(sentBody.type).toBe("template");
   });
 
+  // Regression (production, 2026-09-24): Postgres/postgres-js hand raw
+  // timestamps back as text like "2026-09-24 10:15:30.123+00", not Date —
+  // the provider called .getTime() on it and every send failed with
+  // "c.getTime is not a function".
+  function pgTimestamp(date: Date): string {
+    return date.toISOString().replace("T", " ").replace("Z", "+00");
+  }
+
+  it("works when the last inbound time arrives as Postgres text (inside the window)", async () => {
+    mockGetLastInboundReceivedAt.mockResolvedValue(pgTimestamp(new Date(Date.now() - 60 * 60 * 1000)));
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ messages: [{ id: "wamid.OK" }] }), { status: 200 }));
+    const provider = new WhatsAppCloudApiProvider(TOKEN, PHONE_NUMBER_ID, null);
+
+    await expect(provider.send(baseRequest())).resolves.toEqual({ status: "sent", providerMessageId: "wamid.OK" });
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse((init as RequestInit).body as string).type).toBe("text");
+  });
+
+  it("works when the last inbound time arrives as Postgres text (window closed)", async () => {
+    mockGetLastInboundReceivedAt.mockResolvedValue(pgTimestamp(new Date(Date.now() - 30 * 60 * 60 * 1000)));
+    const provider = new WhatsAppCloudApiProvider(TOKEN, PHONE_NUMBER_ID, null);
+
+    await expect(provider.send(baseRequest())).rejects.toThrow(/window is closed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable last inbound time counts as 'no inbound', never as an open window", async () => {
+    mockGetLastInboundReceivedAt.mockResolvedValue("not a timestamp");
+    const provider = new WhatsAppCloudApiProvider(TOKEN, PHONE_NUMBER_ID, null);
+
+    await expect(provider.send(baseRequest())).rejects.toThrow(/window is closed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("treats a client with no inbound history at all as outside the window", async () => {
     mockGetLastInboundReceivedAt.mockResolvedValue(null);
     const provider = new WhatsAppCloudApiProvider(TOKEN, PHONE_NUMBER_ID, null);
