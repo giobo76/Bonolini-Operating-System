@@ -383,6 +383,7 @@ interface InsertCommunicationRow {
   dealId: string | null;
   transferRequestId: string | null;
   quoteId: string | null;
+  bookingId?: string | null;
   action: string;
   agent: string;
   idempotencyKey: string;
@@ -401,7 +402,7 @@ async function insertCommunicationOnce(row: InsertCommunicationRow, caller: stri
       tenant_id, client_id, deal_id, transfer_request_id, quote_id, booking_id,
       channel, action, agent, correlation_id, idempotency_key, content, status, policy_decision
     ) values (
-      ${row.tenantId}, ${row.clientId}, ${row.dealId}, ${row.transferRequestId}, ${row.quoteId}, ${null},
+      ${row.tenantId}, ${row.clientId}, ${row.dealId}, ${row.transferRequestId}, ${row.quoteId}, ${row.bookingId ?? null},
       ${"whatsapp"}, ${row.action}, ${row.agent}, ${null}, ${row.idempotencyKey},
       ${JSON.stringify(row.content)}::jsonb, ${row.status},
       ${row.policyDecision ? JSON.stringify(row.policyDecision) : null}::jsonb
@@ -461,6 +462,49 @@ export async function sendMissingInfoRequest(
       },
     },
     "sendMissingInfoRequest",
+  );
+  return executeCommunication(input.tenantId, row.id, provider);
+}
+
+export interface SendBookingConfirmationInput {
+  tenantId: string;
+  clientId: string;
+  dealId: string | null;
+  transferRequestId: string | null;
+  bookingId: string;
+  content: CommunicationContent;
+}
+
+// Sent right after the founder records the deposit (founder decision,
+// 2026-09-24: automatic, no further approval — recording the deposit is the
+// approval). At most one per booking, including double taps and retries:
+// idempotency key booking_confirmation:<bookingId> plus executeCommunication's
+// own atomic claim.
+export async function sendBookingConfirmation(
+  input: SendBookingConfirmationInput,
+  provider: OutboundProvider = getConfiguredOutboundProvider(),
+): Promise<Communication> {
+  const row = await insertCommunicationOnce(
+    {
+      tenantId: input.tenantId,
+      clientId: input.clientId,
+      dealId: input.dealId,
+      transferRequestId: input.transferRequestId,
+      quoteId: null,
+      bookingId: input.bookingId,
+      action: "booking_confirmation",
+      agent: "system",
+      idempotencyKey: `booking_confirmation:${input.bookingId}`,
+      content: input.content,
+      status: "approved",
+      policyDecision: {
+        allowed: true,
+        requiresApproval: false,
+        rule: "founder_decision_2026_09_24_booking_confirmation_auto",
+        reason: "fixed-text confirmation sent when the founder records the deposit",
+      },
+    },
+    "sendBookingConfirmation",
   );
   return executeCommunication(input.tenantId, row.id, provider);
 }

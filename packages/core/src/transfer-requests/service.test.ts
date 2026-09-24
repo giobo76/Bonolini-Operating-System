@@ -274,9 +274,9 @@ vi.mock("@bos/db", () => {
           pickupAddress,
           destinationAddress,
           customerTripDurationMinutes,
-          status: "confirmed",
+          status: params[12],
           currency,
-          depositAmountCents: null,
+          depositAmountCents: params[13],
           depositPaidAt: null,
           finalAmountCents,
           scheduledAt: new Date(scheduledAt),
@@ -1578,7 +1578,7 @@ describe("Admin decision — accept / reject / modifyPrice", () => {
       return fakeState.bookings[0]!;
     }
 
-    it("N1: ACCEPT creates a confirmed booking snapshot with every expected field", async () => {
+    it("N1: ACCEPT creates a booking snapshot waiting for its deposit, with every expected field", async () => {
       seedPendingApproval({ pickupAddress: "Via Roma 1, Sondrio", destinationAddress: "Aeroporto di Malpensa" });
 
       await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
@@ -1595,8 +1595,27 @@ describe("Admin decision — accept / reject / modifyPrice", () => {
       expect(booking.finalAmountCents).toBe(25000); // calculatedAmountCents, plain ACCEPT
       expect(booking.currency).toBe("EUR");
       expect(booking.quoteId).toBeNull();
-      expect(booking.status).toBe("confirmed");
+      expect(booking.status).toBe("pending_deposit");
+      expect(booking.depositAmountCents).toBe(13000); // 50% of 250 € = 125 € -> nearest 10 €, half up
       expect((booking.scheduledAt as Date).toISOString()).toBe("2026-09-15T08:00:00.000Z"); // CEST, +02:00
+    });
+
+    it("N1b: an explicit deposit is used as given; an invalid one creates no booking", async () => {
+      seedPendingApproval();
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID, 5000);
+      expect(onlyBooking().depositAmountCents).toBe(5000);
+    });
+
+    it("N1c: a deposit larger than the price is refused", async () => {
+      seedPendingApproval();
+      await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID, 30000)).rejects.toThrow("invalid deposit");
+      expect(fakeState.bookings).toHaveLength(0);
+    });
+
+    it("N2b: MODIFY_PRICE computes the default deposit on the new price", async () => {
+      seedPendingApproval();
+      await modifyPriceForTransferRequest("tenant-1", "request-1", ADMIN_ID, 39000, "tratta più lunga");
+      expect(onlyBooking().depositAmountCents).toBe(20000);
     });
 
     it("N2: MODIFY_PRICE creates a booking at the admin-overridden price, not the engine's own", async () => {

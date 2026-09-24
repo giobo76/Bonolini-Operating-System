@@ -19,14 +19,14 @@
 ## State machine
 
 ```
-open --(priced)--> quoted --(booking created)--> confirmed --(explicit closeDeal)--> completed
+open --(priced)--> quoted --(deposit recorded)--> confirmed --(explicit closeDeal)--> completed
   \                    \                              \
    \--(explicit closeDeal, any active state)-----------+--> cancelled --(reopenRecentClosedDealIfMatching)--> open
 ```
 
 `open`, `quoted`, and `confirmed` are all **active** for matching (`ACTIVE_DEAL_STATUSES`) — a customer can ask about payment, method, or timing right up through a confirmed booking, and the message must still land on the same deal. `completed`/`cancelled` are not, except the one deliberate exception below.
 
-`advanceDealStatus` is forward-only (`DEAL_STATUS_RANK`) — called from `transfer-requests/service.ts` when a transfer_request under a deal reaches `pending_admin_approval` (→ `quoted`) or gets a booking (→ `confirmed`); it never regresses a deal that's already further along. `closeDeal` is the only path to `completed`/`cancelled`, always an explicit call — nothing in this phase calls it automatically (no notifications/billing listener exists yet; see the phase's own explicit exclusions).
+`advanceDealStatus` is forward-only (`DEAL_STATUS_RANK`) — called from `transfer-requests/service.ts` when a transfer_request under a deal reaches `pending_admin_approval` (→ `quoted`) and from `bookings.confirmBookingDeposit` when the deposit is recorded (→ `confirmed`; since migration 0029 approval alone no longer confirms the deal); it never regresses a deal that's already further along. `closeDeal` is the only path to `completed`/`cancelled`, always an explicit call — nothing in this phase calls it automatically (no notifications/billing listener exists yet; see the phase's own explicit exclusions).
 
 ## Matching algorithm
 

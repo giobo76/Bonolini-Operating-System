@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const bookingStatusSchema = z.enum(["confirmed", "completed", "cancelled"]);
+export const bookingStatusSchema = z.enum(["pending_deposit", "confirmed", "completed", "cancelled"]);
 
 export const createBookingSchema = z.object({
   clientId: z.string().uuid(),
@@ -16,7 +16,10 @@ export const createBookingSchema = z.object({
 // invoiced, paid) is simpler than one procedure per milestone.
 export const updateBookingSchema = z.object({
   id: z.string().uuid(),
-  status: bookingStatusSchema.optional(),
+  // Never 'pending_deposit', and pending_deposit -> confirmed only through
+  // confirmBookingDeposit (which also advances the deal and emits
+  // booking.confirmed).
+  status: z.enum(["confirmed", "completed", "cancelled"]).optional(),
   depositAmountCents: z.number().int().nonnegative().optional(),
   depositPaidAt: z.coerce.date().optional(),
   finalAmountCents: z.number().int().nonnegative().optional(),
@@ -29,6 +32,15 @@ export const updateBookingSchema = z.object({
 });
 
 export const bookingIdSchema = z.object({ id: z.string().uuid() });
+
+// Admin "record deposit" on a booking waiting for its deposit: same effect
+// as the founder's WhatsApp button ACCONTO RICEVUTO.
+export const confirmBookingDepositSchema = z.object({
+  id: z.string().uuid(),
+  // The amount actually received, when it differs from the one requested.
+  receivedAmountCents: z.number().int().positive().optional(),
+});
+export type ConfirmBookingDepositInput = z.infer<typeof confirmBookingDepositSchema>;
 export const listBookingsForClientSchema = z.object({ clientId: z.string().uuid() });
 
 export type CreateBookingInput = z.infer<typeof createBookingSchema>;
@@ -58,6 +70,9 @@ export const ensureBookingSnapshotSchema = z.object({
   scheduledAt: z.date(),
   finalAmountCents: z.number().int().nonnegative(),
   currency: z.string().min(1),
+  // The deposit the customer is asked for. The booking starts at
+  // 'pending_deposit' and is confirmed only by confirmBookingDeposit.
+  depositAmountCents: z.number().int().positive(),
 });
 
 export type EnsureBookingSnapshotInput = z.infer<typeof ensureBookingSnapshotSchema>;

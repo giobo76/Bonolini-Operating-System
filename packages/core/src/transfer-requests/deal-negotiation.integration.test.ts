@@ -250,9 +250,9 @@ vi.mock("@bos/db", () => {
           pickupAddress,
           destinationAddress,
           customerTripDurationMinutes,
-          status: "confirmed",
+          status: params[12],
           currency,
-          depositAmountCents: null,
+          depositAmountCents: params[13],
           depositPaidAt: null,
           finalAmountCents,
           scheduledAt: new Date(scheduledAt),
@@ -397,6 +397,7 @@ const {
   getTransferRequest,
 } = await import("./service");
 const { closeDeal, getDeal } = await import("../deals");
+const { computeDefaultDepositCents } = await import("../pricing");
 
 const TENANT = fakeState.tenant.id;
 // Real, masked-in-diagnosis phone: +91...11 — foreign (does not start with "39").
@@ -653,11 +654,14 @@ describe("quote and booking linking", () => {
     // deals/README.md's "Quotes" section. No message is ever sent.
     expect(quote.status).toBe("sent");
 
-    // deal advanced to confirmed, and the booking created is linked too.
+    // The deal stays "quoted" until the deposit arrives; the booking is
+    // linked to it and waits for the deposit (50% of 300 € -> 150 €).
     const deal = fakeState.deals.find((d) => d.id === priced.dealId)!;
-    expect(deal.status).toBe("confirmed");
+    expect(deal.status).toBe("quoted");
     const booking = fakeState.bookings.find((b) => b.transferRequestId === approved.id)!;
     expect(booking.dealId).toBe(priced.dealId);
+    expect(booking.status).toBe("pending_deposit");
+    expect(booking.depositAmountCents).toBe(computeDefaultDepositCents(approved.finalAmountCents!));
   });
 
   it("is idempotent — retrying ACCEPT on an already-approved request never creates a second quote", async () => {

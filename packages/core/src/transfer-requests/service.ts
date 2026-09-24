@@ -1,7 +1,15 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, transferRequests, whatsappMessages, assertOne, type TransferRequest } from "@bos/db";
 import { inngest, emitDomainEvent } from "@bos/jobs";
-import { calculatePrice, determineCustomerType, isComoTiranoRoute, resolvePricingRates, type CustomerType } from "../pricing";
+import {
+  calculatePrice,
+  computeDefaultDepositCents,
+  determineCustomerType,
+  isComoTiranoRoute,
+  isValidDeposit,
+  resolvePricingRates,
+  type CustomerType,
+} from "../pricing";
 import { calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip, calculateRoute } from "../maps-distance";
 import {
   determineRelocationOrigin,
@@ -1081,6 +1089,7 @@ async function resolveCustomerTripDurationMinutesForBooking(existing: TransferRe
 async function ensureBookingForApprovedTransferRequestOrThrow(
   tenantId: string,
   approved: TransferRequest,
+  depositAmountCents?: number,
 ): Promise<Booking> {
   if (!approved.pickup || !approved.destination || !approved.requestedDate || !approved.requestedTime) {
     // Unreachable in practice: guaranteed non-null before status could ever
@@ -1105,6 +1114,15 @@ async function ensureBookingForApprovedTransferRequestOrThrow(
     );
   }
 
+  // Ignored on the idempotent retry path: an existing booking keeps the
+  // deposit it was created with (ON CONFLICT DO NOTHING).
+  const deposit = depositAmountCents ?? computeDefaultDepositCents(approved.finalAmountCents);
+  if (!isValidDeposit(deposit, approved.finalAmountCents)) {
+    throw new Error(
+      `invalid deposit ${deposit} for transfer_request ${approved.id} (total ${approved.finalAmountCents})`,
+    );
+  }
+
   const customerTripDurationMinutes = await resolveCustomerTripDurationMinutesForBooking(approved);
 
   return ensureBookingForApprovedTransferRequest(tenantId, {
@@ -1119,6 +1137,7 @@ async function ensureBookingForApprovedTransferRequestOrThrow(
     scheduledAt,
     finalAmountCents: approved.finalAmountCents,
     currency: approved.currency,
+    depositAmountCents: deposit,
   });
 }
 
@@ -1152,12 +1171,10 @@ async function ensureQuoteForDeal(
 
 // Shared by acceptTransferRequest and modifyPriceForTransferRequest, both
 // on the fresh-approval path and the idempotent already-approved retry —
-// links transfer_requests.quote_id (ensureQuoteForDeal above), then
-// advances the deal to "confirmed" (advanceDealStatus is itself
-// forward-only and a safe no-op with no dealId, so calling this from the
-// idempotent retry path too is harmless — never re-creates a second quote,
-// never regresses an already-confirmed deal).
-async function linkQuoteAndAdvanceDealForApproval(tenantId: string, approved: TransferRequest): Promise<TransferRequest> {
+// links transfer_requests.quote_id (ensureQuoteForDeal above). The deal
+// stays "quoted": it becomes "confirmed" only when the deposit is recorded
+// (bookings.confirmBookingDeposit), never at approval.
+async function linkQuoteForApproval(tenantId: string, approved: TransferRequest): Promise<TransferRequest> {
   const quoteId = await ensureQuoteForDeal(tenantId, approved);
 
   let result = approved;
@@ -1168,11 +1185,7 @@ async function linkQuoteAndAdvanceDealForApproval(tenantId: string, approved: Tr
       .set({ quoteId, updatedAt: new Date() })
       .where(eq(transferRequests.id, approved.id))
       .returning();
-    result = assertOne(rows, "linkQuoteAndAdvanceDealForApproval");
-  }
-
-  if (result.dealId) {
-    await advanceDealStatus(tenantId, result.dealId, "confirmed");
+    result = assertOne(rows, "linkQuoteForApproval");
   }
 
   return result;
@@ -1221,10 +1234,15 @@ function assertCalculatedAmount(existing: TransferRequest, caller: string): numb
 // see README.md's "Booking Snapshot" section. Any other
 // non-pending_admin_approval status is still a real error, not a silent
 // no-op.
+//
+// depositAmountCents: the deposit the customer is asked for; defaults to
+// computeDefaultDepositCents(final price). The booking is created at
+// 'pending_deposit'.
 export async function acceptTransferRequest(
   tenantId: string,
   id: string,
   adminProfileId: string,
+  depositAmountCents?: number,
 ): Promise<TransferRequest> {
   const db = getDb();
   const existing = await getTransferRequest(tenantId, id);
@@ -1233,8 +1251,8 @@ export async function acceptTransferRequest(
   }
 
   if (existing.status === "approved") {
-    const reconciled = await linkQuoteAndAdvanceDealForApproval(tenantId, existing);
-    await ensureBookingForApprovedTransferRequestOrThrow(tenantId, reconciled);
+    const reconciled = await linkQuoteForApproval(tenantId, existing);
+    await ensureBookingForApprovedTransferRequestOrThrow(tenantId, reconciled, depositAmountCents);
     return reconciled;
   }
 
@@ -1260,8 +1278,8 @@ export async function acceptTransferRequest(
     .returning();
 
   const approved = assertOne(rows, "acceptTransferRequest");
-  const updated = await linkQuoteAndAdvanceDealForApproval(tenantId, approved);
-  await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated);
+  const updated = await linkQuoteForApproval(tenantId, approved);
+  await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated, depositAmountCents);
 
   // Fire-and-forget, fail-soft — only on the fresh transition to
   // 'approved', never on the idempotent early-return above (that would
@@ -1345,6 +1363,7 @@ export async function modifyPriceForTransferRequest(
   adminProfileId: string,
   amountCents: number,
   reason: string,
+  depositAmountCents?: number,
 ): Promise<TransferRequest> {
   if (!reason.trim()) {
     throw new Error("modifyPriceForTransferRequest: reason is required and must not be empty");
@@ -1378,14 +1397,14 @@ export async function modifyPriceForTransferRequest(
     .returning();
 
   const approved = assertOne(rows, "modifyPriceForTransferRequest");
-  const updated = await linkQuoteAndAdvanceDealForApproval(tenantId, approved);
+  const updated = await linkQuoteForApproval(tenantId, approved);
   // A retry of a booking that failed to get created after THIS call
   // succeeded goes through acceptTransferRequest instead (idempotent for
   // any 'approved' status) — modifyPriceForTransferRequest itself stays
   // deliberately non-re-runnable once approved, per the founder's existing
   // rule above; this call only ensures the booking for the request this
   // invocation itself just approved.
-  await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated);
+  await ensureBookingForApprovedTransferRequestOrThrow(tenantId, updated, depositAmountCents);
 
   // Fire-and-forget, fail-soft — same event acceptTransferRequest emits on
   // its own fresh confirmation; this function is never re-runnable once

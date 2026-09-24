@@ -111,6 +111,7 @@ export async function insertApprovalRequestOnce(input: {
   round: number;
   status: ApprovalStatus;
   proposedAmountCents: number | null;
+  proposedDepositCents?: number | null;
 }): Promise<QuoteApprovalRequest | null> {
   const db = getDb();
   const inserted = await db
@@ -123,6 +124,7 @@ export async function insertApprovalRequestOnce(input: {
       round: input.round,
       status: input.status,
       proposedAmountCents: input.proposedAmountCents,
+      proposedDepositCents: input.proposedDepositCents ?? null,
     })
     .onConflictDoNothing()
     .returning();

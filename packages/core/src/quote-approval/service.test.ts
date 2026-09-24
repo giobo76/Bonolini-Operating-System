@@ -17,8 +17,30 @@ const { state } = vi.hoisted(() => ({
     customerSends: 0,
     adminProfile: true,
     customerPhone: "+393331234567",
+    bookings: [] as Array<Record<string, unknown>>,
+    confirmations: new Map<string, { id: string; status: string; error: string | null; content: unknown }>(),
+    confirmationSendResult: "executed" as "executed" | "execution_failed",
   },
 }));
+
+// A booking per approved transfer_request, created by the accept/modify
+// mocks below exactly like transfer-requests does: pending_deposit with the
+// deposit it was given.
+function createBookingFor(transferRequestId: string, finalAmountCents: number, depositAmountCents: number) {
+  if (state.bookings.some((b) => b.transferRequestId === transferRequestId)) return;
+  state.bookings.push({
+    id: `00000000-0000-4000-9000-${String(state.bookings.length + 1).padStart(12, "0")}`,
+    tenantId: "tenant-1",
+    clientId: "client-1",
+    dealId: "deal-1",
+    transferRequestId,
+    status: "pending_deposit",
+    finalAmountCents,
+    depositAmountCents,
+    depositPaidAt: null,
+    currency: "EUR",
+  });
+}
 
 function uuid(n: number): string {
   return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -43,6 +65,7 @@ vi.mock("./repository", () => ({
     round: number;
     status: string;
     proposedAmountCents: number | null;
+    proposedDepositCents?: number | null;
   }) => {
     const existing = state.rows.find(
       (r) => r.transferRequestId === input.transferRequestId && r.kind === input.kind && r.round === input.round,
@@ -64,6 +87,7 @@ vi.mock("./repository", () => ({
       round: input.round,
       status: input.status,
       proposedAmountCents: input.proposedAmountCents,
+      proposedDepositCents: input.proposedDepositCents ?? null,
       notificationStatus: "pending",
       notificationChannel: null,
       notificationError: null,
@@ -108,16 +132,20 @@ vi.mock("./founder-channel", () => ({
   },
 }));
 
-const acceptTransferRequest = vi.fn(async (_t: string, id: string) => {
+const acceptTransferRequest = vi.fn(async (_t: string, id: string, _p: string, deposit: number) => {
   const tr = state.transferRequests.get(id)!;
   Object.assign(tr, { status: "approved", finalAmountCents: tr.finalAmountCents ?? tr.calculatedAmountCents });
+  createBookingFor(id, tr.finalAmountCents!, deposit);
   return tr;
 });
-const modifyPriceForTransferRequest = vi.fn(async (_t: string, id: string, _p: string, amount: number) => {
-  const tr = state.transferRequests.get(id)!;
-  Object.assign(tr, { status: "approved", finalAmountCents: amount });
-  return tr;
-});
+const modifyPriceForTransferRequest = vi.fn(
+  async (_t: string, id: string, _p: string, amount: number, _reason: string, deposit: number) => {
+    const tr = state.transferRequests.get(id)!;
+    Object.assign(tr, { status: "approved", finalAmountCents: amount });
+    createBookingFor(id, amount, deposit);
+    return tr;
+  },
+);
 const rejectTransferRequest = vi.fn(async (_t: string, id: string) => {
   const tr = state.transferRequests.get(id)!;
   Object.assign(tr, { status: "cancelled", cancelledReason: "rejected_by_admin" });
@@ -125,9 +153,25 @@ const rejectTransferRequest = vi.fn(async (_t: string, id: string) => {
 });
 vi.mock("../transfer-requests", () => ({
   getTransferRequest: async (_t: string, id: string) => state.transferRequests.get(id) ?? null,
-  acceptTransferRequest: (...args: [string, string]) => acceptTransferRequest(...args),
-  modifyPriceForTransferRequest: (...args: [string, string, string, number]) => modifyPriceForTransferRequest(...args),
+  acceptTransferRequest: (...args: [string, string, string, number]) => acceptTransferRequest(...args),
+  modifyPriceForTransferRequest: (...args: [string, string, string, number, string, number]) =>
+    modifyPriceForTransferRequest(...args),
   rejectTransferRequest: (...args: [string, string]) => rejectTransferRequest(...args),
+}));
+
+const confirmBookingDeposit = vi.fn(async (_t: string, id: string) => {
+  const booking = state.bookings.find((b) => b.id === id);
+  if (!booking) return null;
+  if (booking.status !== "pending_deposit") return { booking, changed: false };
+  Object.assign(booking, { status: "confirmed", depositPaidAt: new Date() });
+  return { booking, changed: true };
+});
+vi.mock("../bookings", () => ({
+  getBooking: async (_t: string, id: string) => state.bookings.find((b) => b.id === id) ?? null,
+  getBookingByTransferRequestId: async (_t: string, trId: string) =>
+    state.bookings.find((b) => b.transferRequestId === trId) ?? null,
+  listPendingDepositBookings: async () => state.bookings.filter((b) => b.status === "pending_deposit"),
+  confirmBookingDeposit: (...args: [string, string]) => confirmBookingDeposit(...args),
 }));
 
 vi.mock("../clients", () => ({
@@ -173,6 +217,21 @@ vi.mock("../communications", async () => {
         state.customerSends++;
         c.status = "executed";
       }
+      return c;
+    },
+    // Same idempotency as the real one: one confirmation per booking, sent
+    // once.
+    sendBookingConfirmation: async (input: { bookingId: string; content: unknown }) => {
+      const existing = state.confirmations.get(input.bookingId);
+      if (existing) return existing;
+      const failed = state.confirmationSendResult === "execution_failed";
+      const c = {
+        id: `comm-confirm-${input.bookingId}`,
+        status: state.confirmationSendResult,
+        error: failed ? "24h window closed" : null,
+        content: input.content,
+      };
+      state.confirmations.set(input.bookingId, c);
       return c;
     },
   };
@@ -271,6 +330,10 @@ beforeEach(() => {
   state.customerSends = 0;
   state.adminProfile = true;
   state.customerPhone = "+393331234567";
+  state.bookings = [];
+  state.confirmations = new Map();
+  state.confirmationSendResult = "executed";
+  confirmBookingDeposit.mockClear();
   process.env.QUOTE_APPROVAL_ENABLED = "true";
   delete process.env.QUOTE_APPROVAL_TEST_PHONES;
   process.env.FOUNDER_PROFILE_ID = "profile-founder";
@@ -372,7 +435,8 @@ describe("PREVENTIVO PRONTO", () => {
     expect(state.customerSends).toBe(1);
     const offer = [...state.communications.values()][0]!.content as { to: string; body: string };
     expect(offer.to).toBe("+393331234567");
-    expect(offer.body).toContain("Prezzo: 300,00 €");
+    expect(offer.body).toContain("Prezzo totale: 300,00 €");
+    expect(offer.body).toContain("Acconto per confermare: 150,00 €");
     expect(offer.body).not.toMatch(/taxi/i);
     const replies = state.founderOutbox.slice(1).map((m) => m.parts.join(""));
     expect(replies[0]).toContain("approvato");
@@ -426,11 +490,13 @@ describe("PREVENTIVO PRONTO", () => {
       "profile-founder",
       28000,
       expect.any(String),
+      14000, // default deposit on the new price
     );
     expect(acceptTransferRequest).not.toHaveBeenCalled();
     expect(state.customerSends).toBe(1);
     const offer = [...state.communications.values()][0]!.content as { body: string };
-    expect(offer.body).toContain("Prezzo: 280,00 €");
+    expect(offer.body).toContain("Prezzo totale: 280,00 €");
+    expect(offer.body).toContain("Acconto per confermare: 140,00 €");
   });
 
   it("any other founder message re-sends every pending PREVENTIVO PRONTO", async () => {
@@ -606,5 +672,134 @@ describe("QUOTE_APPROVAL_TEST_PHONES", () => {
 
     expect(state.founderOutbox).toHaveLength(1);
     expect(state.founderOutbox[0]!.parts.join("")).toContain("Nessun preventivo in attesa");
+  });
+});
+
+describe("deposit", () => {
+  function lastOutbox() {
+    return state.founderOutbox[state.founderOutbox.length - 1]!;
+  }
+  function depositButtonId() {
+    return lastFounderButtons().find((b) => b.title === "ACCONTO RICEVUTO")!.id;
+  }
+
+  it("PREVENTIVO PRONTO shows the proposed deposit (50%, nearest 10 €) and the balance", async () => {
+    await notifyQuoteReady(transferRequest({ calculatedAmountCents: 39000 }));
+    const text = state.founderOutbox[0]!.parts.join("\n");
+    expect(text).toContain("Acconto: 200,00 € (50%, arrotondato) — saldo all'autista 190,00 €");
+    expect(text).toContain("Acconto per confermare: 200,00 €");
+  });
+
+  it("APPROVA creates a booking waiting for the deposit and offers ACCONTO RICEVUTO; nothing is confirmed yet", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+
+    expect(acceptTransferRequest).toHaveBeenCalledWith("tenant-1", expect.any(String), "profile-founder", 15000);
+    expect(state.bookings[0]).toMatchObject({ status: "pending_deposit", depositAmountCents: 15000 });
+    expect(lastOutbox().parts.join("")).toContain("in attesa di acconto (150,00 €)");
+    expect(lastOutbox().buttons).toEqual([{ id: expect.stringMatching(/^bk:.+:deposit_received$/), title: "ACCONTO RICEVUTO" }]);
+    expect(confirmBookingDeposit).not.toHaveBeenCalled();
+    expect(state.confirmations.size).toBe(0);
+  });
+
+  it("MODIFICA '280 100' sets price and deposit; the approval and the customer quote use both", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("MODIFICA"));
+    await founderText("280 100");
+
+    expect(lastOutbox().parts.join("\n")).toContain("Acconto: 100,00 € (scelto da te) — saldo all'autista 180,00 €");
+
+    await founderTap(buttonFor("APPROVA"));
+    expect(modifyPriceForTransferRequest).toHaveBeenCalledWith(
+      "tenant-1",
+      expect.any(String),
+      "profile-founder",
+      28000,
+      expect.any(String),
+      10000,
+    );
+    const offer = [...state.communications.values()][0]!.content as { body: string };
+    expect(offer.body).toContain("Acconto per confermare: 100,00 €");
+    expect(offer.body).toContain("Saldo all'autista il giorno del servizio: 180,00 €");
+  });
+
+  it("MODIFICA refuses a deposit above the price and keeps waiting for a valid one", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("MODIFICA"));
+    await founderText("280 300");
+
+    expect(lastOutbox().parts.join("")).toContain("l'acconto deve essere maggiore di zero e non superiore al prezzo");
+    expect(state.rows.filter((r) => r.status === "awaiting_price")).toHaveLength(1);
+    expect(state.rows).toHaveLength(1);
+  });
+
+  it("ACCONTO RICEVUTO confirms the booking and sends the confirmation once, even on a double tap", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+    const deposit = depositButtonId();
+
+    await founderTap(deposit);
+    await founderTap(deposit);
+
+    expect(state.bookings[0]!.status).toBe("confirmed");
+    expect(state.confirmations.size).toBe(1);
+    const confirmation = [...state.confirmations.values()][0]!.content as { to: string; body: string };
+    expect(confirmation.to).toBe("+393331234567");
+    expect(confirmation.body).toContain("Data: 3 ottobre 2026, ore 14:30");
+    expect(confirmation.body).toContain("Saldo all'autista il giorno del servizio: 150,00 €");
+    const replies = state.founderOutbox.slice(-2).map((m) => m.parts.join(""));
+    expect(replies[0]).toContain("prenotazione CONFERMATA");
+    expect(replies[1]).toContain("era già confermata");
+  });
+
+  it("tells the founder when the confirmation to the customer does not go out", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+    state.confirmationSendResult = "execution_failed";
+
+    await founderTap(depositButtonId());
+
+    expect(state.bookings[0]!.status).toBe("confirmed");
+    expect(lastOutbox().parts.join("")).toContain("NON è partito: 24h window closed");
+  });
+
+  it("never confirms a cancelled booking and sends nothing", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+    state.bookings[0]!.status = "cancelled";
+
+    await founderTap(depositButtonId());
+
+    expect(state.confirmations.size).toBe(0);
+    expect(lastOutbox().parts.join("")).toContain('in stato "cancelled"');
+  });
+
+  it("respects the switches: off -> ignored; customer outside the test list -> refused", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+    const deposit = depositButtonId();
+
+    process.env.QUOTE_APPROVAL_ENABLED = "false";
+    await founderTap(deposit);
+    expect(confirmBookingDeposit).not.toHaveBeenCalled();
+
+    process.env.QUOTE_APPROVAL_ENABLED = "true";
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+    await founderTap(deposit);
+    expect(confirmBookingDeposit).not.toHaveBeenCalled();
+    expect(state.bookings[0]!.status).toBe("pending_deposit");
+    expect(lastOutbox().parts.join("")).toContain("numeri di prova");
+  });
+
+  it("any founder message re-sends the bookings waiting for a deposit, with the button", async () => {
+    await notifyQuoteReady(transferRequest());
+    await founderTap(buttonFor("APPROVA"));
+    state.founderOutbox = [];
+
+    await founderText("ciao");
+
+    expect(state.founderOutbox).toHaveLength(1);
+    expect(state.founderOutbox[0]!.parts.join("")).toContain("IN ATTESA DI ACCONTO");
+    expect(state.founderOutbox[0]!.buttons![0]!.title).toBe("ACCONTO RICEVUTO");
   });
 });

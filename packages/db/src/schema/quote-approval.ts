@@ -50,6 +50,8 @@ export const quoteApprovalRequests = pgTable("quote_approval_requests", {
   // null on round 1 (the engine's calculated price applies); set on every
   // round opened by a MODIFICA.
   proposedAmountCents: integer("proposed_amount_cents"),
+  // null = the default deposit (50% of the price, nearest 10 €) applies.
+  proposedDepositCents: integer("proposed_deposit_cents"),
   notificationStatus: text("notification_status").notNull().default("pending"),
   notificationChannel: text("notification_channel"),
   notificationError: text("notification_error"),

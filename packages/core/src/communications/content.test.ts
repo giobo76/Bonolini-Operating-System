@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMissingInfoRequestContent,
   buildTransferQuoteOfferContent,
+  buildBookingConfirmationContent,
   capitalizePlace,
   formatLongDateTime,
   formatPassengers,
@@ -158,11 +159,12 @@ const FULL_QUOTE: Omit<TransferQuoteOfferInput, "language"> = {
   luggage: "4 valigie grandi",
   flightNumber: "AZ123",
   amountCents: 30000,
+  depositCents: 15000,
   currency: "EUR",
 };
 
 describe("quote", () => {
-  it("Italian, every detail known: the founder's text verbatim", () => {
+  it("Italian, every detail known: founder text + DRAFT price lines", () => {
     const { body } = buildTransferQuoteOfferContent({ ...FULL_QUOTE, language: "it" });
     expect(body).toBe(
       [
@@ -175,7 +177,9 @@ describe("quote", () => {
         "Bagagli: 4 valigie grandi",
         "Volo: AZ123",
         "Veicolo: Mercedes V-Class con autista privato",
-        "Prezzo: 300,00 € per l'intero veicolo",
+        "Prezzo totale: 300,00 € per l'intero veicolo",
+        "Acconto per confermare: 150,00 €",
+        "Saldo all'autista il giorno del servizio: 150,00 €",
         "",
         "Per confermare il servizio o per qualsiasi domanda, risponda pure a questo messaggio.",
         "Bonolini Transfer – Private Transfers",
@@ -183,7 +187,7 @@ describe("quote", () => {
     );
   });
 
-  it("English, every detail known: the founder's text verbatim", () => {
+  it("English, every detail known: founder text + DRAFT price lines", () => {
     const { body } = buildTransferQuoteOfferContent({
       ...FULL_QUOTE,
       childrenAges: "4 and 7",
@@ -201,12 +205,27 @@ describe("quote", () => {
         "Luggage: 4 large suitcases",
         "Flight: AZ123",
         "Vehicle: Mercedes V-Class with private driver",
-        "Price: €300.00 for the entire vehicle",
+        "Total price: €300.00 for the entire vehicle",
+        "Deposit to confirm: €150.00",
+        "Balance to the driver on the day of service: €150.00",
         "",
         "To confirm the service or for any question, simply reply to this message.",
         "Bonolini Transfer – Private Transfers",
       ].join("\n"),
     );
+  });
+
+  it("balance is total minus deposit", () => {
+    const { body } = buildTransferQuoteOfferContent({ ...FULL_QUOTE, amountCents: 28000, depositCents: 10000, language: "it" });
+    expect(body).toContain("Prezzo totale: 280,00 € per l'intero veicolo");
+    expect(body).toContain("Acconto per confermare: 100,00 €");
+    expect(body).toContain("Saldo all'autista il giorno del servizio: 180,00 €");
+  });
+
+  it("never contains a payment link", () => {
+    for (const language of ["it", "en"] as const) {
+      expect(buildTransferQuoteOfferContent({ ...FULL_QUOTE, language }).body).not.toMatch(/https?:|sumup/i);
+    }
   });
 
   it("omits Bagagli and Volo when unknown, but always shows Veicolo", () => {
@@ -230,6 +249,42 @@ describe("quote", () => {
     for (const language of ["it", "en"] as const) {
       expect(buildTransferQuoteOfferContent({ ...FULL_QUOTE, language }).body).not.toMatch(/taxi/i);
     }
+  });
+});
+
+// DRAFT texts (not yet the founder's wording) — structure only.
+describe("booking confirmation", () => {
+  const trip = {
+    to: FULL_QUOTE.to,
+    pickup: FULL_QUOTE.pickup,
+    destination: FULL_QUOTE.destination,
+    requestedDate: FULL_QUOTE.requestedDate,
+    requestedTime: FULL_QUOTE.requestedTime,
+    passengers: FULL_QUOTE.passengers,
+    children: FULL_QUOTE.children,
+    childrenAges: FULL_QUOTE.childrenAges,
+    luggage: FULL_QUOTE.luggage,
+    flightNumber: FULL_QUOTE.flightNumber,
+    currency: FULL_QUOTE.currency,
+  };
+
+  it("Italian: date and time of the booking, balance, signature, never taxi", () => {
+    const { body, to } = buildBookingConfirmationContent({ ...trip, language: "it", balanceCents: 15000 });
+    expect(to).toBe("+393331234567");
+    expect(body).toContain("confermata");
+    expect(body).toContain("Data: 3 ottobre 2026, ore 14:30");
+    expect(body).toContain("Tratta: Malpensa → Sondrio");
+    expect(body).toContain("Saldo all'autista il giorno del servizio: 150,00 €");
+    expect(body.endsWith("Bonolini Transfer – Private Transfers")).toBe(true);
+    expect(body).not.toMatch(/taxi|https?:/i);
+  });
+
+  it("English", () => {
+    const { body } = buildBookingConfirmationContent({ ...trip, language: "en", balanceCents: 15000 });
+    expect(body).toContain("confirmed");
+    expect(body).toContain("Date: 3 October 2026 at 14:30");
+    expect(body).toContain("Balance to the driver on the day of service: €150.00");
+    expect(body).not.toMatch(/taxi|https?:/i);
   });
 });
 

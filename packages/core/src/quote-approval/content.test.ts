@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { decodeButtonId, encodeButtonId, isTypedCommand, parseFounderPrice } from "./content";
+import {
+  decodeButtonId,
+  decodeDepositButtonId,
+  encodeButtonId,
+  encodeDepositButtonId,
+  isTypedCommand,
+  parseFounderPrice,
+  parseFounderPriceAndDeposit,
+} from "./content";
 
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
@@ -40,5 +48,27 @@ describe("isTypedCommand", () => {
     expect(isTypedCommand("approva")).toBe(true);
     expect(isTypedCommand("RIFIUTA grazie")).toBe(true);
     expect(isTypedCommand("ciao")).toBe(false);
+  });
+});
+
+describe("parseFounderPriceAndDeposit", () => {
+  it("reads a price alone or a price and a deposit", () => {
+    expect(parseFounderPriceAndDeposit("280")).toEqual({ amountCents: 28000, depositCents: null });
+    expect(parseFounderPriceAndDeposit("280 100")).toEqual({ amountCents: 28000, depositCents: 10000 });
+    expect(parseFounderPriceAndDeposit(" 280€  100,50 ")).toEqual({ amountCents: 28000, depositCents: 10050 });
+  });
+
+  it.each(["", "280 100 50", "280 acconto 100", "ciao", "280 x"])("rejects %j", (text) => {
+    expect(parseFounderPriceAndDeposit(text)).toBeNull();
+  });
+});
+
+describe("deposit button id", () => {
+  it("round-trips and rejects anything else", () => {
+    expect(decodeDepositButtonId(encodeDepositButtonId(ID))).toBe(ID);
+    expect(decodeDepositButtonId(`bk:${ID}:other`)).toBeNull();
+    expect(decodeDepositButtonId(`qa:${ID}:approve`)).toBeNull();
+    expect(decodeDepositButtonId("bk:not-a-uuid:deposit_received")).toBeNull();
+    expect(encodeDepositButtonId(ID).length).toBeLessThanOrEqual(256);
   });
 });

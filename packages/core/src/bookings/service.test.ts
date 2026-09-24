@@ -24,6 +24,9 @@ const { fakeState, bookingsTable } = vi.hoisted(() => {
 const jobsMock = vi.hoisted(() => ({ inngest: {}, emitDomainEvent: vi.fn() }));
 vi.mock("@bos/jobs", () => jobsMock);
 
+const advanceDealStatus = vi.hoisted(() => vi.fn());
+vi.mock("../deals", () => ({ advanceDealStatus }));
+
 // Recursively flattens a drizzle and(eq(...), eq(...), sql`...`) condition
 // down to its real bound values, in order — StringChunks (literal SQL
 // text) and the `undefined` column-reference chunks (the mocked
@@ -83,11 +86,16 @@ vi.mock("@bos/db", () => {
         where: (condition: { queryChunks: unknown[] }) => {
           const conditionValues = extractConditionValues(condition);
           const target = findByTenantAndKey(conditionValues[0], conditionValues[1]);
-          // Mirrors the real WHERE guard (bookings.status != 'cancelled')
-          // that cancelBookingByCalendarEventId's SQL expresses — an
+          // Mirrors the real WHERE guards: confirmBookingDeposit's
+          // status = 'pending_deposit', and the status != 'cancelled' that
+          // cancelBookingByCalendarEventId's SQL expresses — an
           // already-cancelled booking is never touched again, same
           // idempotency guarantee as the raw-SQL upsert below.
-          const applies = target && target.status !== "cancelled";
+          const applies =
+            target !== undefined &&
+            (conditionValues.includes("pending_deposit")
+              ? target.status === "pending_deposit"
+              : target.status !== "cancelled");
           if (applies) Object.assign(target, values);
           const result = applies ? [target] : [];
           return { returning: async () => result };
@@ -156,6 +164,8 @@ vi.mock("@bos/db", () => {
         scheduledAt,
         finalAmountCents,
         currency,
+        status,
+        depositAmountCents,
       ] = params as [
         string,
         string,
@@ -169,6 +179,8 @@ vi.mock("@bos/db", () => {
         string,
         number,
         string,
+        string,
+        number,
       ];
 
       const conflict = fakeState.bookings.some((b) => b.transferRequestId === transferRequestId);
@@ -187,9 +199,9 @@ vi.mock("@bos/db", () => {
         pickupAddress,
         destinationAddress,
         customerTripDurationMinutes,
-        status: "confirmed",
+        status,
         currency,
-        depositAmountCents: null,
+        depositAmountCents,
         depositPaidAt: null,
         finalAmountCents,
         scheduledAt: new Date(scheduledAt),
@@ -223,6 +235,7 @@ const {
   getBookingByCalendarEventId,
   cancelBookingByCalendarEventId,
   updateBooking,
+  confirmBookingDeposit,
 } = await import("./service");
 
 function inputFor(overrides: Partial<EnsureBookingSnapshotInput> = {}): EnsureBookingSnapshotInput {
@@ -237,6 +250,7 @@ function inputFor(overrides: Partial<EnsureBookingSnapshotInput> = {}): EnsureBo
     scheduledAt: new Date("2026-09-15T08:00:00.000Z"),
     finalAmountCents: 25000,
     currency: "EUR",
+    depositAmountCents: 13000,
     ...overrides,
   };
 }
@@ -248,7 +262,7 @@ beforeEach(() => {
 });
 
 describe("ensureBookingForApprovedTransferRequest", () => {
-  it("creates a booking with every field mapped from the input, plus quoteId null and status confirmed", async () => {
+  it("creates a booking with every field mapped from the input, quoteId null, waiting for the deposit", async () => {
     const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
 
     expect(booking.transferRequestId).toBe("request-1");
@@ -260,7 +274,9 @@ describe("ensureBookingForApprovedTransferRequest", () => {
     expect(booking.finalAmountCents).toBe(25000);
     expect(booking.currency).toBe("EUR");
     expect(booking.quoteId).toBeNull();
-    expect(booking.status).toBe("confirmed");
+    expect(booking.status).toBe("pending_deposit");
+    expect(booking.depositAmountCents).toBe(13000);
+    expect(booking.depositPaidAt).toBeNull();
   });
 
   it("is idempotent — a second call with the same transferRequestId returns the existing booking, never a duplicate", async () => {
@@ -404,6 +420,54 @@ describe("cancelBookingByCalendarEventId", () => {
   });
 });
 
+describe("confirmBookingDeposit", () => {
+  beforeEach(() => advanceDealStatus.mockClear());
+
+  it("moves pending_deposit -> confirmed, stamps depositPaidAt and confirms the deal", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor({ dealId: "deal-1" }));
+
+    const result = await confirmBookingDeposit("tenant-1", booking.id);
+
+    expect(result?.changed).toBe(true);
+    expect(result?.booking.status).toBe("confirmed");
+    expect(result?.booking.depositPaidAt).toBeInstanceOf(Date);
+    expect(result?.booking.depositAmountCents).toBe(13000);
+    expect(advanceDealStatus).toHaveBeenCalledWith("tenant-1", "deal-1", "confirmed");
+  });
+
+  it("records a different received amount when given", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    const result = await confirmBookingDeposit("tenant-1", booking.id, 10000);
+    expect(result?.booking.depositAmountCents).toBe(10000);
+  });
+
+  it("a second call changes nothing (double tap)", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor({ dealId: "deal-1" }));
+    await confirmBookingDeposit("tenant-1", booking.id);
+    advanceDealStatus.mockClear();
+
+    const second = await confirmBookingDeposit("tenant-1", booking.id);
+
+    expect(second?.changed).toBe(false);
+    expect(second?.booking.status).toBe("confirmed");
+    expect(advanceDealStatus).not.toHaveBeenCalled();
+  });
+
+  it("never confirms a cancelled booking", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    booking.status = "cancelled";
+
+    const result = await confirmBookingDeposit("tenant-1", booking.id);
+
+    expect(result?.changed).toBe(false);
+    expect(result?.booking.status).toBe("cancelled");
+  });
+
+  it("returns null for an unknown booking", async () => {
+    expect(await confirmBookingDeposit("tenant-1", "booking-nope")).toBeNull();
+  });
+});
+
 // BOS Agent V2 booking lifecycle wiring — booking.confirmed/booking.completed
 // were already in the event catalog (packages/jobs/src/events.ts) with no
 // real producer; this is the first one. Only tenantId + bookingId in the
@@ -413,22 +477,21 @@ describe("cancelBookingByCalendarEventId", () => {
 // inngest-functions.ts's own comment) and there's no reason to carry data
 // nothing downstream reads.
 describe("booking.confirmed domain event", () => {
-  it("ensureBookingForApprovedTransferRequest emits booking.confirmed with exactly tenantId and bookingId, on a genuinely new booking", async () => {
-    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
-
-    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", {
-      tenantId: "tenant-1",
-      bookingId: booking.id,
-    });
-  });
-
-  it("ensureBookingForApprovedTransferRequest never re-emits on its own idempotent retry (same transferRequestId)", async () => {
+  it("ensureBookingForApprovedTransferRequest never emits booking.confirmed: the booking waits for its deposit", async () => {
     await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
-    jobsMock.emitDomainEvent.mockClear();
-
     await ensureBookingForApprovedTransferRequest("tenant-1", inputFor({ finalAmountCents: 99999 }));
 
     expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", expect.anything());
+  });
+
+  it("confirmBookingDeposit emits booking.confirmed exactly once, on the real transition", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+
+    await confirmBookingDeposit("tenant-1", booking.id);
+    await confirmBookingDeposit("tenant-1", booking.id);
+
+    const confirmations = jobsMock.emitDomainEvent.mock.calls.filter((call) => call[1] === "booking.confirmed");
+    expect(confirmations).toEqual([[jobsMock.inngest, "booking.confirmed", { tenantId: "tenant-1", bookingId: booking.id }]]);
   });
 
   it("ensureBookingFromCalendarEvent emits booking.confirmed on first sync", async () => {
@@ -461,6 +524,7 @@ describe("booking.confirmed domain event", () => {
 
   it("keeps tenant isolation — the emitted payload's tenantId is exactly the call's tenantId", async () => {
     const booking = await ensureBookingForApprovedTransferRequest("tenant-42", inputFor({ transferRequestId: "request-99" }));
+    await confirmBookingDeposit("tenant-42", booking.id);
 
     expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", {
       tenantId: "tenant-42",

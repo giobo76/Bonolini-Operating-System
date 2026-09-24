@@ -55,6 +55,23 @@ export async function createBookingAction(formData: FormData) {
   redirect(`/customers/${clientId}`);
 }
 
+// pending_deposit -> confirmed: same effect as the WhatsApp button
+// ACCONTO RICEVUTO on the booking itself (deal confirmed, booking.confirmed
+// emitted), without the automatic message to the customer.
+export async function confirmBookingDepositAction(formData: FormData) {
+  const clientId = String(formData.get("clientId"));
+  const id = String(formData.get("id"));
+
+  const caller = await createServerCaller();
+  await caller.bookings.confirmDeposit({
+    id,
+    receivedAmountCents: parseEurosToCents(formData.get("depositAmount")),
+  });
+
+  revalidatePath(`/customers/${clientId}`);
+  redirect(`/customers/${clientId}`);
+}
+
 // One flexible action behind several small forms (record deposit, mark
 // completed, cancel, record invoice, record payment) — see
 // packages/core/src/bookings/schema.ts's updateBookingSchema and

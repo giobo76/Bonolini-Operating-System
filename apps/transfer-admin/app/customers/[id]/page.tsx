@@ -5,6 +5,7 @@ import { createServerCaller } from "@bos/core";
 import { PermissionDenied } from "../permission-denied";
 import { archiveCustomerAction, restoreCustomerAction } from "../actions";
 import {
+  confirmBookingDepositAction,
   createBookingAction,
   createQuoteAction,
   updateBookingAction,
@@ -238,7 +239,7 @@ export default async function CustomerDetailPage({
               <li key={booking.id} className="space-y-2 rounded border p-3">
                 <div className="flex items-center gap-2">
                   <span className="rounded bg-neutral-100 px-2 py-0.5 text-xs capitalize dark:bg-neutral-800">
-                    {booking.status}
+                    {booking.status.replace("_", " ")}
                   </span>
                   <span className="text-neutral-500 dark:text-neutral-400">
                     Created {formatDate(booking.createdAt)}
@@ -273,6 +274,41 @@ export default async function CustomerDetailPage({
                 </dl>
 
                 <div className="flex flex-wrap gap-3 pt-1">
+                  {booking.status === "pending_deposit" ? (
+                    <>
+                      <form action={confirmBookingDepositAction} className="flex items-end gap-1">
+                        <input type="hidden" name="clientId" value={id} />
+                        <input type="hidden" name="id" value={booking.id} />
+                        <input
+                          type="number"
+                          step="0.01"
+                          name="depositAmount"
+                          defaultValue={
+                            booking.depositAmountCents !== null ? (booking.depositAmountCents / 100).toFixed(2) : undefined
+                          }
+                          placeholder="Deposit €"
+                          required
+                          className="w-24 rounded border px-2 py-1 text-xs"
+                        />
+                        <button type="submit" className="text-xs underline">
+                          Deposit received — confirm booking
+                        </button>
+                      </form>
+                      <span className="self-end text-xs text-neutral-500 dark:text-neutral-400">
+                        (no message is sent to the customer from here; the WhatsApp button ACCONTO RICEVUTO sends the
+                        confirmation)
+                      </span>
+                      <form action={updateBookingAction}>
+                        <input type="hidden" name="clientId" value={id} />
+                        <input type="hidden" name="id" value={booking.id} />
+                        <input type="hidden" name="status" value="cancelled" />
+                        <button type="submit" className="text-xs text-red-600 underline">
+                          Cancel
+                        </button>
+                      </form>
+                    </>
+                  ) : null}
+
                   {booking.status === "confirmed" && !booking.depositPaidAt ? (
                     <form action={updateBookingAction} className="flex items-end gap-1">
                       <input type="hidden" name="clientId" value={id} />

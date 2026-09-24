@@ -10,9 +10,14 @@ export {
   recordProviderDeliveryStatus,
   listCommunicationsForDeal,
   sendMissingInfoRequest,
+  sendBookingConfirmation,
   prepareTransferQuoteOfferCommunication,
 } from "./service";
-export type { SendMissingInfoRequestInput, PrepareTransferQuoteOfferInput } from "./service";
+export type {
+  SendMissingInfoRequestInput,
+  SendBookingConfirmationInput,
+  PrepareTransferQuoteOfferInput,
+} from "./service";
 export * from "./schema";
 export type { OutboundProvider, OutboundMessageRequest, OutboundSendResult } from "./provider";
 export { NotConfiguredOutboundProvider, getConfiguredOutboundProvider } from "./provider";
@@ -21,6 +26,7 @@ export {
   buildQuoteOfferContent,
   buildMissingInfoRequestContent,
   buildTransferQuoteOfferContent,
+  buildBookingConfirmationContent,
   toCustomerLanguage,
   formatAmountForCustomer,
   formatDateForCustomer,
@@ -28,7 +34,12 @@ export {
   formatPassengers,
   capitalizePlace,
 } from "./content";
-export type { CustomerLanguage, MissingInfoRequestInput, TransferQuoteOfferInput } from "./content";
+export type {
+  CustomerLanguage,
+  MissingInfoRequestInput,
+  TransferQuoteOfferInput,
+  BookingConfirmationInput,
+} from "./content";
 export {
   postWhatsappCloudApiMessage,
   getWhatsappCloudApiCredentials,

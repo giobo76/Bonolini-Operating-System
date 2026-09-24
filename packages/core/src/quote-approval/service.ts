@@ -7,13 +7,24 @@ import {
 } from "../transfer-requests";
 import { getClient } from "../clients";
 import {
+  getBooking,
+  getBookingByTransferRequestId,
+  listPendingDepositBookings,
+  confirmBookingDeposit,
+  type Booking,
+} from "../bookings";
+import { computeDefaultDepositCents, isValidDeposit } from "../pricing";
+import {
   sendMissingInfoRequest,
+  sendBookingConfirmation,
   prepareTransferQuoteOfferCommunication,
   submitCommunicationForApproval,
   approveCommunication,
   executeCommunication,
   buildMissingInfoRequestContent,
   buildTransferQuoteOfferContent,
+  buildBookingConfirmationContent,
+  formatAmountForCustomer,
   toCustomerLanguage,
 } from "../communications";
 import { getLastInboundWhatsappPhoneE164, normalizePhone } from "../whatsapp";
@@ -23,13 +34,16 @@ import { sendToFounder } from "./founder-channel";
 import { isCustomerPhoneAllowed, isQuoteApprovalEnabled } from "./config";
 import {
   APPROVAL_BUTTONS,
+  DEPOSIT_BUTTON_TITLE,
   FOUNDER_TEXTS,
   buildManualPriceText,
   buildQuoteReadyText,
   decodeButtonId,
+  decodeDepositButtonId,
   encodeButtonId,
+  encodeDepositButtonId,
   isTypedCommand,
-  parseFounderPrice,
+  parseFounderPriceAndDeposit,
   shortRef,
   type ApprovalAction,
 } from "./content";
@@ -183,11 +197,14 @@ async function deliverNotification(tenantId: string, row: QuoteApprovalRequest, 
       });
       return;
     }
-    const preview = buildCustomerQuoteContent(tr, amountCents, "");
+    const depositCents = depositForRound(row, amountCents);
+    const preview = buildCustomerQuoteContent(tr, amountCents, depositCents, "");
     const text = buildQuoteReadyText({
       tr,
       client,
       proposedAmountCents: row.proposedAmountCents,
+      depositCents,
+      depositIsCustom: row.proposedDepositCents !== null,
       customerMessageBody: preview.body,
     });
     result = await sendToFounder(tenantId, {
@@ -204,12 +221,17 @@ async function deliverNotification(tenantId: string, row: QuoteApprovalRequest, 
   });
 }
 
-function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, to: string) {
+// The deposit a round proposes: the founder's own (MODIFICA "280 100") or
+// the default 50% rule on that round's price.
+function depositForRound(row: QuoteApprovalRequest, amountCents: number): number {
+  return row.proposedDepositCents ?? computeDefaultDepositCents(amountCents);
+}
+
+function tripDetails(tr: TransferRequest) {
   if (!tr.pickup || !tr.destination || !tr.requestedDate || !tr.requestedTime || !tr.passengers) {
     throw new Error(`transfer_request ${tr.id} is missing trip data required for a quote`);
   }
-  return buildTransferQuoteOfferContent({
-    to,
+  return {
     language: toCustomerLanguage(tr.language),
     pickup: tr.pickup,
     destination: tr.destination,
@@ -220,7 +242,15 @@ function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, to:
     childrenAges: tr.childrenAges,
     luggage: tr.luggage,
     flightNumber: tr.flightNumber,
+  };
+}
+
+function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, depositCents: number, to: string) {
+  return buildTransferQuoteOfferContent({
+    ...tripDetails(tr),
+    to,
     amountCents,
+    depositCents,
     currency: tr.currency,
   });
 }
@@ -248,6 +278,11 @@ export async function handleFounderMessage(message: FounderInboundMessage): Prom
   if (!isNew) return;
 
   if (message.buttonId) {
+    const depositBookingId = decodeDepositButtonId(message.buttonId);
+    if (depositBookingId) {
+      await handleDepositReceived(tenantId, depositBookingId);
+      return;
+    }
     const decoded = decodeButtonId(message.buttonId);
     if (!decoded) {
       await reply(tenantId, FOUNDER_TEXTS.unknownButton);
@@ -261,9 +296,13 @@ export async function handleFounderMessage(message: FounderInboundMessage): Prom
   if (text) {
     const [awaitingPrice] = await repo.listApprovalRequestsByStatus(tenantId, ["awaiting_price"]);
     if (awaitingPrice) {
-      const amountCents = parseFounderPrice(text);
-      if (amountCents !== null) {
-        await handlePriceReply(tenantId, awaitingPrice, amountCents);
+      const parsed = parseFounderPriceAndDeposit(text);
+      if (parsed) {
+        if (parsed.depositCents !== null && !isValidDeposit(parsed.depositCents, parsed.amountCents)) {
+          await reply(tenantId, FOUNDER_TEXTS.invalidDeposit(shortRef(awaitingPrice.transferRequestId)));
+          return;
+        }
+        await handlePriceReply(tenantId, awaitingPrice, parsed.amountCents, parsed.depositCents);
         return;
       }
       // Not a price: falls through to resendPending, which repeats the
@@ -296,6 +335,18 @@ async function resendPending(tenantId: string): Promise<void> {
     } else {
       await deliverNotification(tenantId, row, tr);
     }
+    sent++;
+  }
+
+  // Bookings created by an approval (transfer_request set) still waiting
+  // for their deposit — e.g. when the ACCONTO RICEVUTO message only reached
+  // the founder by email, where there are no buttons.
+  for (const booking of await listPendingDepositBookings(tenantId)) {
+    if (!booking.transferRequestId) continue;
+    const customerPhone = await getLastInboundWhatsappPhoneE164(tenantId, booking.clientId);
+    if (!customerPhone || !isCustomerPhoneAllowed(customerPhone)) continue;
+    const message = depositPendingMessage(booking);
+    await replyWithButtons(tenantId, message.text, message.buttons);
     sent++;
   }
 
@@ -379,7 +430,13 @@ async function handleModify(tenantId: string, row: QuoteApprovalRequest): Promis
   await reply(tenantId, FOUNDER_TEXTS.askPrice(ref));
 }
 
-async function handlePriceReply(tenantId: string, row: QuoteApprovalRequest, amountCents: number): Promise<void> {
+// depositCents null = the default 50% rule on the new price.
+async function handlePriceReply(
+  tenantId: string,
+  row: QuoteApprovalRequest,
+  amountCents: number,
+  depositCents: number | null,
+): Promise<void> {
   const ref = shortRef(row.transferRequestId);
   const tr = await getTransferRequest(tenantId, row.transferRequestId);
   if (!tr || tr.status !== "pending_admin_approval") {
@@ -403,6 +460,7 @@ async function handlePriceReply(tenantId: string, row: QuoteApprovalRequest, amo
     round: row.round + 1,
     status: "awaiting_decision",
     proposedAmountCents: amountCents,
+    proposedDepositCents: depositCents,
   });
   if (!next) {
     await reply(tenantId, FOUNDER_TEXTS.error(ref, "impossibile creare il nuovo preventivo"));
@@ -440,12 +498,24 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
   }
 
   const expectedAmount = row.proposedAmountCents ?? tr.calculatedAmountCents;
-  if (tr.status === "approved" && tr.finalAmountCents !== expectedAmount) {
-    // Approved from the admin panel at a different price: never send the
-    // customer a price the founder didn't see in this message.
-    await repo.transitionApprovalRequest(tenantId, row.id, ["processing"], "superseded");
-    await reply(tenantId, FOUNDER_TEXTS.priceMismatch(ref));
+  if (expectedAmount === null) {
+    await releaseClaim(tenantId, row, "no price");
+    await reply(tenantId, FOUNDER_TEXTS.error(ref, "nessun prezzo sul preventivo"));
     return;
+  }
+  const expectedDeposit = depositForRound(row, expectedAmount);
+  if (tr.status === "approved") {
+    // Approved from the admin panel (or a retry): never send the customer a
+    // price or deposit the founder didn't see in this message.
+    const existingBooking = await getBookingByTransferRequestId(tenantId, tr.id);
+    if (
+      tr.finalAmountCents !== expectedAmount ||
+      (existingBooking && existingBooking.depositAmountCents !== expectedDeposit)
+    ) {
+      await repo.transitionApprovalRequest(tenantId, row.id, ["processing"], "superseded");
+      await reply(tenantId, FOUNDER_TEXTS.priceMismatch(ref));
+      return;
+    }
   }
 
   // Resolved and checked BEFORE approving: in test mode a customer outside
@@ -464,6 +534,7 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
   }
 
   let approved: TransferRequest;
+  let booking: Booking;
   let communicationId: string;
   let communicationStatus: string;
   let communicationError: string | null;
@@ -471,7 +542,7 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
     if (tr.status === "approved") {
       // A retry after a failure further down: ACCEPT is the documented
       // idempotent way to reconcile an already-approved request.
-      approved = await acceptTransferRequest(tenantId, tr.id, founderProfileId);
+      approved = await acceptTransferRequest(tenantId, tr.id, founderProfileId, expectedDeposit);
     } else if (row.proposedAmountCents !== null) {
       approved = await modifyPriceForTransferRequest(
         tenantId,
@@ -479,21 +550,28 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
         founderProfileId,
         row.proposedAmountCents,
         "Prezzo modificato dal titolare via WhatsApp",
+        expectedDeposit,
       );
     } else {
-      approved = await acceptTransferRequest(tenantId, tr.id, founderProfileId);
+      approved = await acceptTransferRequest(tenantId, tr.id, founderProfileId, expectedDeposit);
     }
 
     if (approved.finalAmountCents === null) {
       throw new Error("approved transfer_request has no final_amount_cents");
     }
+    // The booking is the record of the deposit actually requested.
+    const created = await getBookingByTransferRequestId(tenantId, approved.id);
+    if (!created || created.depositAmountCents === null) {
+      throw new Error("prenotazione non creata");
+    }
+    booking = created;
     const prepared = await prepareTransferQuoteOfferCommunication({
       tenantId,
       clientId: approved.clientId,
       dealId: approved.dealId,
       transferRequestId: approved.id,
       quoteId: approved.quoteId,
-      content: buildCustomerQuoteContent(approved, approved.finalAmountCents, to),
+      content: buildCustomerQuoteContent(approved, approved.finalAmountCents, created.depositAmountCents, to),
     });
     await submitCommunicationForApproval(tenantId, prepared.id);
     await approveCommunication(tenantId, prepared.id, founderProfileId);
@@ -515,12 +593,106 @@ async function handleApprove(tenantId: string, row: QuoteApprovalRequest): Promi
     decisionError: communicationStatus === "execution_failed" ? communicationError : null,
   });
 
+  const deposit = formatAmountForCustomer(booking.depositAmountCents ?? 0, booking.currency, "it");
+  const depositButton = [{ id: encodeDepositButtonId(booking.id), title: DEPOSIT_BUTTON_TITLE }];
   if (communicationStatus === "executed" || communicationStatus === "verified") {
-    await reply(tenantId, FOUNDER_TEXTS.approvedSent(ref));
+    await replyWithButtons(tenantId, FOUNDER_TEXTS.approvedSent(ref, deposit), depositButton);
   } else if (communicationStatus === "execution_failed") {
-    await reply(tenantId, FOUNDER_TEXTS.approvedSendFailed(ref, communicationError ?? "errore sconosciuto"));
+    await replyWithButtons(
+      tenantId,
+      FOUNDER_TEXTS.approvedSendFailed(ref, communicationError ?? "errore sconosciuto", deposit),
+      depositButton,
+    );
   } else {
     await reply(tenantId, FOUNDER_TEXTS.approvedSendInProgress(ref));
+  }
+}
+
+async function replyWithButtons(
+  tenantId: string,
+  text: string,
+  buttons: Array<{ id: string; title: string }>,
+): Promise<void> {
+  await sendToFounder(tenantId, { parts: [text], buttons, emailSubject: "BOS — risposta al tuo comando WhatsApp" });
+}
+
+// ── ACCONTO RICEVUTO ──────────────────────────────────────────────────────
+
+function depositPendingMessage(booking: Booking) {
+  const ref = shortRef(booking.transferRequestId ?? booking.id);
+  const deposit = formatAmountForCustomer(booking.depositAmountCents ?? 0, booking.currency, "it");
+  return {
+    text: FOUNDER_TEXTS.depositPending(ref, deposit),
+    buttons: [{ id: encodeDepositButtonId(booking.id), title: DEPOSIT_BUTTON_TITLE }],
+  };
+}
+
+// pending_deposit -> confirmed, then the automatic confirmation to the
+// customer. A double tap or a retry never sends twice: the booking
+// transition is conditional, and the confirmation has its own idempotency
+// key plus executeCommunication's claim. A tap on an already-confirmed
+// booking re-attempts only a confirmation that was never created (e.g. a
+// crash right after the first tap) — sendBookingConfirmation returns the
+// existing one otherwise.
+async function handleDepositReceived(tenantId: string, bookingId: string): Promise<void> {
+  const existing = await getBooking(tenantId, bookingId);
+  if (!existing || !existing.transferRequestId) {
+    await reply(tenantId, FOUNDER_TEXTS.bookingNotFound);
+    return;
+  }
+  const ref = shortRef(existing.transferRequestId);
+
+  const to = await getLastInboundWhatsappPhoneE164(tenantId, existing.clientId);
+  if (!to || !isCustomerPhoneAllowed(to)) {
+    await reply(tenantId, FOUNDER_TEXTS.notATestPhone(ref));
+    return;
+  }
+
+  try {
+    const result = await confirmBookingDeposit(tenantId, bookingId);
+    if (!result) {
+      await reply(tenantId, FOUNDER_TEXTS.bookingNotFound);
+      return;
+    }
+    const booking = result.booking;
+    if (booking.status !== "confirmed") {
+      await reply(tenantId, FOUNDER_TEXTS.bookingNotConfirmable(ref, booking.status));
+      return;
+    }
+
+    const tr = await getTransferRequest(tenantId, existing.transferRequestId);
+    if (!tr || booking.finalAmountCents === null || booking.depositAmountCents === null) {
+      throw new Error("dati della prenotazione incompleti per la conferma al cliente");
+    }
+    const communication = await sendBookingConfirmation({
+      tenantId,
+      clientId: booking.clientId,
+      dealId: booking.dealId,
+      transferRequestId: booking.transferRequestId,
+      bookingId: booking.id,
+      content: buildBookingConfirmationContent({
+        ...tripDetails(tr),
+        to,
+        balanceCents: booking.finalAmountCents - booking.depositAmountCents,
+        currency: booking.currency,
+      }),
+    });
+
+    const prefix = result.changed ? "" : `${FOUNDER_TEXTS.depositAlreadyConfirmed(ref)}\n`;
+    if (communication.status === "executed" || communication.status === "verified") {
+      await reply(tenantId, prefix + FOUNDER_TEXTS.depositConfirmedSent(ref));
+    } else if (communication.status === "execution_failed") {
+      await reply(
+        tenantId,
+        prefix + FOUNDER_TEXTS.depositConfirmedSendFailed(ref, communication.error ?? "errore sconosciuto"),
+      );
+    } else {
+      await reply(tenantId, prefix + FOUNDER_TEXTS.depositConfirmedSendInProgress(ref));
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    captureException(error, "quote_approval.deposit_received_failed", { bookingId });
+    await reply(tenantId, FOUNDER_TEXTS.error(ref, message));
   }
 }
 

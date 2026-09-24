@@ -24,12 +24,24 @@ customer WhatsApp ─▶ transfer-requests (merge, availability, pricing)
    ├─ pending_admin_approval ──▶ founder: "PREVENTIVO PRONTO" + APPROVA / MODIFICA / RIFIUTA
    └─ ready_for_pricing + manual_required ─▶ founder: "PREZZO DA INSERIRE" (no buttons)
 
-founder taps APPROVA ─▶ acceptTransferRequest (or modifyPrice for a MODIFICA round)
+founder taps APPROVA ─▶ acceptTransferRequest (or modifyPrice for a MODIFICA round), with the round's deposit
+                      ─▶ booking created at pending_deposit (deal stays "quoted")
                       ─▶ communications: prepare → submit → approve (founder) → execute ─▶ quote to customer
+                         (total, deposit to confirm, balance to the driver on the day)
+                      ─▶ founder: "in attesa di acconto" + ACCONTO RICEVUTO
+founder taps ACCONTO RICEVUTO ─▶ bookings.confirmBookingDeposit: pending_deposit → confirmed, deal confirmed
+                              ─▶ communications.sendBookingConfirmation ─▶ confirmation to customer (automatic)
 founder taps RIFIUTA ─▶ rejectTransferRequest, nothing sent to the customer
-founder taps MODIFICA ─▶ "write the new price" ─▶ founder writes "280" ─▶ new PREVENTIVO PRONTO at 280 € (new round, new buttons)
-founder writes anything else ─▶ every pending PREVENTIVO PRONTO is re-sent
+founder taps MODIFICA ─▶ founder writes "280" (deposit = 50% rule) or "280 100" (price and deposit)
+                      ─▶ new PREVENTIVO PRONTO (new round, new buttons)
+founder writes anything else ─▶ every pending PREVENTIVO PRONTO and every booking waiting for its deposit is re-sent
 ```
+
+**Deposit rule** (`pricing/deposit.ts`): 50% of the total, rounded to the nearest 10 €, halves up (390 € → 200 €). It is never zero and never more than the total. The founder can override it per quote with MODIFICA "prezzo acconto". BOS never generates a payment link: the founder sends the SumUp link.
+
+**Confirmation to the customer** (founder decision, 2026-09-24): automatic after ACCONTO RICEVUTO, fixed text in IT/EN with the booking's date and time. It follows the same switches, 24h window and double-send protection as every other message (idempotency key `booking_confirmation:<booking id>`). If it doesn't go out, the founder's reply says so. "Deposit received" in the admin panel confirms the booking but sends no message.
+
+> **Draft texts:** the three price lines of the quote and the whole confirmation message in `communications/content.ts` are Claude's drafts, pending the founder's wording. Replace them before opening the flow to all customers.
 
 The quote reaches the customer **only** from an APPROVA tap. That is the only code path that calls `approveCommunication` for a `quote_offer`.
 
@@ -64,6 +76,6 @@ WhatsApp only delivers free-form or button messages to someone who wrote to the 
 ## Known limits
 
 - **Customer 24h window.** If the founder approves more than 24 hours after the customer's last message, the WhatsApp to the customer is either rejected or replaced by the static template (`WHATSAPP_TEMPLATE_NAME`, if configured), which does not contain the quote. In both cases the founder gets a reply saying so.
-- **Booking before customer acceptance.** APPROVA still creates the booking snapshot immediately (existing `acceptTransferRequest` behavior), before the customer has accepted.
+- **No deposit deadline.** A booking stays `pending_deposit` until the founder confirms or cancels it; nothing expires automatically.
 - **Late messages don't update a pending request.** A customer message with children or luggage that arrives after the request reached `pending_admin_approval` is not merged into it. That is the existing matching rule for a live offer.
 - **Speed.** Everything runs inline in the webhook, like the rest of the WhatsApp pipeline.

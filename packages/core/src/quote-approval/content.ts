@@ -42,6 +42,38 @@ export function parseFounderPrice(text: string): number | null {
   return cents > 0 ? cents : null;
 }
 
+// MODIFICA reply: "280" (deposit recomputed) or "280 100" (price and
+// deposit). Each number follows parseFounderPrice's format.
+export function parseFounderPriceAndDeposit(
+  text: string,
+): { amountCents: number; depositCents: number | null } | null {
+  const parts = text.trim().split(/\s+/);
+  if (parts.length === 1) {
+    const amountCents = parseFounderPrice(parts[0]!);
+    return amountCents === null ? null : { amountCents, depositCents: null };
+  }
+  if (parts.length === 2) {
+    const amountCents = parseFounderPrice(parts[0]!);
+    const depositCents = parseFounderPrice(parts[1]!);
+    return amountCents === null || depositCents === null ? null : { amountCents, depositCents };
+  }
+  return null;
+}
+
+// "bk:<booking id>:deposit_received" — names the exact booking, like the
+// approval buttons name the exact round.
+export function encodeDepositButtonId(bookingId: string): string {
+  return `bk:${bookingId}:deposit_received`;
+}
+
+export function decodeDepositButtonId(buttonId: string): string | null {
+  const [prefix, id, action, ...rest] = buttonId.split(":");
+  if (prefix !== "bk" || action !== "deposit_received" || !id || rest.length > 0) return null;
+  return UUID_PATTERN.test(id) ? id : null;
+}
+
+export const DEPOSIT_BUTTON_TITLE = "ACCONTO RICEVUTO";
+
 export function isTypedCommand(text: string): boolean {
   return /^\s*(approva|modifica|rifiuta)\b/i.test(text);
 }
@@ -104,9 +136,12 @@ export function buildQuoteReadyText(input: {
   tr: TransferRequest;
   client: Client;
   proposedAmountCents: number | null;
+  depositCents: number;
+  depositIsCustom: boolean;
   customerMessageBody: string;
 }): QuoteReadyText {
   const { tr, client, proposedAmountCents } = input;
+  const total = proposedAmountCents ?? tr.calculatedAmountCents ?? 0;
   const calculated = tr.calculatedAmountCents;
   const priceLine =
     proposedAmountCents !== null
@@ -121,6 +156,9 @@ export function buildQuoteReadyText(input: {
     "",
     ...tripLines(tr, client),
     priceLine,
+    `Acconto: ${formatEuro(input.depositCents, tr.currency)}${
+      input.depositIsCustom ? " (scelto da te)" : " (50%, arrotondato)"
+    } — saldo all'autista ${formatEuro(total - input.depositCents, tr.currency)}`,
     `Disponibilità: ${availabilityLine(tr.availabilityBreakdown)}`,
   ].join("\n");
 
@@ -150,14 +188,29 @@ export function buildManualPriceText(tr: TransferRequest, client: Client): strin
 }
 
 export const FOUNDER_TEXTS = {
-  askPrice: (ref: string) => `MODIFICA ${ref}: scrivi il nuovo prezzo in euro (solo la cifra, es. 280 oppure 280,50).`,
+  askPrice: (ref: string) =>
+    `MODIFICA ${ref}: scrivi il nuovo prezzo in euro (es. 280 — acconto calcolato al 50%) oppure prezzo e acconto (es. 280 100).`,
   awaitingPriceReminder: (ref: string) =>
-    `Aspetto ancora il nuovo prezzo per ${ref}: scrivi solo la cifra, es. 280.`,
-  approvedSent: (ref: string) =>
-    `✅ ${ref} approvato. Preventivo consegnato a WhatsApp per l'invio al cliente (la conferma di consegna arriva a parte).`,
-  approvedSendFailed: (ref: string, error: string) =>
-    `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}\nContatta il cliente a mano.`,
+    `Aspetto ancora il nuovo prezzo per ${ref}: es. 280 oppure 280 100 (prezzo e acconto).`,
+  invalidDeposit: (ref: string) =>
+    `${ref}: l'acconto deve essere maggiore di zero e non superiore al prezzo. Riscrivi prezzo e acconto, es. 280 100.`,
+  approvedSent: (ref: string, deposit: string) =>
+    `✅ ${ref} approvato. Preventivo consegnato a WhatsApp per l'invio al cliente (la conferma di consegna arriva a parte).\nPrenotazione in attesa di acconto (${deposit}): quando lo ricevi premi ACCONTO RICEVUTO.`,
+  approvedSendFailed: (ref: string, error: string, deposit: string) =>
+    `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}\nContatta il cliente a mano. Prenotazione in attesa di acconto (${deposit}): quando lo ricevi premi ACCONTO RICEVUTO.`,
   approvedSendInProgress: (ref: string) => `${ref} approvato: invio al cliente già in corso.`,
+  depositPending: (ref: string, deposit: string) =>
+    `IN ATTESA DI ACCONTO ${ref}: ${deposit}. Quando lo ricevi premi ACCONTO RICEVUTO.`,
+  depositConfirmedSent: (ref: string) =>
+    `✅ ${ref}: acconto registrato, prenotazione CONFERMATA. Conferma consegnata a WhatsApp per l'invio al cliente.`,
+  depositConfirmedSendFailed: (ref: string, error: string) =>
+    `⚠️ ${ref}: acconto registrato, prenotazione CONFERMATA, ma il WhatsApp di conferma al cliente NON è partito: ${error}\nAvvisa il cliente a mano.`,
+  depositConfirmedSendInProgress: (ref: string) =>
+    `${ref}: prenotazione confermata, invio della conferma al cliente già in corso.`,
+  depositAlreadyConfirmed: (ref: string) => `${ref}: la prenotazione era già confermata.`,
+  bookingNotConfirmable: (ref: string, status: string) =>
+    `${ref}: la prenotazione è in stato "${status}", non si può confermare. Nessun invio al cliente.`,
+  bookingNotFound: "Prenotazione non trovata.",
   rejected: (ref: string) => `❌ ${ref} rifiutato. Al cliente non è stato inviato nulla.`,
   alreadyApproved: (ref: string) => `${ref} è già approvato. Nessun nuovo invio al cliente.`,
   alreadyRejected: (ref: string) => `${ref} è già rifiutato.`,
@@ -174,8 +227,8 @@ export const FOUNDER_TEXTS = {
   unknownButton: "Pulsante non riconosciuto. Scrivi un messaggio qualsiasi per ricevere di nuovo i preventivi in attesa.",
   notFound: "Preventivo non trovato.",
   useButtons: "I comandi valgono solo tramite i pulsanti sotto ogni PREVENTIVO PRONTO. Te li rimando qui sotto.",
-  nothingPending: "Nessun preventivo in attesa di approvazione.",
+  nothingPending: "Nessun preventivo in attesa di approvazione e nessuna prenotazione in attesa di acconto.",
   configError: (what: string) => `Configurazione mancante: ${what}. Nessuna azione eseguita.`,
   emailFooter:
-    "Per usare i pulsanti APPROVA / MODIFICA / RIFIUTA scrivi un messaggio qualsiasi al numero WhatsApp aziendale: ti rimando tutti i preventivi in attesa.",
+    "Per usare i pulsanti (APPROVA / MODIFICA / RIFIUTA, ACCONTO RICEVUTO) scrivi un messaggio qualsiasi al numero WhatsApp aziendale: ti rimando tutto ciò che è in attesa.",
 } as const;

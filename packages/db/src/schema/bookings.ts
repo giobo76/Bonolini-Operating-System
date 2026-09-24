@@ -12,6 +12,9 @@ import { deals } from "./deals";
 // real confirmed-booking/completed-service/invoice/payment data to
 // attribute against.
 export const bookingStatusEnum = pgEnum("booking_status", [
+  // Approved quote waiting for the customer's deposit (migration 0029). Not
+  // a conversion: every KPI counts only confirmed/completed.
+  "pending_deposit",
   "confirmed",
   "completed",
   "cancelled",

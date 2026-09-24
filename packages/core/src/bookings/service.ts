@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb, bookings, assertOne, type Booking } from "@bos/db";
 import { inngest, emitDomainEvent } from "@bos/jobs";
+import { advanceDealStatus } from "../deals";
 import type {
   CreateBookingInput,
   UpdateBookingInput,
@@ -129,24 +130,21 @@ export async function ensureBookingForApprovedTransferRequest(
     insert into bookings (
       tenant_id, client_id, transfer_request_id, deal_id, pickup, destination,
       pickup_address, destination_address, customer_trip_duration_minutes,
-      scheduled_at, final_amount_cents, currency
+      scheduled_at, final_amount_cents, currency, status, deposit_amount_cents
     ) values (
       ${tenantId}, ${input.clientId}, ${input.transferRequestId}, ${input.dealId ?? null}, ${input.pickup}, ${input.destination},
       ${input.pickupAddress}, ${input.destinationAddress}, ${input.customerTripDurationMinutes},
-      ${input.scheduledAt.toISOString()}, ${input.finalAmountCents}, ${input.currency}
+      ${input.scheduledAt.toISOString()}, ${input.finalAmountCents}, ${input.currency},
+      ${"pending_deposit"}, ${input.depositAmountCents}
     )
     on conflict (transfer_request_id) do nothing
     returning *
   `);
 
   if (insertedRows.length > 0) {
-    const created = assertOne(insertedRows, "ensureBookingForApprovedTransferRequest");
-    // Only on this branch — a genuinely new row just landed at its
-    // 'confirmed' column default. The DO NOTHING fallback below never
-    // reaches here, exactly like insertNewTransferRequest's own
-    // transfer_request.created emission.
-    void emitDomainEvent(inngest, "booking.confirmed", { tenantId, bookingId: created.id });
-    return created;
+    // No booking.confirmed here any more: an approved quote is not a
+    // booking until the deposit arrives — see confirmBookingDeposit.
+    return assertOne(insertedRows, "ensureBookingForApprovedTransferRequest");
   }
 
   const [existing] = await db
@@ -164,6 +162,65 @@ export async function ensureBookingForApprovedTransferRequest(
     );
   }
   return existing;
+}
+
+export async function getBookingByTransferRequestId(tenantId: string, transferRequestId: string): Promise<Booking | null> {
+  const db = getDb();
+  const [row] = await db
+    .select()
+    .from(bookings)
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.transferRequestId, transferRequestId)));
+  return row ?? null;
+}
+
+export async function listPendingDepositBookings(tenantId: string): Promise<Booking[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(bookings)
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.status, "pending_deposit")))
+    .orderBy(bookings.createdAt);
+}
+
+export interface ConfirmBookingDepositResult {
+  booking: Booking;
+  // false when the booking was not waiting for a deposit (already
+  // confirmed, cancelled, completed): nothing was changed.
+  changed: boolean;
+}
+
+// pending_deposit -> confirmed, the one moment an approved quote becomes a
+// real booking. Conditional UPDATE: of two concurrent calls (a double tap,
+// the WhatsApp button and the admin panel at once) exactly one changes the
+// row and emits booking.confirmed; the other gets changed:false.
+export async function confirmBookingDeposit(
+  tenantId: string,
+  id: string,
+  receivedAmountCents?: number,
+): Promise<ConfirmBookingDepositResult | null> {
+  const db = getDb();
+  const now = new Date();
+  const [row] = await db
+    .update(bookings)
+    .set({
+      status: "confirmed",
+      depositPaidAt: now,
+      ...(receivedAmountCents !== undefined ? { depositAmountCents: receivedAmountCents } : {}),
+      updatedAt: now,
+    })
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.id, id), eq(bookings.status, "pending_deposit")))
+    .returning();
+
+  if (!row) {
+    const current = await getBooking(tenantId, id);
+    return current ? { booking: current, changed: false } : null;
+  }
+
+  if (row.dealId) {
+    await advanceDealStatus(tenantId, row.dealId, "confirmed");
+  }
+  void emitDomainEvent(inngest, "booking.confirmed", { tenantId, bookingId: row.id });
+  return { booking: row, changed: true };
 }
 
 // ── Calendar Sync (Google Calendar event -> booking) ──────────────────────

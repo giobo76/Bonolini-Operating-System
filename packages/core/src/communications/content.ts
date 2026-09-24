@@ -238,8 +238,29 @@ export function formatPassengers(
   return `${adults} ${adults === 1 ? "adult" : "adults"} + ${children} ${children === 1 ? "child" : "children"}${ages}`;
 }
 
-export interface TransferQuoteOfferInput {
-  to: string;
+// ── Deposit texts ─────────────────────────────────────────────────────────
+// DRAFT — NOT YET APPROVED BY THE FOUNDER. The three price lines of the
+// quote and the whole booking confirmation below were proposed by Claude
+// on 2026-09-24; the founder's approved wording is still to be pasted in.
+// Do not open the flow to all customers until these texts are replaced.
+
+const DEPOSIT_LINES: Record<
+  CustomerLanguage,
+  { total: (v: string) => string; deposit: (v: string) => string; balance: (v: string) => string }
+> = {
+  it: {
+    total: (v) => `Prezzo totale: ${v} per l'intero veicolo`,
+    deposit: (v) => `Acconto per confermare: ${v}`,
+    balance: (v) => `Saldo all'autista il giorno del servizio: ${v}`,
+  },
+  en: {
+    total: (v) => `Total price: ${v} for the entire vehicle`,
+    deposit: (v) => `Deposit to confirm: ${v}`,
+    balance: (v) => `Balance to the driver on the day of service: ${v}`,
+  },
+};
+
+interface TripDetails {
   language: CustomerLanguage;
   pickup: string;
   destination: string;
@@ -250,16 +271,47 @@ export interface TransferQuoteOfferInput {
   childrenAges: string | null;
   luggage: string | null;
   flightNumber: string | null;
+}
+
+function tripLines(input: TripDetails): string[] {
+  const lang = input.language;
+  const route = `${capitalizePlace(input.pickup)} → ${capitalizePlace(input.destination)}`;
+  const when = formatLongDateTime(input.requestedDate, input.requestedTime, lang);
+  const passengers = formatPassengers(input.passengers, input.children, input.childrenAges, lang);
+  return lang === "it"
+    ? [
+        `Tratta: ${route}`,
+        `Data: ${when}`,
+        `Passeggeri: ${passengers}`,
+        ...(input.luggage ? [`Bagagli: ${input.luggage}`] : []),
+        ...(input.flightNumber ? [`Volo: ${input.flightNumber}`] : []),
+        `Veicolo: ${VEHICLE.it}`,
+      ]
+    : [
+        `Route: ${route}`,
+        `Date: ${when}`,
+        `Passengers: ${passengers}`,
+        ...(input.luggage ? [`Luggage: ${input.luggage}`] : []),
+        ...(input.flightNumber ? [`Flight: ${input.flightNumber}`] : []),
+        `Vehicle: ${VEHICLE.en}`,
+      ];
+}
+
+export interface TransferQuoteOfferInput extends TripDetails {
+  to: string;
   amountCents: number;
+  depositCents: number;
   currency: string;
 }
 
 export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): CommunicationContent {
   const lang = input.language;
-  const price = formatAmountForCustomer(input.amountCents, input.currency, lang);
-  const route = `${capitalizePlace(input.pickup)} → ${capitalizePlace(input.destination)}`;
-  const when = formatLongDateTime(input.requestedDate, input.requestedTime, lang);
-  const passengers = formatPassengers(input.passengers, input.children, input.childrenAges, lang);
+  const money = (cents: number) => formatAmountForCustomer(cents, input.currency, lang);
+  const priceLines = [
+    DEPOSIT_LINES[lang].total(money(input.amountCents)),
+    DEPOSIT_LINES[lang].deposit(money(input.depositCents)),
+    DEPOSIT_LINES[lang].balance(money(input.amountCents - input.depositCents)),
+  ];
 
   const lines =
     lang === "it"
@@ -267,13 +319,8 @@ export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): 
           "Buongiorno,",
           "grazie per aver scelto Bonolini Transfer. Ecco il Suo preventivo:",
           "",
-          `Tratta: ${route}`,
-          `Data: ${when}`,
-          `Passeggeri: ${passengers}`,
-          ...(input.luggage ? [`Bagagli: ${input.luggage}`] : []),
-          ...(input.flightNumber ? [`Volo: ${input.flightNumber}`] : []),
-          `Veicolo: ${VEHICLE.it}`,
-          `Prezzo: ${price} per l'intero veicolo`,
+          ...tripLines(input),
+          ...priceLines,
           "",
           "Per confermare il servizio o per qualsiasi domanda, risponda pure a questo messaggio.",
           SIGNATURE,
@@ -282,17 +329,48 @@ export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): 
           "Hello,",
           "thank you for choosing Bonolini Transfer. Here is your quote:",
           "",
-          `Route: ${route}`,
-          `Date: ${when}`,
-          `Passengers: ${passengers}`,
-          ...(input.luggage ? [`Luggage: ${input.luggage}`] : []),
-          ...(input.flightNumber ? [`Flight: ${input.flightNumber}`] : []),
-          `Vehicle: ${VEHICLE.en}`,
-          `Price: ${price} for the entire vehicle`,
+          ...tripLines(input),
+          ...priceLines,
           "",
           "To confirm the service or for any question, simply reply to this message.",
           SIGNATURE,
         ];
 
-  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v2`, body: lines.join("\n") };
+  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v3`, body: lines.join("\n") };
+}
+
+export interface BookingConfirmationInput extends TripDetails {
+  to: string;
+  balanceCents: number;
+  currency: string;
+}
+
+// DRAFT — see the note above DEPOSIT_LINES.
+export function buildBookingConfirmationContent(input: BookingConfirmationInput): CommunicationContent {
+  const lang = input.language;
+  const balance = formatAmountForCustomer(input.balanceCents, input.currency, lang);
+  const lines =
+    lang === "it"
+      ? [
+          "Buongiorno,",
+          "abbiamo ricevuto l'acconto: la Sua prenotazione con Bonolini Transfer è confermata.",
+          "",
+          ...tripLines(input),
+          DEPOSIT_LINES.it.balance(balance),
+          "",
+          "Per qualsiasi domanda, risponda pure a questo messaggio.",
+          SIGNATURE,
+        ]
+      : [
+          "Hello,",
+          "we have received your deposit: your booking with Bonolini Transfer is confirmed.",
+          "",
+          ...tripLines(input),
+          DEPOSIT_LINES.en.balance(balance),
+          "",
+          "For any question, simply reply to this message.",
+          SIGNATURE,
+        ];
+
+  return { to: input.to, templateName: `booking_confirmation_${lang}_v1`, body: lines.join("\n") };
 }

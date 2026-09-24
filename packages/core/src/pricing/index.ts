@@ -1,4 +1,5 @@
 export { calculatePrice, determineCustomerType, isComoTiranoRoute } from "./service";
+export { computeDefaultDepositCents, isValidDeposit } from "./deposit";
 export * from "./schema";
 export { resolvePricingRates, type PricingRatesResolution, type PricingRuleProvenanceEntry } from "./rates-provider";
 

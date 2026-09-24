@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { router, staffProcedure } from "../trpc";
 import {
   bookingIdSchema,
+  confirmBookingDepositSchema,
   createBookingSchema,
   listBookingsForClientSchema,
   updateBookingSchema,
@@ -29,5 +30,15 @@ export const bookingsRouter = router({
     const updated = await bookingService.updateBooking(ctx.session.profile.tenantId, input);
     if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
     return updated;
+  }),
+
+  confirmDeposit: staffProcedure.input(confirmBookingDepositSchema).mutation(async ({ ctx, input }) => {
+    const result = await bookingService.confirmBookingDeposit(
+      ctx.session.profile.tenantId,
+      input.id,
+      input.receivedAmountCents,
+    );
+    if (!result) throw new TRPCError({ code: "NOT_FOUND" });
+    return result;
   }),
 });
