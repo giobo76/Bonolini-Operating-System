@@ -21,6 +21,17 @@ vi.mock("../communications", () => ({
   recordProviderDeliveryStatus: (...args: unknown[]) => recordProviderDeliveryStatus(...args),
 }));
 
+const handleCustomerMessageOutcome = vi.fn();
+const handleFounderMessage = vi.fn();
+const isFounderPhone = vi.fn();
+const isQuoteApprovalEnabled = vi.fn();
+vi.mock("../quote-approval", () => ({
+  handleCustomerMessageOutcome: (...args: unknown[]) => handleCustomerMessageOutcome(...args),
+  handleFounderMessage: (...args: unknown[]) => handleFounderMessage(...args),
+  isFounderPhone: (...args: unknown[]) => isFounderPhone(...args),
+  isQuoteApprovalEnabled: () => isQuoteApprovalEnabled(),
+}));
+
 const { verifyMetaSignature, handleWhatsappVerification, handleWhatsappWebhookRequest } = await import(
   "./webhook-handler"
 );
@@ -104,6 +115,12 @@ describe("handleWhatsappWebhookRequest (POST)", () => {
     processTransferRequestForMessageAndPrice.mockResolvedValue({ status: "collecting_info", pricingStatus: "not_priced" });
     recordProviderDeliveryStatus.mockReset();
     recordProviderDeliveryStatus.mockResolvedValue(null);
+    handleCustomerMessageOutcome.mockReset();
+    handleFounderMessage.mockReset();
+    isFounderPhone.mockReset();
+    isFounderPhone.mockReturnValue(false);
+    isQuoteApprovalEnabled.mockReset();
+    isQuoteApprovalEnabled.mockReturnValue(false);
   });
 
   it("5: processes the payload and returns 200 when the signature is valid", async () => {
@@ -411,5 +428,117 @@ describe("handleWhatsappWebhookRequest (POST) — delivery-status callbacks", ()
 
     expect(processInboundMessage).toHaveBeenCalledTimes(1);
     expect(recordProviderDeliveryStatus).toHaveBeenCalledWith("wamid.OLD", "read", expect.any(Date));
+  });
+});
+
+describe("handleWhatsappWebhookRequest — quote approval routing", () => {
+  beforeEach(() => {
+    processInboundMessage.mockReset();
+    processInboundMessage.mockResolvedValue({
+      status: "processed",
+      tenantId: "tenant-1",
+      messageId: "msg-1",
+      clientId: "client-1",
+      parsed: { pickup: "Milano", children: 1 },
+    });
+    processTransferRequestForMessageAndPrice.mockReset();
+    processTransferRequestForMessageAndPrice.mockResolvedValue({ id: "tr-1", status: "collecting_info", pricingStatus: "not_priced" });
+    handleCustomerMessageOutcome.mockReset();
+    handleFounderMessage.mockReset();
+    isFounderPhone.mockReset();
+    isQuoteApprovalEnabled.mockReset();
+    isQuoteApprovalEnabled.mockReturnValue(true);
+  });
+
+  it("QUOTE_APPROVAL_ENABLED off: the founder's number is processed exactly as before, nothing automatic runs", async () => {
+    isQuoteApprovalEnabled.mockReturnValue(false);
+    isFounderPhone.mockReturnValue(true);
+    const result = await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    expect(handleFounderMessage).not.toHaveBeenCalled();
+    expect(processInboundMessage).toHaveBeenCalledTimes(1);
+    expect(processTransferRequestForMessageAndPrice).toHaveBeenCalledTimes(1);
+    expect(handleCustomerMessageOutcome).not.toHaveBeenCalled();
+  });
+
+  it("sends a founder message only to the founder handler, never to client matching", async () => {
+    isFounderPhone.mockReturnValue(true);
+    const result = await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(result.status).toBe(200);
+    expect(handleFounderMessage).toHaveBeenCalledTimes(1);
+    expect(handleFounderMessage.mock.calls[0]![0]).toMatchObject({ waMessageId: "wamid.ABC123", rawText: "Hi" });
+    expect(processInboundMessage).not.toHaveBeenCalled();
+    expect(processTransferRequestForMessageAndPrice).not.toHaveBeenCalled();
+    expect(handleCustomerMessageOutcome).not.toHaveBeenCalled();
+  });
+
+  it("hands a customer message's transfer_request to the quote approval flow", async () => {
+    isFounderPhone.mockReturnValue(false);
+    await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+
+    expect(handleFounderMessage).not.toHaveBeenCalled();
+    expect(processTransferRequestForMessageAndPrice.mock.calls[0]![0].extracted).toMatchObject({ children: 1 });
+    expect(handleCustomerMessageOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: "tenant-1",
+        clientId: "client-1",
+        inboundMessageRowId: "msg-1",
+        fromPhone: "393281234567",
+        transferRequest: expect.objectContaining({ id: "tr-1" }),
+      }),
+    );
+  });
+
+  it("still answers 200 when the quote approval flow throws", async () => {
+    isFounderPhone.mockReturnValue(false);
+    handleCustomerMessageOutcome.mockRejectedValue(new Error("whatsapp down"));
+    const result = await handleWhatsappWebhookRequest({
+      rawBody: VALID_PAYLOAD,
+      signatureHeader: sign(VALID_PAYLOAD, APP_SECRET),
+      appSecret: APP_SECRET,
+    });
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+  });
+
+  it("extracts the button id of a reply-button tap", async () => {
+    isFounderPhone.mockReturnValue(true);
+    const payload = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          changes: [
+            {
+              value: {
+                messages: [
+                  {
+                    from: "393331112222",
+                    id: "wamid.TAP",
+                    timestamp: "1755500000",
+                    type: "interactive",
+                    interactive: { type: "button_reply", button_reply: { id: "qa:x:approve", title: "APPROVA" } },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await handleWhatsappWebhookRequest({ rawBody: payload, signatureHeader: sign(payload, APP_SECRET), appSecret: APP_SECRET });
+    expect(handleFounderMessage.mock.calls[0]![0]).toMatchObject({ waMessageId: "wamid.TAP", buttonId: "qa:x:approve" });
   });
 });

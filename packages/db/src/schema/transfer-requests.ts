@@ -61,6 +61,10 @@ export const transferRequests = pgTable("transfer_requests", {
   requestedTime: text("requested_time"),
   passengers: integer("passengers"),
   luggage: text("luggage"),
+  // Asked for, never required: neither blocks pricing (founder rule,
+  // 2026-09-24). null = not stated yet; 0 = customer said no children.
+  children: integer("children"),
+  childrenAges: text("children_ages"),
   flightNumber: text("flight_number"),
   trainNumber: text("train_number"),
   hotel: text("hotel"),

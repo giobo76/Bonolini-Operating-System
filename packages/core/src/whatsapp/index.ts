@@ -8,7 +8,12 @@ export type {
   WhatsappWebhookRequestInput,
   WhatsappWebhookResult,
 } from "./webhook-handler";
-export { processInboundMessage, normalizePhone, getLastInboundReceivedAt } from "./service";
+export {
+  processInboundMessage,
+  normalizePhone,
+  getLastInboundReceivedAt,
+  getLastInboundWhatsappPhoneE164,
+} from "./service";
 export type { ProcessInboundMessageResult } from "./service";
 export { parseWhatsappMessage } from "./parser";
 export * from "./schema";

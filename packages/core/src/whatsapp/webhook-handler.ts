@@ -6,6 +6,12 @@ import type { ParsedWhatsappMessage } from "./schema";
 import { processTransferRequestForMessageAndPrice } from "../transfer-requests";
 import type { TransferRequestExtractedFields } from "../transfer-requests";
 import { recordProviderDeliveryStatus } from "../communications";
+import {
+  handleCustomerMessageOutcome,
+  handleFounderMessage,
+  isFounderPhone,
+  isQuoteApprovalEnabled,
+} from "../quote-approval";
 
 type KnownProviderStatus = "sent" | "delivered" | "read" | "failed";
 const KNOWN_PROVIDER_STATUSES = new Set<string>(["sent", "delivered", "read", "failed"]);
@@ -72,6 +78,8 @@ function toTransferRequestExtractedFields(parsed: ParsedWhatsappMessage): Transf
     time: parsed.time,
     passengers: parsed.passengers,
     luggage: parsed.luggage,
+    children: parsed.children,
+    childrenAges: parsed.childrenAges,
     flight: parsed.flight,
     train: parsed.train,
     hotel: parsed.hotel,
@@ -127,6 +135,20 @@ export async function handleWhatsappWebhookRequest(
   // Fail soft per message: one malformed/erroring message must not drop the
   // rest of the batch or cause Meta to retry the whole payload forever.
   for (const message of messages) {
+    // The founder's own number is never a customer: its messages are
+    // commands for the quote approval flow (packages/core/src/quote-approval)
+    // and never reach client matching or transfer_requests. With
+    // QUOTE_APPROVAL_ENABLED off, the founder's number is handled exactly as
+    // before the flow existed (like any other sender).
+    if (isQuoteApprovalEnabled() && isFounderPhone(message.fromPhone)) {
+      try {
+        await handleFounderMessage(message);
+      } catch (error) {
+        captureException(error, "whatsapp.webhook.founder_message_failed");
+      }
+      continue;
+    }
+
     try {
       const result = await processInboundMessage(message);
       log("whatsapp.webhook.message_processed", { status: result.status });
@@ -150,6 +172,23 @@ export async function handleWhatsappWebhookRequest(
             status: priced.status,
             pricingStatus: priced.pricingStatus,
           });
+
+          // Separate try: a failed question/notification must never be
+          // reported as a failed transfer_request (which did succeed).
+          if (isQuoteApprovalEnabled()) {
+            try {
+              await handleCustomerMessageOutcome({
+                tenantId: result.tenantId,
+                clientId: result.clientId,
+                inboundMessageRowId: result.messageId,
+                fromPhone: message.fromPhone,
+                extracted: toTransferRequestExtractedFields(result.parsed),
+                transferRequest: priced,
+              });
+            } catch (error) {
+              captureException(error, "whatsapp.webhook.quote_approval_failed");
+            }
+          }
         } catch (error) {
           captureException(error, "whatsapp.webhook.transfer_request_failed");
         }
