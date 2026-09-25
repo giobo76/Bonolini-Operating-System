@@ -1,12 +1,12 @@
 # calendar — Google Calendar as a real-conversion source, never a second source of truth
 
-**Status:** Core v1 — read-only Calendar sync, wired into bookings and the Real Conversion System. No Google Calendar write access anywhere (never creates, updates, or deletes an event).
+**Status:** Core v1 — Calendar sync (Calendar → bookings, the Real Conversion System) plus, since 2026-09-25, one narrow write path: an event for each booking confirmed after the deposit (BOS → Calendar), marked "ANNULLATO" when the booking is cancelled in BOS. Nothing else in BOS writes to Google Calendar; no event is ever deleted.
 
 **Owns:** the `calendar_connections` table — one row per tenant, which Google Calendar was explicitly selected as "the Bonolini Transfer services calendar," plus this module's own sync bookkeeping (`syncToken`, `lastSyncedAt`, `lastSyncStatus`, `lastSyncError`).
 
-**Exposes:** `listAvailableCalendars`, `getCalendarConfig`, `selectCalendar`, `syncCalendarEvents` — plus the pure parser `parseCalendarEvent`/`isRecognizableService` (exported for testing). A minimal tRPC router (`calendarRouter`) exposes the same four operations, all `adminProcedure`.
+**Exposes:** `listAvailableCalendars`, `getCalendarConfig`, `selectCalendar`, `syncCalendarEvents`, `createCalendarEventForBooking`, `markCalendarEventCancelledForBooking` — plus the pure parser `parseCalendarEvent`/`isRecognizableService` and the pure event builders in `booking-event.ts` (exported for testing). A minimal tRPC router (`calendarRouter`) exposes the first four, all `adminProcedure`.
 
-**Emits/Listens to:** a periodic Inngest cron (`calendarSync`, every 15 minutes) — see `inngest-functions.ts`.
+**Emits/Listens to:** a periodic Inngest cron (`calendarSync`, every 15 minutes); listens to `booking.confirmed` (creates the booking's event) and `booking.cancelled` (marks it "ANNULLATO") — see `inngest-functions.ts`.
 
 See [ADR 0002](../../../../docs/adr/0002-modular-monolith-not-microservices.md) for the module boundary rules this module follows: it never reaches into `clients`/`bookings`/`marketing` internals, only their own exported interfaces (`../clients`, `../bookings`, `../marketing`).
 
@@ -14,9 +14,29 @@ See [ADR 0002](../../../../docs/adr/0002-modular-monolith-not-microservices.md) 
 
 The Real Conversion System (`packages/core/src/marketing/business-kpis.ts`'s `getRealConversionSummary`) already reads `bookings.status` (`confirmed | completed | cancelled`) as the one, real, idempotent source of truth for a commercial conversion. This module's entire job is to keep `bookings` populated from Google Calendar — it never computes a conversion, a revenue figure, or an attribution decision itself. Creating/updating a `bookings` row **is** registering the real conversion; there is no second table, no duplicate metric, no parallel logic to keep in sync.
 
-## No write access to Google Calendar, ever
+## Write access: one narrow path, owned by this module
 
-The OAuth scope requested is `https://www.googleapis.com/auth/calendar.readonly` (added to the existing, shared OAuth connection in `apps/transfer-admin/app/api/marketing/oauth/start/route.ts` — every other scope, and the OAuth system itself, is unchanged). Every call this module makes is `calendarList.list()` or `events.list()` — never `.insert()`, `.update()`, `.patch()`, or `.delete()`. There is no code path in this module that could modify a user's calendar even by accident.
+Until 2026-09-25 this module was read-only by design. The founder then asked for the booking to appear in the calendar by itself, so the write path below exists — and only this one.
+
+**Scopes.** `calendar.readonly` (for `calendarList.list()`, which `calendar.events` does not cover) plus `calendar.events` (events only — not the full `calendar` scope, which could also change calendars, sharing and settings). Both live on the shared Google connection in `apps/transfer-admin/app/api/marketing/oauth/start/route.ts`; the marketing checks stay read-only in their own code, the Calendar write calls exist only in `booking-event.ts`. Adding the scope means the founder reconnects Google once from /marketing/connections; until then the create call fails with a permission error, is retried by Inngest, and logged — the booking itself stays confirmed.
+
+**Calls.** `events.insert()` when a booking is confirmed, `events.get()` + `events.patch()` when it is cancelled in BOS. Never `events.delete()`, never any other event.
+
+**Which bookings.** Only bookings confirmed after the deposit (`confirmBookingDeposit` → `booking.confirmed`) that come from a transfer request. A booking that already has a `calendar_event_id` (it came from Calendar in the first place) is skipped: its event already exists.
+
+**The event** (founder decisions 2026-09-25):
+
+- Title `TRANSFER | Mario Rossi | Malpensa → Sondrio | €390` — with the price: the calendar is seen by the founder only.
+- Description: customer, phone, route, pickup date and time, passengers, children, luggage, flight/train/hotel when known, total price, deposit received, balance to collect.
+- Time = the whole time the founder is busy: the loop Sondrio → pickup → destination → Sondrio, from Google Maps (`maps-distance`'s `calculateBusyLoopFromBase`). The event starts when he has to leave Sondrio (pickup time minus the Sondrio → pickup leg) and lasts the whole loop, rounded outward to 5 minutes.
+- Minimum durations per route come from the versioned Business Rule `calendar.minimum_event_duration` (category `other`; seeded by migration `0031`: Malpensa, either direction, 5 hours). New minimums for other routes are a new rule version, not code.
+- If Google Maps gives no duration: pickup time + 2 hours (never less than the route minimum) and "Durata da verificare" in the description. Same note if the minimum-duration rule is present but invalid.
+
+**Never a second booking.** Three independent guards: the event carries `extendedProperties.private.bosBookingId`, and the sync ignores every such event; its id is derived from the booking id (`bos` + the booking uuid's 32 hex digits, valid Google base32hex), so the sync also recognizes it when Google returns a deleted event with nothing but its id, and a retried insert gets 409 instead of a duplicate; the booking stores the id in `calendar_event_id` (unique).
+
+**BOS is the source of truth for its own events.** If the founder edits or deletes a BOS-created event in Google, the booking in BOS does not change (founder decision 2026-09-25) — the sync skips those events in every state, cancelled included.
+
+**Cancellation in BOS.** `updateBooking` to `cancelled` emits `booking.cancelled`; the event is kept, its title gets the prefix "ANNULLATO – " and its colour becomes grey (Google colorId 8, Graphite). A cancelled booking never gets a new event. Events not created by BOS are never modified.
 
 ## The Bonolini calendar is explicit, never inferred
 
@@ -61,4 +81,4 @@ A tenant with no `calendar_connections` row configured is a fast, silent no-op f
 
 ## Not built yet (explicitly out of scope this milestone)
 
-Structured `pickupAddress`/`destinationAddress`/`passengers` extraction from event descriptions (only the route/price/contact/attribution fields above are parsed); recurring-event-aware handling beyond `singleEvents: true`; any write path back to Google Calendar (deliberately, permanently out of scope — see "No write access" above); automatic Google Ads offline-conversion upload from a calendar-sourced booking (the Real Conversion System is an internal measurement only — see `business-kpis.ts`).
+Structured `pickupAddress`/`destinationAddress`/`passengers` extraction from event descriptions (only the route/price/contact/attribution fields above are parsed); recurring-event-aware handling beyond `singleEvents: true`; any write beyond the booking event above (no event updates when a confirmed booking's time or price changes, no events for bookings without a transfer request); automatic Google Ads offline-conversion upload from a calendar-sourced booking (the Real Conversion System is an internal measurement only — see `business-kpis.ts`).
