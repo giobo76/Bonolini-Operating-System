@@ -1,8 +1,10 @@
 import { DEFAULT_PRICING_RATES } from "./schema";
+import { isMalpensa, isSondrioCity } from "../locations";
 import type {
   CustomerType,
   HospitalWaitingInfo,
   ManualRequiredReason,
+  PassengerTierRates,
   MatchedRule,
   PricingBreakdown,
   PricingInput,
@@ -150,7 +152,11 @@ function fixedFareForPassengers(
   passengers: number,
   fixedFareAirport: PricingRates["fixedFareAirport"],
 ): number {
-  const table = category === "malpensa" ? fixedFareAirport.malpensa : fixedFareAirport.linateOrioCitta;
+  return tierFare(category === "malpensa" ? fixedFareAirport.malpensa : fixedFareAirport.linateOrioCitta, passengers);
+}
+
+// Tier "4" covers 1-4 passengers; then one tier per passenger up to 8.
+function tierFare(table: PassengerTierRates, passengers: number): number {
   const tiers = ["4", "5", "6", "7", "8"] as const;
   for (const tier of tiers) {
     if (passengers <= Number(tier)) return table[tier];
@@ -400,12 +406,56 @@ export function calculatePrice(input: PricingInput, rates: PricingRates | null =
     return buildKmResult(input.customerType, input.distanceKm, "como_tirano_km_italian", hospitalWaiting, rates);
   }
 
-  const fixedCategory = findFixedFareCategory(input.destination);
+  // Sondrio city <-> Malpensa, both directions (founder decision,
+  // 2026-09-25, Business Rule pricing.fixed_fare.sondrio_malpensa): italian
+  // customers by passenger tier, foreign customers one flat fare for 1-8,
+  // never per km. Checked before the airport table below. Other Valtellina
+  // towns are not covered. No effective rule (null) = previous behavior.
+  const sondrioMalpensa = rates.sondrioMalpensa;
+  if (
+    sondrioMalpensa &&
+    ((isSondrioCity(input.pickup) && isMalpensa(input.destination)) ||
+      (isMalpensa(input.pickup) && isSondrioCity(input.destination)))
+  ) {
+    if (input.passengers > 8) {
+      return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting, rates.minimumFareCents);
+    }
+    if (input.customerType === "italian") {
+      return buildFixedResult(
+        input.customerType,
+        tierFare(sondrioMalpensa.italian, input.passengers),
+        "fixed_sondrio_malpensa_italian",
+        hospitalWaiting,
+        rates.minimumFareCents,
+      );
+    }
+    return buildFixedResult(
+      input.customerType,
+      sondrioMalpensa.foreignUpTo8PassengersCents,
+      "fixed_sondrio_malpensa_foreign",
+      hospitalWaiting,
+      rates.minimumFareCents,
+    );
+  }
+
+  // Airport/city table. Destination first, as it always was. Since
+  // 2026-09-25 (founder decision) Linate, Orio al Serio/Bergamo and Milano
+  // also apply in the reverse direction — the airport or city as pickup and
+  // Sondrio as destination — at the same price, for italian and foreign
+  // customers alike. Malpensa's reverse direction is the Sondrio-Malpensa
+  // rule above, not this table.
+  const destinationCategory = findFixedFareCategory(input.destination);
+  const pickupCategory = findFixedFareCategory(input.pickup);
+  const reverseCategory =
+    !destinationCategory && pickupCategory === "linate_orio_citta" && isOriginCompatibleWithFixedFare(input.destination)
+      ? pickupCategory
+      : null;
+  const fixedCategory = destinationCategory ?? reverseCategory;
   if (fixedCategory) {
     if (input.passengers > 8) {
       return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting, rates.minimumFareCents);
     }
-    if (!isOriginCompatibleWithFixedFare(input.pickup)) {
+    if (destinationCategory && !isOriginCompatibleWithFixedFare(input.pickup)) {
       return buildManualRequired(input.customerType, "fixed_fare_origin_requires_verification", hospitalWaiting, rates.minimumFareCents, {
         warnings: ["Pickup location is not Sondrio or a known fixed-fare location — fixed fare cannot be applied automatically."],
       });
