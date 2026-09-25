@@ -49,6 +49,8 @@ panel Approva  ─▶ acceptTransferRequest (or modifyPrice for a modified round
                ─▶ communications: prepare → submit → approve → execute ─▶ quote to the customer
 panel Modifica ─▶ this round superseded, new round at the new price (no email, the page opens it)
 panel Rifiuta  ─▶ rejectTransferRequest, nothing sent to the customer
+panel Crea preventivo (Prezzo da inserire) ─▶ request to pending_admin_approval at the typed price
+               ─▶ new PREVENTIVO PRONTO round (Approva / Modifica / Rifiuta), nothing sent
 any customer send that fails ─▶ email "INVIO AL CLIENTE NON RIUSCITO" (once)
 ```
 
@@ -58,7 +60,12 @@ The quote reaches the customer **only** from Approva, whether from the panel or 
 
 1. The missing-data question goes out automatically. It uses fixed texts, no AI and no price. `communications.sendMissingInfoRequest` is the one customer message that skips approval, and its `policy_decision` records this rule.
 2. Rifiuta: the customer receives nothing.
-3. Manual price: notification only. There is no way to enter a manual price yet, because `modifyPriceForTransferRequest` requires `pending_admin_approval` and a `manual_required` request stays at `ready_for_pricing`.
+3. Manual price (2026-09-25): in "Preventivi in attesa", each "Prezzo da inserire" card has a price field and **Crea preventivo** (`enterManualPrice`).
+   - The card's row is closed (`info → superseded`, conditional, so a double click creates one round only).
+   - The request moves to `pending_admin_approval` through `transfer-requests.enterManualPriceForTransferRequest`. `calculatedAmountCents` stays null and the price is recorded in `pricingBreakdown.manualPrice`.
+   - A normal PREVENTIVO PRONTO round opens at that price, marked "prezzo inserito a mano", with Approva / Modifica / Rifiuta.
+   - Approva goes through `modifyPriceForTransferRequest`, now allowed without a calculated amount only for `manual_required` requests.
+   - Nothing is sent to the customer before Approva.
 4. Children (number and ages) and luggage are asked for, but never block pricing.
 5. Customer texts are the founder's own wording, in `communications/content.ts`, tested verbatim:
    - register "Lei", signature "Bonolini Transfer – Private Transfers";

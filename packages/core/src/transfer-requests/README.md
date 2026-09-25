@@ -165,6 +165,10 @@ The moment a transfer_request becomes `approved` (via either ACCEPT or MODIFY_PR
 
 **`quoteId` stays `null`** on every booking created this way — a quote is never a prerequisite (`bookings.quoteId` was already nullable before this milestone). **`pickupAddress`/`destinationAddress`** are copied verbatim from the transfer_request as a historical snapshot only — never read back to change Availability's own logic, which only ever uses `pickup`/`destination`.
 
+## Manual price (2026-09-25)
+
+`enterManualPriceForTransferRequest` moves a request the engine could not price (`ready_for_pricing` + `manual_required`) to `pending_admin_approval` with a price typed in the admin panel. It is a conditional UPDATE: only that exact state moves, once. `calculatedAmountCents` stays null — it only ever holds the engine's output — and the typed price is recorded in `pricingBreakdown.manualPrice`. Approval then goes through `modifyPriceForTransferRequest`, which accepts a missing calculated amount only for `manual_required` requests.
+
 ## Quote approval (2026-09-24)
 
 The WhatsApp webhook now hands every processed request to [quote-approval](../quote-approval/README.md): a missing-data question to the customer while `collecting_info`, a "PREVENTIVO PRONTO" to the founder at `pending_admin_approval`, and `acceptTransferRequest`/`modifyPriceForTransferRequest`/`rejectTransferRequest` called from the founder's buttons. New nullable columns `children`/`children_ages` (migration 0028) are merged like every other field but are **not** part of `computeMissingInformation` — they never block pricing.

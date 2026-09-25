@@ -1291,6 +1291,61 @@ export async function acceptTransferRequest(
 // cancelSuperseded()) is a real error, not silently treated as "already
 // rejected" — overwriting a system-driven cancellation's reason would lose
 // information.
+// "Prezzo da inserire" in the admin panel (founder decision, 2026-09-25): a
+// request the pricing engine could not price (ready_for_pricing +
+// manual_required) moves to pending_admin_approval with a price typed by
+// the founder. calculatedAmountCents stays null — it only ever holds the
+// engine's own output — and the typed price is recorded in
+// pricingBreakdown.manualPrice. Nothing is approved and nothing is sent
+// here: the price still goes through Approva (modifyPriceForTransferRequest).
+//
+// Conditional UPDATE: of two concurrent calls only one moves the request;
+// the other (and any call on a request no longer in that state) gets null.
+export async function enterManualPriceForTransferRequest(
+  tenantId: string,
+  id: string,
+  amountCents: number,
+  enteredByProfileId: string,
+): Promise<TransferRequest | null> {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    throw new Error(`enterManualPriceForTransferRequest: invalid amount ${amountCents}`);
+  }
+  const existing = await getTransferRequest(tenantId, id);
+  if (!existing) return null;
+
+  const previousBreakdown =
+    existing.pricingBreakdown && typeof existing.pricingBreakdown === "object"
+      ? (existing.pricingBreakdown as Record<string, unknown>)
+      : {};
+
+  const db = getDb();
+  const [updated] = await db
+    .update(transferRequests)
+    .set({
+      status: "pending_admin_approval",
+      pricingBreakdown: {
+        ...previousBreakdown,
+        manualPrice: { amountCents, enteredBy: enteredByProfileId, enteredAt: new Date().toISOString() },
+      },
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(transferRequests.tenantId, tenantId),
+        eq(transferRequests.id, id),
+        eq(transferRequests.status, "ready_for_pricing"),
+        eq(transferRequests.pricingStatus, "manual_required"),
+      ),
+    )
+    .returning();
+
+  if (!updated) return null;
+  if (updated.dealId) {
+    await advanceDealStatus(tenantId, updated.dealId, "quoted");
+  }
+  return updated;
+}
+
 export async function rejectTransferRequest(
   tenantId: string,
   id: string,
@@ -1362,7 +1417,12 @@ export async function modifyPriceForTransferRequest(
     );
   }
 
-  assertCalculatedAmount(existing, "modifyPriceForTransferRequest");
+  // A request the engine could not price (manual_required) has no
+  // calculated amount by definition: its only price is the one entered by
+  // hand (enterManualPriceForTransferRequest), approved here.
+  if (existing.pricingStatus !== "manual_required") {
+    assertCalculatedAmount(existing, "modifyPriceForTransferRequest");
+  }
 
   const rows = await db
     .update(transferRequests)

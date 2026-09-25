@@ -124,7 +124,16 @@ const rejectTransferRequest = vi.fn(async (_t: string, id: string) => {
   Object.assign(tr, { status: "cancelled", cancelledReason: "rejected_by_admin" });
   return tr;
 });
+// Same conditional semantics as the real one: only a ready_for_pricing +
+// manual_required request moves, once.
+const enterManualPriceForTransferRequest = vi.fn(async (_t: string, id: string, amountCents: number) => {
+  const tr = state.transferRequests.get(id);
+  if (!tr || tr.status !== "ready_for_pricing" || tr.pricingStatus !== "manual_required") return null;
+  Object.assign(tr, { status: "pending_admin_approval", pricingBreakdown: { manualPrice: { amountCents } } });
+  return tr;
+});
 vi.mock("../transfer-requests", () => ({
+  enterManualPriceForTransferRequest: (...args: [string, string, number]) => enterManualPriceForTransferRequest(...args),
   getTransferRequest: async (_t: string, id: string) => state.transferRequests.get(id) ?? null,
   acceptTransferRequest: (...args: [string, string, string]) => acceptTransferRequest(...args),
   modifyPriceForTransferRequest: (...args: [string, string, string, number]) => modifyPriceForTransferRequest(...args),
@@ -194,6 +203,7 @@ const {
   reviseQuoteRound,
   listPendingForPanel,
   getRoundForPanel,
+  enterManualPrice,
 } = await import("./service");
 
 function transferRequest(overrides: Partial<TransferRequest> = {}): TransferRequest {
@@ -785,5 +795,127 @@ describe("panel views and email links", () => {
     await notifyQuoteReady(transferRequest({ id: "b1b2c3d4-0000-4000-8000-000000000002" }));
     const withoutLink = state.founderOutbox[1] as { link?: { url: string } | null };
     expect(withoutLink.link).toBeNull();
+  });
+});
+
+// "Prezzo da inserire" -> Crea preventivo (founder decision, 2026-09-25).
+describe("prezzo inserito a mano", () => {
+  const STAFF = "profile-staff";
+
+  async function notifyManualPrice() {
+    const tr = transferRequest({
+      status: "ready_for_pricing",
+      pricingStatus: "manual_required",
+      calculatedAmountCents: null,
+      pricingBreakdown: { manualRequiredReason: "distance_not_provided" },
+    });
+    state.transferRequests.set(tr.id, tr);
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: {},
+      transferRequest: tr,
+    });
+    return { tr, manualRow: state.rows.find((r) => r.kind === "manual_price_required")! };
+  }
+
+  it("Crea preventivo opens a PREVENTIVO PRONTO round at the typed price; nothing reaches the customer", async () => {
+    const { tr, manualRow } = await notifyManualPrice();
+    enterManualPriceForTransferRequest.mockClear();
+
+    const result = await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF);
+
+    expect(result.outcome).toBe("done");
+    expect(result.message).toContain("280,00 €");
+    expect(enterManualPriceForTransferRequest).toHaveBeenCalledWith("tenant-1", tr.id, 28000, STAFF);
+    expect(tr.status).toBe("pending_admin_approval");
+    expect(manualRow.status).toBe("superseded");
+    const round = state.rows.find((r) => r.id === result.newRoundId)!;
+    expect(round).toMatchObject({ kind: "quote_ready", status: "awaiting_decision", proposedAmountCents: 28000 });
+    expect(state.customerSends).toBe(0);
+
+    const view = await getRoundForPanel("tenant-1", round.id);
+    expect(view?.view.founderDetails).toContain("PREVENTIVO PRONTO (prezzo inserito a mano)");
+    expect(view?.view.founderDetails).toContain("Prezzo: 280,00 € (inserito a mano: non calcolabile in automatico)");
+    expect(view?.view.customerPreview).toContain("Prezzo: 280,00 € per l'intero veicolo");
+  });
+
+  it("the new round is approved like any other, at the typed price, with the manual reason", async () => {
+    const { tr, manualRow } = await notifyManualPrice();
+    const created = await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF);
+
+    const approved = await approveQuoteRound("tenant-1", created.newRoundId!, STAFF);
+
+    expect(approved.outcome).toBe("done");
+    expect(modifyPriceForTransferRequest).toHaveBeenCalledWith(
+      "tenant-1",
+      tr.id,
+      STAFF,
+      28000,
+      "Prezzo inserito a mano dal titolare",
+    );
+    expect(state.customerSends).toBe(1);
+  });
+
+  it("Modifica and Rifiuta work on the new round too", async () => {
+    const { manualRow } = await notifyManualPrice();
+    const created = await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF);
+
+    const revised = await reviseQuoteRound("tenant-1", created.newRoundId!, 30000, { notify: false });
+    expect(revised.outcome).toBe("done");
+    const rejected = await rejectQuoteRound("tenant-1", revised.newRoundId!);
+    expect(rejected.outcome).toBe("done");
+    expect(state.customerSends).toBe(0);
+  });
+
+  it("a double click creates one round only and takes the second click to it", async () => {
+    const { manualRow } = await notifyManualPrice();
+
+    const first = await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF);
+    const second = await enterManualPrice("tenant-1", manualRow.id, 30000, STAFF);
+
+    expect(second.outcome).toBe("already");
+    expect(second.newRoundId).toBe(first.newRoundId);
+    expect(state.rows.filter((r) => r.kind === "quote_ready")).toHaveLength(1);
+  });
+
+  it("refuses an invalid price and changes nothing", async () => {
+    const { tr, manualRow } = await notifyManualPrice();
+    const result = await enterManualPrice("tenant-1", manualRow.id, 0, STAFF);
+    expect(result.outcome).toBe("refused");
+    expect(manualRow.status).toBe("info");
+    expect(tr.status).toBe("ready_for_pricing");
+  });
+
+  it("refuses when the request is no longer waiting for a price (e.g. the customer changed it)", async () => {
+    const { tr, manualRow } = await notifyManualPrice();
+    tr.status = "cancelled";
+
+    const result = await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF);
+
+    expect(result.outcome).toBe("refused");
+    expect(result.message).toContain("non è più");
+    expect(state.rows.filter((r) => r.kind === "quote_ready")).toHaveLength(0);
+  });
+
+  it("respects the switches: off -> refused; customer outside the test list -> refused", async () => {
+    const { tr, manualRow } = await notifyManualPrice();
+
+    process.env.QUOTE_APPROVAL_ENABLED = "false";
+    expect((await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF)).message).toContain("disattivato");
+
+    process.env.QUOTE_APPROVAL_ENABLED = "true";
+    process.env.QUOTE_APPROVAL_TEST_PHONES = "+393330000000";
+    expect((await enterManualPrice("tenant-1", manualRow.id, 28000, STAFF)).message).toContain("numeri di prova");
+
+    expect(tr.status).toBe("ready_for_pricing");
+    expect(manualRow.status).toBe("info");
+  });
+
+  it("the PREZZO DA INSERIRE email points to the panel", async () => {
+    await notifyManualPrice();
+    expect(state.founderOutbox[0]!.parts.join("")).toContain("Crea preventivo");
   });
 });

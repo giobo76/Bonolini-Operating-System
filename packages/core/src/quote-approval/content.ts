@@ -108,15 +108,23 @@ export function buildQuoteReadyText(input: {
 }): QuoteReadyText {
   const { tr, client, proposedAmountCents } = input;
   const calculated = tr.calculatedAmountCents;
-  const priceLine =
-    proposedAmountCents !== null
+  // No calculated price + a proposed one = the founder typed it in
+  // "Prezzo da inserire" (the engine could not price this request).
+  const enteredByHand = proposedAmountCents !== null && calculated === null;
+  const priceLine = enteredByHand
+    ? `Prezzo: ${formatEuro(proposedAmountCents, tr.currency)} (inserito a mano: non calcolabile in automatico)`
+    : proposedAmountCents !== null
       ? `Prezzo: ${formatEuro(proposedAmountCents, tr.currency)} (modificato da te; calcolato ${
           calculated !== null ? formatEuro(calculated, tr.currency) : "n/d"
         })`
       : `Prezzo: ${calculated !== null ? formatEuro(calculated, tr.currency) : "n/d"} (${pricingLabel(tr)})`;
 
   const details = [
-    proposedAmountCents !== null ? "PREVENTIVO PRONTO (prezzo modificato)" : "PREVENTIVO PRONTO",
+    enteredByHand
+      ? "PREVENTIVO PRONTO (prezzo inserito a mano)"
+      : proposedAmountCents !== null
+        ? "PREVENTIVO PRONTO (prezzo modificato)"
+        : "PREVENTIVO PRONTO",
     `Rif. ${shortRef(tr.id)}`,
     "",
     ...tripLines(tr, client),
@@ -145,7 +153,7 @@ export function buildManualPriceText(tr: TransferRequest, client: Client): strin
     ...tripLines(tr, client),
     "",
     `Il prezzo non si può calcolare in automatico${reason ? ` (motivo: ${reason})` : ""}.`,
-    "Per ora il preventivo va fatto a mano: al cliente non è stato inviato nulla.",
+    "Inserisci il prezzo nel pannello (Preventivi in attesa → Crea preventivo): poi lo approvi come gli altri. Al cliente non è stato inviato nulla.",
   ].join("\n");
 }
 
@@ -206,6 +214,11 @@ export const FOUNDER_TEXTS = {
     `Nuovo preventivo ${ref} a ${price}: controlla l'anteprima e approva. Il preventivo precedente non è più valido.`,
   noAdminLink:
     "Per decidere apri il pannello admin → Preventivi in attesa. (ADMIN_BASE_URL non è configurato, quindi manca il link diretto.)",
+  manualPriceCreated: (ref: string, price: string) =>
+    `Preventivo ${ref} creato a ${price}: controlla l'anteprima e approva. Al cliente non è partito nulla.`,
+  manualPriceAlreadyCreated: (ref: string) => `Il preventivo per ${ref} era già stato creato: eccolo.`,
+  manualPriceNoLongerNeeded: (ref: string, status: string) =>
+    `${ref} non è più "prezzo da inserire" (stato: ${status}). Nessun preventivo creato.`,
   openQuoteLink: "Apri il preventivo nel pannello",
   openPendingLink: "Apri i preventivi in attesa",
   emailFooter:

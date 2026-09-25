@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { TRPCError } from "@trpc/server";
 import { createServerCaller } from "@bos/core";
+import { enterManualPriceAction } from "./actions";
+import { SubmitButton } from "./submit-button";
 
 function NoAccess() {
   return (
@@ -22,7 +24,14 @@ function formatDate(isoDate: string | null, time: string | null) {
   return `${d}/${m}/${y}${time ? ` ore ${time}` : ""}`;
 }
 
-export default async function PendingQuotesPage() {
+export default async function PendingQuotesPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = await searchParams;
+  const esito = typeof sp.esito === "string" ? sp.esito : undefined;
+  const esitoOk = sp.tipo === "done" || sp.tipo === "already";
   const caller = await createServerCaller();
 
   let pending;
@@ -41,6 +50,18 @@ export default async function PendingQuotesPage() {
         </Link>
       </div>
       <h1 className="text-2xl font-semibold">Preventivi in attesa</h1>
+
+      {esito ? (
+        <p
+          className={`whitespace-pre-wrap rounded-lg border p-3 text-sm ${
+            esitoOk
+              ? "border-green-300 bg-green-50 text-green-900 dark:border-green-800 dark:bg-green-950 dark:text-green-200"
+              : "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+          }`}
+        >
+          {esito}
+        </p>
+      ) : null}
 
       {!pending.enabled ? (
         <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
@@ -85,12 +106,28 @@ export default async function PendingQuotesPage() {
           <p className="text-sm text-neutral-400">Nessuna richiesta senza prezzo.</p>
         ) : (
           pending.manualPrices.map(({ round, text }) => (
-            <pre
-              key={round.id}
-              className="whitespace-pre-wrap rounded-lg border p-4 font-sans text-sm"
-            >
-              {text}
-            </pre>
+            <div key={round.id} className="flex flex-col gap-3 rounded-lg border p-4">
+              <pre className="whitespace-pre-wrap font-sans text-sm">{text}</pre>
+              <form action={enterManualPriceAction} className="flex flex-col gap-2">
+                <input type="hidden" name="id" value={round.id} />
+                <label htmlFor={`prezzo-${round.id}`} className="text-sm font-medium">
+                  Prezzo (€)
+                </label>
+                <input
+                  id={`prezzo-${round.id}`}
+                  name="prezzo"
+                  inputMode="decimal"
+                  required
+                  placeholder="es. 280"
+                  className="rounded-lg border px-3 py-3 text-base"
+                />
+                <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                  Crea il PREVENTIVO PRONTO con questo prezzo: poi lo controlli e scegli Approva, Modifica o Rifiuta.
+                  Al cliente non parte nulla finché non premi Approva.
+                </p>
+                <SubmitButton pendingLabel="Creazione in corso…">Crea preventivo</SubmitButton>
+              </form>
+            </div>
           ))
         )}
       </section>
