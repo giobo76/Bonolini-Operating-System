@@ -174,7 +174,7 @@ describe("quote", () => {
         "Passeggeri: 2 adulti + 2 bambini (4 e 7 anni)",
         "Bagagli: 4 valigie grandi",
         "Volo: AZ123",
-        "Veicolo: Mercedes V-Class con autista privato",
+        "Veicolo: minivan premium con autista privato",
         "Prezzo: 300,00 € per l'intero veicolo",
         "",
         "Per confermare il servizio o per qualsiasi domanda, risponda pure a questo messaggio.",
@@ -200,7 +200,7 @@ describe("quote", () => {
         "Passengers: 2 adults + 2 children (ages 4 and 7)",
         "Luggage: 4 large suitcases",
         "Flight: AZ123",
-        "Vehicle: Mercedes V-Class with private driver",
+        "Vehicle: premium minivan with private driver",
         "Price: €300.00 for the entire vehicle",
         "",
         "To confirm the service or for any question, simply reply to this message.",
@@ -223,12 +223,18 @@ describe("quote", () => {
     expect(body).not.toContain("Bagagli:");
     expect(body).not.toContain("Volo:");
     expect(body).not.toContain("bambin");
-    expect(body).toContain("Veicolo: Mercedes V-Class con autista privato");
+    expect(body).toContain("Veicolo: minivan premium con autista privato");
   });
 
   it("never says taxi", () => {
     for (const language of ["it", "en"] as const) {
       expect(buildTransferQuoteOfferContent({ ...FULL_QUOTE, language }).body).not.toMatch(/taxi/i);
+    }
+  });
+
+  it("never names the vehicle make or model", () => {
+    for (const language of ["it", "en"] as const) {
+      expect(buildTransferQuoteOfferContent({ ...FULL_QUOTE, language }).body).not.toMatch(/mercedes|v-class|classe v/i);
     }
   });
 });

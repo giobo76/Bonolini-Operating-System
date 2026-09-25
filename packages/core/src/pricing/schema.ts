@@ -70,6 +70,8 @@ export type MatchedRule =
   | "menaggio_tirano_fixed_foreign"
   | "milan_tirano_fixed_foreign"
   | "malpensa_tirano_fixed_foreign"
+  | "fixed_sondrio_malpensa_italian"
+  | "fixed_sondrio_malpensa_foreign"
   | "generic_km"
   | "manual_required";
 
@@ -132,6 +134,7 @@ export const pricingRuleKeys = {
   fixedFareAirport: "pricing.fixed_fare.airport",
   foreignFixedTirano: "pricing.fixed_fare.foreign_tirano",
   hospitalWaitingItalian: "pricing.hospital_waiting.italian",
+  sondrioMalpensa: "pricing.fixed_fare.sondrio_malpensa",
 } as const;
 
 const passengerTierContentSchema = z.object({
@@ -166,7 +169,18 @@ export const hospitalWaitingItalianRuleContentSchema = z.object({
   ratePerHourCents: z.number().int().nonnegative(),
 });
 
+// Sondrio city <-> Malpensa, both directions (founder decision, 2026-09-25):
+// italian customers by passenger tier (up to 4, 5, 6, 7, 8), foreign
+// customers one flat fare for 1-8 passengers; above 8 the price is manual.
+// Seeded by migration 0029 as a versioned rule — no default in code:
+// without an effective version the route keeps its previous behavior.
+export const sondrioMalpensaRuleContentSchema = z.object({
+  italian: passengerTierContentSchema,
+  foreignUpTo8PassengersCents: z.number().int().positive(),
+});
+
 export type PassengerTierRates = z.infer<typeof passengerTierContentSchema>;
+export type SondrioMalpensaRuleContent = z.infer<typeof sondrioMalpensaRuleContentSchema>;
 export type MinimumFareRuleContent = z.infer<typeof minimumFareRuleContentSchema>;
 export type TollRateRuleContent = z.infer<typeof tollRateRuleContentSchema>;
 export type DistanceRateRuleContent = z.infer<typeof distanceRateRuleContentSchema>;
@@ -186,6 +200,8 @@ export interface PricingRates {
   fixedFareAirport: FixedFareAirportRuleContent;
   foreignFixedTirano: ForeignFixedTiranoRuleContent;
   hospitalWaitingItalian: HospitalWaitingItalianRuleContent;
+  // null = no effective rule: the route is priced as before the rule existed.
+  sondrioMalpensa: SondrioMalpensaRuleContent | null;
 }
 
 // Recovered verbatim from the same CChiefGrowthAI-derived constants
@@ -209,6 +225,8 @@ export const DEFAULT_PRICING_RATES: PricingRates = {
   },
   foreignFixedTirano: { varenna: 26000, menaggio: 30000, como: 36000, milan: 39000, malpensa: 44000 },
   hospitalWaitingItalian: { freeMinutes: 60, ratePerHourCents: 4000 },
+  // Deliberately no amounts here: this fare exists only as a Business Rule.
+  sondrioMalpensa: null,
 };
 
 export interface PricingResult {

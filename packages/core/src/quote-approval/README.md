@@ -69,7 +69,7 @@ The quote reaches the customer **only** from Approva, whether from the panel or 
 4. Children (number and ages) and luggage are asked for, but never block pricing.
 5. Customer texts are the founder's own wording, in `communications/content.ts`, tested verbatim:
    - register "Lei", signature "Bonolini Transfer – Private Transfers";
-   - fixed vehicle line "Mercedes V-Class con autista privato", price "per l'intero veicolo";
+   - fixed vehicle line "minivan premium con autista privato", price "per l'intero veicolo";
    - Italian or English: Italian or unknown → Italian, any other detected language → English;
    - never the word "taxi".
 6. Panel decisions are allowed for admin and dispatcher (`staffProcedure`), like `transferRequests.accept/reject/modifyPrice`.

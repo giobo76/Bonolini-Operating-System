@@ -1,3 +1,4 @@
+import { BASE_LOCATION, isSondrioCity } from "../locations";
 import type { RouteDistanceResult, RouteDistanceErrorCode, RouteLeg } from "./schema";
 
 const COMPUTE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
@@ -142,8 +143,28 @@ export async function calculateRoute(waypoints: string[]): Promise<RouteDistance
 // the real pickup and summing two real legs produces the identical number
 // when pickup genuinely is Sondrio, and the more correct one on the rare
 // case it isn't.
+//
+// When the destination is Sondrio itself, pickup -> Sondrio -> Sondrio would
+// ask Google for a zero-length Sondrio -> Sondrio leg, which it rejects
+// ("incomplete leg"; production, 2026-09-25, Malpensa -> Sondrio). The trip
+// is then the mirror of the Sondrio -> X case: Sondrio -> pickup -> Sondrio
+// (out empty to the pickup, back with the passengers), so X -> Sondrio and
+// Sondrio -> X cost the same distance. A Sondrio -> Sondrio request has no
+// distance to compute at all: reported as invalid input, never guessed.
 export async function calculateGenericRouteRoundTrip(pickup: string, destination: string): Promise<RouteDistanceResult> {
-  return calculateRoute([pickup, destination, "Sondrio"]);
+  const pickupIsBase = isSondrioCity(pickup);
+  const destinationIsBase = isSondrioCity(destination);
+
+  if (pickupIsBase && destinationIsBase) {
+    return errorResult(
+      "invalid_input",
+      `Partenza e destinazione sono entrambe la base (${BASE_LOCATION}): nessun giro da calcolare.`,
+    );
+  }
+  if (destinationIsBase) {
+    return calculateRoute([BASE_LOCATION, pickup, BASE_LOCATION]);
+  }
+  return calculateRoute([pickup, destination, BASE_LOCATION]);
 }
 
 // Case B — the fixed, named Como-Tirano (Bernina Express) itinerary:

@@ -27,6 +27,8 @@ Recovered from `CChiefGrowthAI/ai/booking_bot/maps_distance.py`, ported as a con
 |---|---|---|
 | `km_andata_ritorno_da_sondrio(destinazione)` | `calculateGenericRouteRoundTrip(pickup, destination)` | Old code hardcoded origin `"Sondrio"` and doubled a single Sondrio→destination leg, silently assuming pickup was always Sondrio. New code sums two real legs (`pickup→destination`, `destination→"Sondrio"`) — identical number when pickup genuinely is Sondrio, more correct otherwise. |
 | `km_percorso_como_tirano()` | `calculateComoTiranoRoundTrip()` | Same fixed itinerary (`Sondrio→Como→Tirano→Sondrio`), same 3 legs, now resolved in one HTTP call instead of three. |
+
+**Base Sondrio as destination (fix 2026-09-25).** `pickup → Sondrio → Sondrio` asked Google for a zero-length Sondrio → Sondrio leg, which it rejects ("incomplete leg", production case Malpensa → Sondrio). When the destination is Sondrio city (`../locations.ts::isSondrioCity`), the round trip is `Sondrio → pickup → Sondrio`, the mirror of `Sondrio → destination → Sondrio`, so X → Sondrio and Sondrio → X measure the same distance. Pickup and destination both Sondrio: `invalid_input`, no call to Google, no guessed distance. Every other case is unchanged.
 | `_dettagli_percorso(a, b)` | `calculateRoute(waypoints)` | Generalized from a single pair to an arbitrary ordered list of waypoints — the primitive both convenience wrappers above are built on, and what a future caller with its own waypoint convention (case C: `pickup → destination`, no fixed return leg) can call directly. |
 
 `km`/`minuti` rounding convention preserved exactly: km to 1 decimal, duration to the nearest whole minute.
