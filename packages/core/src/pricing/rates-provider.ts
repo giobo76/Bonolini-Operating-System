@@ -8,7 +8,7 @@ import {
   fixedFareAirportRuleContentSchema,
   foreignFixedTiranoRuleContentSchema,
   hospitalWaitingItalianRuleContentSchema,
-  sondrioMalpensaItalianRuleContentSchema,
+  sondrioMalpensaRuleContentSchema,
   DEFAULT_PRICING_RATES,
   type PricingRates,
 } from "./schema";
@@ -152,7 +152,7 @@ export async function resolvePricingRates(tenantId: string): Promise<PricingRate
     fixedFareAirport,
     foreignFixedTirano,
     hospitalWaitingItalian,
-    sondrioMalpensaItalian,
+    sondrioMalpensa,
   ] = await Promise.all([
     resolveRuleSlot(tenantId, pricingRuleKeys.minimumFare, minimumFareRuleContentSchema, {
       minimumFareCents: DEFAULT_PRICING_RATES.minimumFareCents,
@@ -176,8 +176,8 @@ export async function resolvePricingRates(tenantId: string): Promise<PricingRate
     // fare does not exist and the route keeps its previous pricing.
     resolveRuleSlot(
       tenantId,
-      pricingRuleKeys.sondrioMalpensaItalian,
-      sondrioMalpensaItalianRuleContentSchema.nullable(),
+      pricingRuleKeys.sondrioMalpensa,
+      sondrioMalpensaRuleContentSchema.nullable(),
       null,
     ),
   ]);
@@ -189,7 +189,7 @@ export async function resolvePricingRates(tenantId: string): Promise<PricingRate
     fixedFareAirport,
     foreignFixedTirano,
     hospitalWaitingItalian,
-    sondrioMalpensaItalian,
+    sondrioMalpensa,
   };
   const invalidKeys = Object.entries(slots)
     .filter(([, slot]) => slot === null)
@@ -216,7 +216,7 @@ export async function resolvePricingRates(tenantId: string): Promise<PricingRate
     fixedFareAirport: resolved.fixedFareAirport.value,
     foreignFixedTirano: resolved.foreignFixedTirano.value,
     hospitalWaitingItalian: resolved.hospitalWaitingItalian.value,
-    sondrioMalpensaItalian: resolved.sondrioMalpensaItalian.value,
+    sondrioMalpensa: resolved.sondrioMalpensa.value,
   };
 
   const provenance = Object.values(resolved).map((slot) => slot.provenance);
