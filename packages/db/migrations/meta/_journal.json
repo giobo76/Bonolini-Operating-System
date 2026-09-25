@@ -152,6 +152,13 @@
     {
       "idx": 21,
       "version": "7",
+      "when": 1790308800000,
+      "tag": "0029_sondrio_malpensa_fixed_fare",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
       "when": 1790395200000,
       "tag": "0030_booking_deposit",
       "breakpoints": true

@@ -482,3 +482,109 @@ describe("calculatePrice — rates parameter (Phase 2: Business Rules)", () => {
     expect(result.hospitalWaiting.ratePerHourCents).toBeNull();
   });
 });
+
+
+// Founder decisions 2026-09-25 (production test, case B): Business Rule
+// pricing.fixed_fare.sondrio_malpensa — Sondrio city <-> Malpensa, both
+// directions, italian by passenger tier, foreign one flat fare, >8 manual.
+describe("calculatePrice — Sondrio <-> Malpensa (Business Rule)", () => {
+  const RATES: PricingRates = {
+    ...DEFAULT_PRICING_RATES,
+    sondrioMalpensa: {
+      italian: { "4": 25000, "5": 27000, "6": 29000, "7": 32000, "8": 35000 },
+      foreignUpTo8PassengersCents: 38000,
+    },
+  };
+
+  const ROUTES: Array<[string, string]> = [
+    ["Sondrio", "Malpensa"],
+    ["Malpensa", "Sondrio"],
+    ["Aeroporto di Malpensa", "Sondrio centro"],
+    ["Stazione di Sondrio", "MXP"],
+  ];
+
+  it.each([
+    [1, 25000],
+    [2, 25000],
+    [3, 25000],
+    [4, 25000],
+    [5, 27000],
+    [6, 29000],
+    [7, 32000],
+    [8, 35000],
+  ])("italian, %i passengers: %i cents, in both directions, no distance needed", (passengers, fare) => {
+    for (const [pickup, destination] of ROUTES) {
+      const result = calculatePrice(input({ pickup, destination, passengers }), RATES);
+      expect(result.pricingStatus).toBe("fixed");
+      expect(result.finalAmountCents).toBe(fare);
+      expect(result.pricingBreakdown.matchedRule).toBe("fixed_sondrio_malpensa_italian");
+    }
+  });
+
+  it("foreign, 1-8 passengers: 380 EUR flat in both directions, never per km", () => {
+    for (const [pickup, destination] of ROUTES) {
+      for (const passengers of [1, 4, 5, 8]) {
+        const result = calculatePrice(
+          input({ customerType: "foreign", pickup, destination, passengers, distanceKm: 300 }),
+          RATES,
+        );
+        expect(result.pricingStatus).toBe("fixed");
+        expect(result.finalAmountCents).toBe(38000);
+        expect(result.pricingBreakdown.matchedRule).toBe("fixed_sondrio_malpensa_foreign");
+        expect(result.pricingBreakdown.distanceKmUsed).toBeNull();
+      }
+    }
+  });
+
+  it("more than 8 passengers: manual price, italian and foreign", () => {
+    for (const customerType of ["italian", "foreign"] as const) {
+      const result = calculatePrice(input({ customerType, pickup: "Malpensa", destination: "Sondrio", passengers: 9 }), RATES);
+      expect(result.pricingStatus).toBe("manual_required");
+      expect(result.manualRequiredReason).toBe("passengers_above_supported_fare_band");
+    }
+  });
+
+  it("another Valtellina town is not covered: Morbegno -> Malpensa is priced exactly as without the rule", () => {
+    const withRule = calculatePrice(input({ pickup: "Morbegno", destination: "Malpensa", passengers: 2 }), RATES);
+    const withoutRule = calculatePrice(input({ pickup: "Morbegno", destination: "Malpensa", passengers: 2 }));
+    expect(withRule).toEqual(withoutRule);
+  });
+
+  it("without an effective rule (null) the route keeps its previous pricing", () => {
+    const sondrioToMalpensa = calculatePrice(input({ pickup: "Sondrio", destination: "Malpensa", passengers: 5 }));
+    expect(sondrioToMalpensa.pricingBreakdown.matchedRule).toBe("fixed_airport_malpensa");
+    const malpensaToSondrio = calculatePrice(input({ pickup: "Malpensa", destination: "Sondrio", passengers: 2 }));
+    expect(malpensaToSondrio.manualRequiredReason).toBe("distance_not_provided");
+  });
+});
+
+// Founder decision 2026-09-25: Linate, Orio al Serio/Bergamo and Milano
+// apply in both directions at the same price, italian and foreign.
+describe("calculatePrice — airport/city table in the reverse direction", () => {
+  it.each(["Linate", "Orio al Serio", "Bergamo", "Milano"])("%s -> Sondrio costs the same as Sondrio -> %s", (place) => {
+    for (const customerType of ["italian", "foreign"] as const) {
+      for (const passengers of [2, 5, 8]) {
+        const outbound = calculatePrice(input({ customerType, pickup: "Sondrio", destination: place, passengers }));
+        const inbound = calculatePrice(input({ customerType, pickup: place, destination: "Sondrio", passengers }));
+        expect(inbound.pricingStatus).toBe("fixed");
+        expect(inbound.finalAmountCents).toBe(outbound.finalAmountCents);
+        expect(inbound.pricingBreakdown.matchedRule).toBe("fixed_airport_linate_orio_city");
+      }
+    }
+  });
+
+  it("reverse direction above 8 passengers: manual", () => {
+    const result = calculatePrice(input({ pickup: "Linate", destination: "Sondrio", passengers: 9 }));
+    expect(result.manualRequiredReason).toBe("passengers_above_supported_fare_band");
+  });
+
+  it("reverse direction only towards Sondrio: Linate -> Livigno keeps the per-km path", () => {
+    const result = calculatePrice(input({ pickup: "Linate", destination: "Livigno", passengers: 2 }));
+    expect(result.manualRequiredReason).toBe("distance_not_provided");
+  });
+
+  it("Malpensa is not part of the reverse table (it has its own Sondrio-Malpensa rule)", () => {
+    const result = calculatePrice(input({ pickup: "Malpensa", destination: "Sondrio", passengers: 2 }));
+    expect(result.pricingBreakdown.matchedRule).not.toBe("fixed_airport_malpensa");
+  });
+});
