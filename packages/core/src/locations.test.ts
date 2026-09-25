@@ -9,12 +9,44 @@ describe("isSondrioCity", () => {
     },
   );
 
-  it.each(["Morbegno", "Albosaggia", "Tirano", "Provincia di Sondrio", "Via Roma 1, Sondrio", "Montagna in Valtellina", "", null])(
-    "does not treat %j as Sondrio city",
-    (place) => {
-      expect(isSondrioCity(place)).toBe(false);
-    },
-  );
+  it.each([
+    "Via Roma 1, Sondrio",
+    "Piazza Garibaldi, Sondrio (SO)",
+    "Piazza Garibaldi 3, Sondrio SO",
+    "Via Roma 1 Sondrio SO",
+    "Via Roma 1 Sondrio (SO)",
+    "Via Roma 1, 23100 Sondrio",
+    "Via Roma, 1, 23100 Sondrio SO, Italia",
+    "Via Roma 1, 23100",
+    "Via Sondrio 5, Sondrio",
+    "Hotel Europa, Sondrio",
+    "Stazione FS, Sondrio, Italy",
+  ])("recognizes the full address %j", (place) => {
+    expect(isSondrioCity(place)).toBe(true);
+  });
+
+  it.each([
+    "Morbegno",
+    "Albosaggia",
+    "Tirano",
+    "Provincia di Sondrio",
+    "Montagna in Valtellina",
+    "Via Sondrio 10, Milano",
+    "Via Sondrio, Milano",
+    "Via Sondrio",
+    "Via Sondrio 10, 20124 Milano",
+    "Via Sondrio 10, 23100 Milano",
+    "Via Roma 1, Morbegno (SO)",
+    "Via Roma 1, 23017 Morbegno SO",
+    "Albosaggia, Sondrio",
+    "Albosaggia (SO)",
+    "Montagna in Valtellina, Sondrio (SO)",
+    "Sondrio, Milano",
+    "",
+    null,
+  ])("does not treat %j as Sondrio city", (place) => {
+    expect(isSondrioCity(place)).toBe(false);
+  });
 });
 
 describe("isMalpensa", () => {
