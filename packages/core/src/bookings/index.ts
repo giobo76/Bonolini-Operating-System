@@ -8,6 +8,7 @@ export {
   getBookingByTransferRequestId,
   listPendingDepositBookings,
   confirmBookingDeposit,
+  attachCalendarEventToBooking,
 } from "./service";
 export type { ConfirmBookingDepositResult } from "./service";
 export * from "./schema";

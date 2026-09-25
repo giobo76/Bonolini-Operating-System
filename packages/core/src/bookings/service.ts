@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { getDb, bookings, assertOne, type Booking } from "@bos/db";
 import { inngest, emitDomainEvent } from "@bos/jobs";
 import { advanceDealStatus } from "../deals";
@@ -52,6 +52,7 @@ export async function updateBooking(tenantId: string, input: UpdateBookingInput)
   const now = new Date();
 
   const isCompleting = patch.status === "completed";
+  const isCancelling = patch.status === "cancelled";
   // Captured as a plain boolean, not held as a reference to the fetched
   // row: the row object returned by the update below is the same booking
   // (same real DB row, same id), and comparing against a still-referenced
@@ -59,6 +60,7 @@ export async function updateBooking(tenantId: string, input: UpdateBookingInput)
   // from the pre-update snapshot, whether this is a genuinely new
   // transition.
   const wasAlreadyCompleted = isCompleting ? (await getBooking(tenantId, id))?.status === "completed" : false;
+  const wasAlreadyCancelled = isCancelling ? (await getBooking(tenantId, id))?.status === "cancelled" : false;
 
   // Recording a milestone amount implies "this just happened now" unless a
   // specific timestamp was already supplied — matches the admin UI, which
@@ -89,6 +91,9 @@ export async function updateBooking(tenantId: string, input: UpdateBookingInput)
 
   if (row && isCompleting && !wasAlreadyCompleted) {
     void emitDomainEvent(inngest, "booking.completed", { tenantId, bookingId: row.id });
+  }
+  if (row && isCancelling && !wasAlreadyCancelled) {
+    void emitDomainEvent(inngest, "booking.cancelled", { tenantId, bookingId: row.id });
   }
 
   return row ?? null;
@@ -319,6 +324,23 @@ export async function getBookingByCalendarEventId(
     .from(bookings)
     .where(and(eq(bookings.tenantId, tenantId), eq(bookings.calendarEventId, calendarEventId)));
   return row ?? null;
+}
+
+// Links a booking to the Google Calendar event BOS created for it. Only
+// when the booking has no event yet: a retried call is a no-op, and a
+// booking that came from Calendar keeps its own event id.
+export async function attachCalendarEventToBooking(
+  tenantId: string,
+  bookingId: string,
+  calendarEventId: string,
+): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(bookings)
+    .set({ calendarEventId, updatedAt: new Date() })
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.id, bookingId), isNull(bookings.calendarEventId)))
+    .returning({ id: bookings.id });
+  return rows.length > 0;
 }
 
 // A cancelled Google Calendar event never deletes the booking — it moves

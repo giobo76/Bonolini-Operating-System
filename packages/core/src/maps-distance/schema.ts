@@ -45,3 +45,11 @@ export interface RouteDistanceResult {
   legs: RouteLeg[];
   error: RouteDistanceError | null;
 }
+
+// The founder's whole busy time for one service (calendar event,
+// 2026-09-25): Sondrio -> pickup -> destination -> Sondrio. minutesBeforePickup
+// is the empty Sondrio -> pickup leg (0 when the pickup is Sondrio itself),
+// so the caller knows when the founder has to leave; null on error.
+export interface BusyLoopResult extends RouteDistanceResult {
+  minutesBeforePickup: number | null;
+}

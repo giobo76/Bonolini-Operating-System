@@ -236,6 +236,7 @@ const {
   cancelBookingByCalendarEventId,
   updateBooking,
   confirmBookingDeposit,
+  attachCalendarEventToBooking,
 } = await import("./service");
 
 function inputFor(overrides: Partial<EnsureBookingSnapshotInput> = {}): EnsureBookingSnapshotInput {
@@ -585,5 +586,54 @@ describe("booking.completed domain event", () => {
       tenantId: "tenant-77",
       bookingId: created.id,
     });
+  });
+});
+
+describe("booking.cancelled domain event (founder decision 2026-09-25: Calendar event marked ANNULLATO)", () => {
+  it("updateBooking emits booking.cancelled on the first transition to cancelled", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    jobsMock.emitDomainEvent.mockClear();
+
+    const cancelled = await updateBooking("tenant-1", { id: created.id as string, status: "cancelled" });
+
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.cancelled", {
+      tenantId: "tenant-1",
+      bookingId: created.id,
+    });
+    expect(cancelled?.cancelledAt).not.toBeNull();
+  });
+
+  it("never re-emits booking.cancelled for an already-cancelled booking", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+    await updateBooking("tenant-1", { id: created.id as string, status: "cancelled" });
+    jobsMock.emitDomainEvent.mockClear();
+
+    await updateBooking("tenant-1", { id: created.id as string, status: "cancelled" });
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.cancelled", expect.anything());
+  });
+
+  it("a cancellation coming from Google Calendar does not emit booking.cancelled (the event is already cancelled there)", async () => {
+    await ensureBookingFromCalendarEvent("tenant-1", calendarInputFor({ calendarEventId: "google-evt-9" }));
+    jobsMock.emitDomainEvent.mockClear();
+
+    await cancelBookingByCalendarEventId("tenant-1", "google-evt-9");
+
+    expect(jobsMock.emitDomainEvent).not.toHaveBeenCalledWith(jobsMock.inngest, "booking.cancelled", expect.anything());
+  });
+});
+
+describe("attachCalendarEventToBooking", () => {
+  it("stores the id of the event BOS created on the booking", async () => {
+    const created = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+
+    const attached = await attachCalendarEventToBooking("tenant-1", created.id as string, "bos0123");
+
+    expect(attached).toBe(true);
+    expect((await getBookingByCalendarEventId("tenant-1", "bos0123"))?.id).toBe(created.id);
+  });
+
+  it("returns false for an unknown booking", async () => {
+    expect(await attachCalendarEventToBooking("tenant-1", "booking-does-not-exist", "bos0123")).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ import { getCalendarClient } from "../marketing";
 import { findClientByPhone, findOrCreateClientByPhone } from "../clients";
 import { ensureBookingFromCalendarEvent, getBookingByCalendarEventId, cancelBookingByCalendarEventId } from "../bookings";
 import { log, captureException } from "../observability";
-import { parseCalendarEvent, isRecognizableService } from "./schema";
+import { parseCalendarEvent, isRecognizableService, isBosEventId } from "./schema";
 import type {
   AvailableCalendar,
   CalendarConfigView,
@@ -58,7 +58,7 @@ export async function getCalendarConfig(tenantId: string): Promise<CalendarConfi
   };
 }
 
-async function getCalendarConnectionRow(tenantId: string): Promise<CalendarConnection | null> {
+export async function getCalendarConnectionRow(tenantId: string): Promise<CalendarConnection | null> {
   const db = getDb();
   const [row] = await db.select().from(calendarConnections).where(eq(calendarConnections.tenantId, tenantId));
   return row ?? null;
@@ -108,6 +108,7 @@ function emptyResult(): CalendarSyncResult {
     bookingsCancelled: 0,
     eventsSkippedNoClientData: 0,
     eventsIgnoredNotAService: 0,
+    eventsIgnoredCreatedByBos: 0,
     fullResync: false,
   };
 }
@@ -133,11 +134,27 @@ type CalendarApi = Awaited<ReturnType<typeof getCalendarClient>>;
 // counted, never silently dropped and never given invented contact data.
 async function processEvent(
   tenantId: string,
-  event: { id?: string | null; status?: string | null; summary?: string | null; description?: string | null; start?: { dateTime?: string | null } | null },
+  event: {
+    id?: string | null;
+    status?: string | null;
+    summary?: string | null;
+    description?: string | null;
+    start?: { dateTime?: string | null } | null;
+    extendedProperties?: { private?: Record<string, string> | null } | null;
+  },
   result: CalendarSyncResult,
 ): Promise<void> {
   if (!event.id) return;
   result.eventsSeen += 1;
+
+  // An event BOS created for a confirmed booking is never imported back as
+  // a second booking, and editing or deleting it by hand in Google never
+  // changes that booking (founder decision 2026-09-25). The id check also
+  // covers deleted events, which Google returns with nothing but id+status.
+  if (isBosEventId(event.id) || event.extendedProperties?.private?.bosBookingId) {
+    result.eventsIgnoredCreatedByBos += 1;
+    return;
+  }
 
   if (event.status === "cancelled") {
     const cancelled = await cancelBookingByCalendarEventId(tenantId, event.id);

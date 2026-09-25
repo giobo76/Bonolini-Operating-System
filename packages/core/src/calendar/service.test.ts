@@ -202,6 +202,7 @@ describe("syncCalendarEvents — not configured", () => {
       bookingsCancelled: 0,
       eventsSkippedNoClientData: 0,
       eventsIgnoredNotAService: 0,
+      eventsIgnoredCreatedByBos: 0,
       fullResync: false,
     });
     expect(fakeState.eventsListCalls).toHaveLength(0);
@@ -358,6 +359,79 @@ describe("syncCalendarEvents — configured", () => {
 
     expect(result.eventsSkippedNoClientData).toBe(1);
     expect(clientsMock.findOrCreateClientByPhone).not.toHaveBeenCalled();
+  });
+
+  // Founder decisions 2026-09-25: an event BOS created for a confirmed
+  // booking is never imported back, and editing or deleting it in Google
+  // never changes that booking.
+  describe("events created by BOS", () => {
+    const BOS_EVENT_ID = "bos0123456789abcdef0123456789abcdef";
+
+    it("is never imported as a second booking, even with a recognizable route and phone", async () => {
+      clientsMock.findClientByPhone.mockResolvedValue(fakeClient());
+      fakeState.eventsListQueue = [
+        {
+          items: [
+            {
+              id: BOS_EVENT_ID,
+              summary: "TRANSFER | Mario Rossi | Malpensa → Sondrio | €390",
+              description: "Telefono: +393331234567",
+              start: { dateTime: "2026-10-03T12:30:00+02:00" },
+              extendedProperties: { private: { bosBookingId: "b-1" } },
+            },
+          ],
+        },
+      ];
+
+      const result = await syncCalendarEvents("tenant-1");
+
+      expect(result.eventsIgnoredCreatedByBos).toBe(1);
+      expect(result.bookingsCreated).toBe(0);
+      expect(bookingsMock.ensureBookingFromCalendarEvent).not.toHaveBeenCalled();
+      expect(clientsMock.findClientByPhone).not.toHaveBeenCalled();
+    });
+
+    it("recognized by its marker alone (whatever the id)", async () => {
+      fakeState.eventsListQueue = [
+        { items: [{ id: "someotherid", summary: "Milano → Tirano", extendedProperties: { private: { bosBookingId: "b-1" } } }] },
+      ];
+
+      const result = await syncCalendarEvents("tenant-1");
+
+      expect(result.eventsIgnoredCreatedByBos).toBe(1);
+      expect(bookingsMock.ensureBookingFromCalendarEvent).not.toHaveBeenCalled();
+    });
+
+    it("deleted by hand in Google (only id + status come back): the booking in BOS is not cancelled", async () => {
+      fakeState.eventsListQueue = [{ items: [{ id: BOS_EVENT_ID, status: "cancelled" }] }];
+
+      const result = await syncCalendarEvents("tenant-1");
+
+      expect(result.eventsIgnoredCreatedByBos).toBe(1);
+      expect(result.bookingsCancelled).toBe(0);
+      expect(bookingsMock.cancelBookingByCalendarEventId).not.toHaveBeenCalled();
+    });
+
+    it("the founder's own events are still imported as before", async () => {
+      clientsMock.findClientByPhone.mockResolvedValue(fakeClient());
+      fakeState.eventsListQueue = [
+        {
+          items: [
+            {
+              id: "evt-1",
+              summary: "TRANSFER | Mario Rossi | Milano → Tirano | €390",
+              description: "Phone: +39 333 1234567",
+              start: { dateTime: "2026-09-20T09:00:00+02:00" },
+            },
+          ],
+        },
+      ];
+
+      const result = await syncCalendarEvents("tenant-1");
+
+      expect(result.eventsIgnoredCreatedByBos).toBe(0);
+      expect(result.bookingsCreated).toBe(1);
+    });
   });
 
   // TEST 7 — cancellazione evento -> booking cancelled.

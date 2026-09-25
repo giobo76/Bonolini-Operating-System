@@ -1,4 +1,9 @@
-export { calculateRoute, calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip } from "./service";
+export {
+  calculateRoute,
+  calculateGenericRouteRoundTrip,
+  calculateComoTiranoRoundTrip,
+  calculateBusyLoopFromBase,
+} from "./service";
 export * from "./schema";
 
 // Boundary rule (ADR 0002): other modules/apps import only from here.

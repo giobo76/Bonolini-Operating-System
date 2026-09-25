@@ -162,6 +162,13 @@
       "when": 1790395200000,
       "tag": "0030_booking_deposit",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1790481600000,
+      "tag": "0031_calendar_minimum_event_duration",
+      "breakpoints": true
     }
   ]
 }

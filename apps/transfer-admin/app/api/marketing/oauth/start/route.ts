@@ -10,10 +10,13 @@ import { assertValidOAuthRedirectUri, log } from "@bos/core";
 // branch (checks/google-ads-checks.ts) actually calls the Ads API now — see
 // packages/core/src/marketing/README.md.
 //
-// calendar.readonly (not the full "calendar" scope, which grants write
-// access) added for the Real Conversion System's Calendar Sync — this
-// module only ever calls events.list()/calendarList.list(), never creates,
-// updates, or deletes a Google Calendar event. Adding a new scope here
+// calendar.readonly for the Calendar Sync (calendarList.list(), which
+// calendar.events does not cover) and, since 2026-09-25, calendar.events
+// for the one write path: the event of a booking confirmed after the
+// deposit, marked "ANNULLATO" on cancellation (packages/core/src/calendar,
+// booking-event.ts). Events only — never the full "calendar" scope, which
+// could also change calendars, sharing and settings; the marketing checks
+// stay read-only in their own code. Adding a new scope here
 // means every existing connection needs a fresh consent (Google always
 // re-grants the full requested scope list on reconnect, via `prompt:
 // consent` below, already the existing behavior) — it does not silently
@@ -24,6 +27,7 @@ const SCOPES = [
   "https://www.googleapis.com/auth/webmasters.readonly",
   "https://www.googleapis.com/auth/adwords",
   "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
 ];
 
 export async function GET(request: NextRequest) {

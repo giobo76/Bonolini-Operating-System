@@ -32,6 +32,9 @@ export interface CalendarSyncResult {
   bookingsCancelled: number;
   eventsSkippedNoClientData: number;
   eventsIgnoredNotAService: number;
+  // Events BOS itself created for a confirmed booking: never imported
+  // back, whatever their state (founder decision 2026-09-25).
+  eventsIgnoredCreatedByBos: number;
   fullResync: boolean;
 }
 
@@ -214,3 +217,37 @@ export function parseCalendarEvent(summary: string, description: string | null):
 export function isRecognizableService(parsed: ParsedCalendarEvent): boolean {
   return Boolean(parsed.pickup && parsed.destination);
 }
+
+// ── Booking events (BOS -> Google Calendar, founder decision 2026-09-25) ──
+
+// Google accepts a client-chosen event id made of base32hex characters
+// (0-9, a-v), 5 to 1024 long. "bos" + the booking uuid's 32 hex digits fits,
+// is the same on every retry (a second insert gets 409, never a duplicate)
+// and lets the sync recognize the event even when Google returns a deleted
+// event with nothing but its id.
+const BOS_EVENT_ID_PATTERN = /^bos[0-9a-f]{32}$/;
+
+export function bosEventIdForBooking(bookingId: string): string {
+  return `bos${bookingId.replace(/-/g, "").toLowerCase()}`;
+}
+
+export function isBosEventId(eventId: string | null | undefined): boolean {
+  return typeof eventId === "string" && BOS_EVENT_ID_PATTERN.test(eventId);
+}
+
+// Versioned Business Rule (category "other"): minimum busy time per route,
+// e.g. Malpensa in either direction = 5 hours. A route matches when the
+// pickup or the destination mentions one of its placeKeywords as a whole
+// word; the largest matching minimum wins.
+export const MINIMUM_EVENT_DURATION_RULE_KEY = "calendar.minimum_event_duration";
+
+export const minimumEventDurationRuleContentSchema = z.object({
+  minimums: z.array(
+    z.object({
+      label: z.string().trim().min(1),
+      placeKeywords: z.array(z.string().trim().min(1)).min(1),
+      minimumMinutes: z.number().int().positive(),
+    }),
+  ),
+});
+export type MinimumEventDurationRuleContent = z.infer<typeof minimumEventDurationRuleContentSchema>;

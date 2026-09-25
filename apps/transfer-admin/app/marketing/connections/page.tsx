@@ -46,6 +46,7 @@ export default async function MarketingConnectionsPage({
           bookingsCancelled: Number(sp.bookingsCancelled) || 0,
           eventsSkippedNoClientData: Number(sp.eventsSkippedNoClientData) || 0,
           eventsIgnoredNotAService: Number(sp.eventsIgnoredNotAService) || 0,
+          eventsIgnoredCreatedByBos: Number(sp.eventsIgnoredCreatedByBos) || 0,
         }
       : null;
 
@@ -66,6 +67,7 @@ export default async function MarketingConnectionsPage({
   }
 
   const isActive = status.status === "active";
+  const canWriteCalendarEvents = status.scopes?.includes("https://www.googleapis.com/auth/calendar.events") ?? false;
 
   // Calendar is never required for the rest of BOS to work, and a missing
   // calendar.readonly scope on an older connection (pre-dating this
@@ -128,6 +130,12 @@ export default async function MarketingConnectionsPage({
             <p className="mt-1">
               {syncResult.eventsIgnoredNotAService} event{syncResult.eventsIgnoredNotAService === 1 ? "" : "s"}{" "}
               ignored — no recognizable pickup/destination route in the title.
+            </p>
+          ) : null}
+          {syncResult.eventsIgnoredCreatedByBos > 0 ? (
+            <p className="mt-1">
+              {syncResult.eventsIgnoredCreatedByBos} event{syncResult.eventsIgnoredCreatedByBos === 1 ? "" : "s"}{" "}
+              created by BOS for confirmed bookings — never imported again as new bookings.
             </p>
           ) : null}
         </div>
@@ -269,9 +277,18 @@ export default async function MarketingConnectionsPage({
             Google Calendar
           </h2>
           <p className="mb-3 text-xs text-neutral-400">
-            Read-only — BOS only ever reads this calendar, never creates, edits, or deletes an
-            event. Optional: nothing else in BOS requires this to be configured.
+            BOS reads this calendar (bookings from your events) and writes only one thing: the
+            event of each booking confirmed after the deposit, marked &quot;ANNULLATO&quot; if you
+            cancel the booking in BOS. It never deletes an event and never touches events it did
+            not create. Optional: nothing else in BOS requires this to be configured.
           </p>
+          {!canWriteCalendarEvents ? (
+            <p className="mb-3 rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:border-yellow-800 dark:bg-yellow-950 dark:text-yellow-300">
+              Per creare gli eventi delle prenotazioni confermate, BOS ha bisogno del permesso sugli
+              eventi del calendario: premi Reconnect qui sopra e accetta. Fino ad allora nessun
+              evento viene creato.
+            </p>
+          ) : null}
 
           {calendarError ? (
             <p className="rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:border-yellow-800 dark:bg-yellow-950 dark:text-yellow-300">

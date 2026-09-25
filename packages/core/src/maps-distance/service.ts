@@ -1,5 +1,5 @@
 import { BASE_LOCATION, isSondrioCity } from "../locations";
-import type { RouteDistanceResult, RouteDistanceErrorCode, RouteLeg } from "./schema";
+import type { BusyLoopResult, RouteDistanceResult, RouteDistanceErrorCode, RouteLeg } from "./schema";
 
 const COMPUTE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
 const FIELD_MASK = "routes.legs.distanceMeters,routes.legs.duration";
@@ -165,6 +165,32 @@ export async function calculateGenericRouteRoundTrip(pickup: string, destination
     return calculateRoute([BASE_LOCATION, pickup, BASE_LOCATION]);
   }
   return calculateRoute([pickup, destination, BASE_LOCATION]);
+}
+
+// Unlike calculateGenericRouteRoundTrip (the pricing convention, which has
+// no Sondrio -> pickup leg), this is the full time the vehicle is away:
+// Sondrio -> pickup -> destination -> Sondrio, without the zero-length
+// Sondrio -> Sondrio legs Google rejects when the pickup or the destination
+// is Sondrio itself.
+export async function calculateBusyLoopFromBase(pickup: string, destination: string): Promise<BusyLoopResult> {
+  const pickupIsBase = isSondrioCity(pickup);
+  const destinationIsBase = isSondrioCity(destination);
+  if (pickupIsBase && destinationIsBase) {
+    return {
+      ...errorResult("invalid_input", `Partenza e destinazione sono entrambe la base (${BASE_LOCATION}): nessun giro da calcolare.`),
+      minutesBeforePickup: null,
+    };
+  }
+
+  const waypoints = [
+    ...(pickupIsBase ? [] : [BASE_LOCATION]),
+    pickup,
+    destination,
+    ...(destinationIsBase ? [] : [BASE_LOCATION]),
+  ];
+  const route = await calculateRoute(waypoints);
+  if (route.status !== "ok") return { ...route, minutesBeforePickup: null };
+  return { ...route, minutesBeforePickup: pickupIsBase ? 0 : route.legs[0]!.durationMinutes };
 }
 
 // Case B — the fixed, named Como-Tirano (Bernina Express) itinerary:

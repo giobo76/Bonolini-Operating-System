@@ -84,6 +84,7 @@ export async function syncCalendarNowAction() {
     bookingsCancelled: String(result.bookingsCancelled),
     eventsSkippedNoClientData: String(result.eventsSkippedNoClientData),
     eventsIgnoredNotAService: String(result.eventsIgnoredNotAService),
+    eventsIgnoredCreatedByBos: String(result.eventsIgnoredCreatedByBos),
   });
   redirect(`/marketing/connections?${params.toString()}`);
 }

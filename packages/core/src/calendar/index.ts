@@ -5,7 +5,20 @@ export {
   selectCalendar,
   syncCalendarEvents,
 } from "./service";
-export { parseCalendarEvent, isRecognizableService } from "./schema";
+export {
+  createCalendarEventForBooking,
+  markCalendarEventCancelledForBooking,
+  type CreateBookingEventOutcome,
+  type CancelBookingEventOutcome,
+} from "./booking-event";
+export {
+  parseCalendarEvent,
+  isRecognizableService,
+  bosEventIdForBooking,
+  isBosEventId,
+  MINIMUM_EVENT_DURATION_RULE_KEY,
+  minimumEventDurationRuleContentSchema,
+} from "./schema";
 export type {
   AvailableCalendar,
   CalendarConfigView,

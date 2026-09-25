@@ -1,6 +1,7 @@
 import { inngest } from "@bos/jobs";
 import { getDb, tenants } from "@bos/db";
 import { syncCalendarEvents } from "./service";
+import { createCalendarEventForBooking, markCalendarEventCancelledForBooking } from "./booking-event";
 import { captureException, log } from "../observability";
 
 async function listAllTenantIds(): Promise<string[]> {
@@ -43,4 +44,28 @@ export const calendarSync = inngest.createFunction(
   },
 );
 
-export const calendarInngestFunctions = [calendarSync];
+// Founder decision 2026-09-25: a booking confirmed after the deposit gets
+// its event in the founder's calendar. A failure (Google permission not
+// granted yet, network) throws, so Inngest retries; the booking stays
+// confirmed either way. Idempotent: the event id is derived from the
+// booking, and bookings that already have an event are skipped.
+export const calendarBookingEventOnConfirmed = inngest.createFunction(
+  { id: "calendar-booking-event-on-confirmed" },
+  { event: "booking.confirmed" },
+  async ({ event, step }) => {
+    const { tenantId, bookingId } = event.data as { tenantId: string; bookingId: string };
+    return step.run("create-calendar-event", () => createCalendarEventForBooking(tenantId, bookingId));
+  },
+);
+
+// Cancelled in BOS: the event stays, titled "ANNULLATO – …" and grey.
+export const calendarBookingEventOnCancelled = inngest.createFunction(
+  { id: "calendar-booking-event-on-cancelled" },
+  { event: "booking.cancelled" },
+  async ({ event, step }) => {
+    const { tenantId, bookingId } = event.data as { tenantId: string; bookingId: string };
+    return step.run("mark-calendar-event-cancelled", () => markCalendarEventCancelledForBooking(tenantId, bookingId));
+  },
+);
+
+export const calendarInngestFunctions = [calendarSync, calendarBookingEventOnConfirmed, calendarBookingEventOnCancelled];

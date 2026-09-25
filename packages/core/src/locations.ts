@@ -75,3 +75,13 @@ export function isMalpensa(place: string | null | undefined): boolean {
   if (!place) return false;
   return /\b(malpensa|mxp)\b/.test(normalizePlace(place));
 }
+
+// Whole-word match on the normalized text: "mxp" matches "Aeroporto MXP T1",
+// "como" does not match "Comolli". Used for route rules configured as data
+// (e.g. calendar.minimum_event_duration's placeKeywords).
+export function mentionsPlace(place: string | null | undefined, keyword: string): boolean {
+  if (!place) return false;
+  const normalizedKeyword = normalizePlace(keyword);
+  if (!normalizedKeyword) return false;
+  return ` ${normalizePlace(place)} `.includes(` ${normalizedKeyword} `);
+}

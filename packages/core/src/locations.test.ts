@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMalpensa, isSondrioCity } from "./locations";
+import { isMalpensa, isSondrioCity, mentionsPlace } from "./locations";
 
 describe("isSondrioCity", () => {
   it.each(["Sondrio", "sondrio", " SONDRIO ", "Sondrio centro", "Sondrio città", "Sondrio (SO)", "Stazione di Sondrio", "Sondrio, Italia"])(
@@ -56,5 +56,17 @@ describe("isMalpensa", () => {
     expect(isMalpensa("MXP")).toBe(true);
     expect(isMalpensa("Linate")).toBe(false);
     expect(isMalpensa("Orio al Serio")).toBe(false);
+  });
+});
+
+describe("mentionsPlace", () => {
+  it("matches whole words, accents and case ignored", () => {
+    expect(mentionsPlace("Aeroporto di Milano Malpensa T1", "malpensa")).toBe(true);
+    expect(mentionsPlace("MXP", "mxp")).toBe(true);
+    expect(mentionsPlace("Città Alta, Bergamo", "citta alta")).toBe(true);
+    expect(mentionsPlace("Via Comolli 3, Sondrio", "como")).toBe(false);
+    expect(mentionsPlace("Linate", "malpensa")).toBe(false);
+    expect(mentionsPlace(null, "malpensa")).toBe(false);
+    expect(mentionsPlace("Malpensa", "  ")).toBe(false);
   });
 });

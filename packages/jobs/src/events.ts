@@ -32,6 +32,10 @@ export const domainEventNames = [
   // BOS Agent's own listeners.
   "booking.confirmed",
   "booking.completed",
+  // Emitted: updateBooking, on the first transition to status:"cancelled"
+  // made in BOS — never by the calendar sync (an event cancelled in Google
+  // is already cancelled there). Listened to by calendar/inngest-functions.ts.
+  "booking.cancelled",
   // Not yet emitted by any producer — no rule in marketing/ currently
   // raises a dedicated "anomaly" signal distinct from a regular finding
   // (see checkRuns/findings in packages/db/src/schema/marketing.ts). Same
@@ -77,6 +81,11 @@ export const bookingCompletedPayloadSchema = z.object({
   bookingId: z.string().uuid(),
 });
 
+export const bookingCancelledPayloadSchema = z.object({
+  tenantId: z.string().uuid(),
+  bookingId: z.string().uuid(),
+});
+
 export const marketingAnomalyDetectedPayloadSchema = z.object({
   tenantId: z.string().uuid(),
   findingId: z.string().uuid(),
@@ -90,6 +99,7 @@ export const domainEventPayloadSchemas = {
   "transfer_request.confirmed": transferRequestConfirmedPayloadSchema,
   "booking.confirmed": bookingConfirmedPayloadSchema,
   "booking.completed": bookingCompletedPayloadSchema,
+  "booking.cancelled": bookingCancelledPayloadSchema,
   "marketing.anomaly.detected": marketingAnomalyDetectedPayloadSchema,
 } as const satisfies Record<DomainEventName, z.ZodTypeAny>;
 

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { calculateRoute, calculateGenericRouteRoundTrip, calculateComoTiranoRoundTrip } from "./service";
+import {
+  calculateRoute,
+  calculateGenericRouteRoundTrip,
+  calculateComoTiranoRoundTrip,
+  calculateBusyLoopFromBase,
+} from "./service";
 
 // global fetch is mocked for every test in this file — no real network call
 // to Google is ever made. `fetchMock` intercepts every request/response
@@ -259,5 +264,62 @@ describe("calculateGenericRouteRoundTrip — base Sondrio as pickup or destinati
     expect(result.error?.code).toBe("invalid_input");
     expect(result.distanceKm).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// Founder decision 2026-09-25: the calendar event lasts the whole time the
+// founder is busy, Sondrio -> pickup -> destination -> Sondrio.
+describe("calculateBusyLoopFromBase", () => {
+  const legsOf = (result: { legs: Array<{ origin: string; destination: string }> }) =>
+    result.legs.map((leg) => `${leg.origin}->${leg.destination}`);
+
+  it("neither is Sondrio: three legs, the empty one to the pickup comes first", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(computeRoutesResponse([{ km: 30, minutes: 35 }, { km: 70, minutes: 80 }, { km: 90, minutes: 100 }])),
+    );
+
+    const result = await calculateBusyLoopFromBase("Morbegno", "Livigno");
+
+    expect(legsOf(result)).toEqual(["Sondrio->Morbegno", "Morbegno->Livigno", "Livigno->Sondrio"]);
+    expect(result.durationMinutes).toBe(215);
+    expect(result.minutesBeforePickup).toBe(35);
+  });
+
+  it("pickup Sondrio: Sondrio -> destination -> Sondrio, nothing before the pickup", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(computeRoutesResponse([{ km: 150, minutes: 130 }, { km: 150, minutes: 130 }])));
+
+    const result = await calculateBusyLoopFromBase("Via Roma 1, Sondrio", "Malpensa");
+
+    expect(legsOf(result)).toEqual(["Via Roma 1, Sondrio->Malpensa", "Malpensa->Sondrio"]);
+    expect(result.durationMinutes).toBe(260);
+    expect(result.minutesBeforePickup).toBe(0);
+  });
+
+  it("destination Sondrio: Sondrio -> pickup -> Sondrio, the empty leg is before the pickup", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(computeRoutesResponse([{ km: 150, minutes: 130 }, { km: 150, minutes: 140 }])));
+
+    const result = await calculateBusyLoopFromBase("Malpensa", "Sondrio");
+
+    expect(legsOf(result)).toEqual(["Sondrio->Malpensa", "Malpensa->Sondrio"]);
+    expect(result.durationMinutes).toBe(270);
+    expect(result.minutesBeforePickup).toBe(130);
+  });
+
+  it("both Sondrio: invalid input, no call to Google", async () => {
+    const result = await calculateBusyLoopFromBase("Sondrio", "Stazione di Sondrio");
+
+    expect(result.status).toBe("error");
+    expect(result.minutesBeforePickup).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("Google error: no duration, never a guess", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: "boom" } }, 500));
+
+    const result = await calculateBusyLoopFromBase("Morbegno", "Livigno");
+
+    expect(result.status).toBe("error");
+    expect(result.durationMinutes).toBeNull();
+    expect(result.minutesBeforePickup).toBeNull();
   });
 });
