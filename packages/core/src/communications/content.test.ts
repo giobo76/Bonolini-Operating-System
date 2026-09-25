@@ -176,7 +176,7 @@ describe("quote", () => {
         "Passeggeri: 2 adulti + 2 bambini (4 e 7 anni)",
         "Bagagli: 4 valigie grandi",
         "Volo: AZ123",
-        "Veicolo: Mercedes V-Class con autista privato",
+        "Veicolo: minivan premium con autista privato",
         "Prezzo totale: 390,00 € per l'intero veicolo",
         "Acconto per confermare la prenotazione: 200,00 €",
         "Saldo all'autista il giorno del servizio: 190,00 € (preferibilmente in contanti)",
@@ -206,7 +206,7 @@ describe("quote", () => {
         "Passengers: 2 adults + 2 children (ages 4 and 7)",
         "Luggage: 4 large suitcases",
         "Flight: AZ123",
-        "Vehicle: Mercedes V-Class with private driver",
+        "Vehicle: premium minivan with private driver",
         "Total price: €390.00 for the entire vehicle",
         "Deposit to confirm the booking: €200.00",
         "Balance to the driver on the day of service: €190.00 (preferably in cash)",
@@ -246,12 +246,18 @@ describe("quote", () => {
     expect(body).not.toContain("Bagagli:");
     expect(body).not.toContain("Volo:");
     expect(body).not.toContain("bambin");
-    expect(body).toContain("Veicolo: Mercedes V-Class con autista privato");
+    expect(body).toContain("Veicolo: minivan premium con autista privato");
   });
 
   it("never says taxi", () => {
     for (const language of ["it", "en"] as const) {
       expect(buildTransferQuoteOfferContent({ ...FULL_QUOTE, language }).body).not.toMatch(/taxi/i);
+    }
+  });
+
+  it("never names the vehicle make or model", () => {
+    for (const language of ["it", "en"] as const) {
+      expect(buildTransferQuoteOfferContent({ ...FULL_QUOTE, language }).body).not.toMatch(/mercedes|v-class|classe v/i);
     }
   });
 });
@@ -284,7 +290,7 @@ describe("booking confirmation", () => {
         "Passeggeri: 2 adulti + 2 bambini (4 e 7 anni)",
         "Bagagli: 4 valigie grandi",
         "Volo: AZ123",
-        "Veicolo: Mercedes V-Class con autista privato",
+        "Veicolo: minivan premium con autista privato",
         "Saldo all'autista il giorno del servizio: 190,00 € (preferibilmente in contanti)",
         "",
         "Il giorno prima del servizio Le invieremo nome e contatto dell'autista.",
@@ -312,7 +318,7 @@ describe("booking confirmation", () => {
         "Passengers: 2 adults + 2 children (ages 4 and 7)",
         "Luggage: 4 large suitcases",
         "Flight: AZ123",
-        "Vehicle: Mercedes V-Class with private driver",
+        "Vehicle: premium minivan with private driver",
         "Balance to the driver on the day of service: €190.00 (preferably in cash)",
         "",
         "The day before your transfer we will send you the driver's name and contact details.",
@@ -322,11 +328,11 @@ describe("booking confirmation", () => {
     );
   });
 
-  it("uses the real balance of each booking and never a link or the word taxi", () => {
+  it("uses the real balance of each booking and never a link, the word taxi or the vehicle model", () => {
     for (const language of ["it", "en"] as const) {
       const { body } = buildBookingConfirmationContent({ ...trip, language, balanceCents: 18000 });
       expect(body).toMatch(language === "it" ? /180,00 € \(preferibilmente in contanti\)/ : /€180\.00 \(preferably in cash\)/);
-      expect(body).not.toMatch(/taxi|https?:/i);
+      expect(body).not.toMatch(/taxi|https?:|mercedes|v-class|classe v/i);
     }
   });
 });
