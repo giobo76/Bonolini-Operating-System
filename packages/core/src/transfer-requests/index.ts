@@ -10,6 +10,7 @@ export {
   acceptTransferRequest,
   rejectTransferRequest,
   modifyPriceForTransferRequest,
+  enterManualPriceForTransferRequest,
 } from "./service";
 export type { TransferRequestMessageInput } from "./service";
 export { transferRequestsRouter } from "./router";

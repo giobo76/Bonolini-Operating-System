@@ -409,6 +409,7 @@ const {
   acceptTransferRequest,
   rejectTransferRequest,
   modifyPriceForTransferRequest,
+  enterManualPriceForTransferRequest,
   getTransferRequest,
   listPendingApprovalTransferRequests,
 } = await import("./service");
@@ -1844,5 +1845,96 @@ describe("transfer_request.confirmed domain event", () => {
       "transfer_request.confirmed",
       expect.anything(),
     );
+  });
+});
+
+// "Prezzo da inserire" -> Crea preventivo (founder decision, 2026-09-25).
+describe("enterManualPriceForTransferRequest + approval of a manual price", () => {
+  function seedManualRequired(overrides: Partial<Record<string, unknown>> = {}) {
+    fakeState.requests.push({
+      id: "request-1",
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      status: "ready_for_pricing",
+      pickup: "Sondrio",
+      destination: "Bormio",
+      requestedDate: "2026-09-15",
+      requestedTime: "10:00",
+      passengers: 4,
+      luggage: null,
+      flightNumber: null,
+      trainNumber: null,
+      hotel: null,
+      language: null,
+      intent: null,
+      missingInformation: [],
+      pricingStatus: "manual_required",
+      calculatedAmountCents: null,
+      currency: "EUR",
+      pricingBreakdown: { manualRequiredReason: "distance_not_provided" },
+      finalAmountCents: null,
+      priceOverrideReason: null,
+      adminApprovedAt: null,
+      adminApprovedBy: null,
+      cancelledReason: null,
+      pickupAddress: null,
+      destinationAddress: null,
+      customerTripDurationMinutes: 45,
+      ...overrides,
+    });
+  }
+
+  it("moves a manual_required request to pending_admin_approval, recording the typed price, never as calculatedAmountCents", async () => {
+    seedManualRequired();
+
+    const moved = await enterManualPriceForTransferRequest("tenant-1", "request-1", 28000, "admin-profile-1");
+
+    expect(moved?.status).toBe("pending_admin_approval");
+    expect(moved?.calculatedAmountCents).toBeNull();
+    expect(moved?.pricingStatus).toBe("manual_required");
+    expect(moved?.pricingBreakdown).toMatchObject({
+      manualRequiredReason: "distance_not_provided",
+      manualPrice: { amountCents: 28000, enteredBy: "admin-profile-1" },
+    });
+  });
+
+  it("returns null and changes nothing when the request is not waiting for a manual price", async () => {
+    seedManualRequired({ status: "pending_admin_approval", pricingStatus: "fixed", calculatedAmountCents: 25000 });
+
+    const moved = await enterManualPriceForTransferRequest("tenant-1", "request-1", 28000, "admin-profile-1");
+
+    expect(moved).toBeNull();
+    expect(fakeState.requests[0]!.pricingStatus).toBe("fixed");
+  });
+
+  it("rejects a non-positive amount", async () => {
+    seedManualRequired();
+    await expect(enterManualPriceForTransferRequest("tenant-1", "request-1", 0, "admin-profile-1")).rejects.toThrow();
+  });
+
+  it("MODIFY_PRICE approves a manual-price request (no calculated amount) at the typed price and creates the booking", async () => {
+    seedManualRequired();
+    await enterManualPriceForTransferRequest("tenant-1", "request-1", 28000, "admin-profile-1");
+
+    const approved = await modifyPriceForTransferRequest(
+      "tenant-1",
+      "request-1",
+      "admin-profile-1",
+      28000,
+      "Prezzo inserito a mano dal titolare",
+    );
+
+    expect(approved.status).toBe("approved");
+    expect(approved.finalAmountCents).toBe(28000);
+    expect(approved.calculatedAmountCents).toBeNull();
+    expect(fakeState.bookings).toHaveLength(1);
+    expect(fakeState.bookings[0]!.finalAmountCents).toBe(28000);
+  });
+
+  it("a normal request with no calculated amount is still refused by MODIFY_PRICE", async () => {
+    seedManualRequired({ status: "pending_admin_approval", pricingStatus: "fixed", calculatedAmountCents: null });
+    await expect(
+      modifyPriceForTransferRequest("tenant-1", "request-1", "admin-profile-1", 28000, "x"),
+    ).rejects.toThrow("no calculatedAmountCents");
   });
 });

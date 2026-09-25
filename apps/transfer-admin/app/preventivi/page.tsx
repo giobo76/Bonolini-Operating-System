@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { TRPCError } from "@trpc/server";
 import { createServerCaller } from "@bos/core";
-import { confirmDepositAction } from "./actions";
+import { confirmDepositAction, enterManualPriceAction } from "./actions";
 import { SubmitButton } from "./submit-button";
 
 function NoAccess() {
@@ -139,12 +139,38 @@ export default async function PendingQuotesPage({
           <p className="text-sm text-neutral-400">Nessuna richiesta senza prezzo.</p>
         ) : (
           pending.manualPrices.map(({ round, text }) => (
-            <pre
-              key={round.id}
-              className="whitespace-pre-wrap rounded-lg border p-4 font-sans text-sm"
-            >
-              {text}
-            </pre>
+            <div key={round.id} className="flex flex-col gap-3 rounded-lg border p-4">
+              <pre className="whitespace-pre-wrap font-sans text-sm">{text}</pre>
+              <form action={enterManualPriceAction} className="flex flex-col gap-2">
+                <input type="hidden" name="id" value={round.id} />
+                <label htmlFor={`prezzo-${round.id}`} className="text-sm font-medium">
+                  Prezzo (€)
+                </label>
+                <input
+                  id={`prezzo-${round.id}`}
+                  name="prezzo"
+                  inputMode="decimal"
+                  required
+                  placeholder="es. 280"
+                  className="rounded-lg border px-3 py-3 text-base"
+                />
+                <label htmlFor={`acconto-${round.id}`} className="text-sm font-medium">
+                  Acconto (€, facoltativo)
+                </label>
+                <input
+                  id={`acconto-${round.id}`}
+                  name="acconto"
+                  inputMode="decimal"
+                  placeholder="vuoto = 50% arrotondato"
+                  className="rounded-lg border px-3 py-3 text-base"
+                />
+                <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                  Crea il PREVENTIVO PRONTO con questo prezzo e acconto: poi lo controlli e scegli Approva, Modifica o Rifiuta.
+                  Al cliente non parte nulla finché non premi Approva.
+                </p>
+                <SubmitButton pendingLabel="Creazione in corso…">Crea preventivo</SubmitButton>
+              </form>
+            </div>
           ))
         )}
       </section>

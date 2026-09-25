@@ -4,6 +4,7 @@ import { router, staffProcedure } from "../trpc";
 import {
   approveQuoteRound,
   confirmDepositReceived,
+  enterManualPrice,
   getRoundForPanel,
   listPendingForPanel,
   rejectQuoteRound,
@@ -31,6 +32,26 @@ export const quoteApprovalRouter = router({
   reject: staffProcedure
     .input(roundIdSchema)
     .mutation(({ ctx, input }) => rejectQuoteRound(ctx.session.profile.tenantId, input.id)),
+
+  // "Prezzo da inserire" -> Crea preventivo. Opens a PREVENTIVO PRONTO
+  // round at the typed price and deposit (omitted = 50% rule); nothing is
+  // sent to the customer.
+  enterManualPrice: staffProcedure
+    .input(
+      roundIdSchema.extend({
+        amountCents: z.number().int().positive(),
+        depositCents: z.number().int().positive().optional(),
+      }),
+    )
+    .mutation(({ ctx, input }) =>
+      enterManualPrice(
+        ctx.session.profile.tenantId,
+        input.id,
+        input.amountCents,
+        input.depositCents ?? null,
+        ctx.session.profile.id,
+      ),
+    ),
 
   // depositCents omitted = 50% of the new price, nearest 10 €.
   revise: staffProcedure

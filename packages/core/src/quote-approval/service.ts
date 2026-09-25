@@ -4,6 +4,7 @@ import {
   acceptTransferRequest,
   rejectTransferRequest,
   modifyPriceForTransferRequest,
+  enterManualPriceForTransferRequest,
 } from "../transfer-requests";
 import { getClient } from "../clients";
 import {
@@ -467,7 +468,7 @@ export async function approveQuoteRound(
         tr.id,
         approverProfileId,
         row.proposedAmountCents,
-        "Prezzo modificato dal titolare",
+        tr.calculatedAmountCents === null ? "Prezzo inserito a mano dal titolare" : "Prezzo modificato dal titolare",
         expectedDeposit,
       );
     } else {
@@ -683,6 +684,82 @@ export async function confirmDepositReceived(
     captureException(error, "quote_approval.deposit_received_failed", { bookingId });
     return { outcome: "error", message: FOUNDER_TEXTS.error(ref, message) };
   }
+}
+
+// Crea preventivo ("Prezzo da inserire", founder decision 2026-09-25): the
+// founder types a price (and optionally the deposit; null = 50% rule) for
+// a request the engine could not price. The
+// "PREZZO DA INSERIRE" row is closed, the request moves to
+// pending_admin_approval and a normal PREVENTIVO PRONTO round opens at that
+// price, to be approved, modified or rejected like any other. Nothing is
+// sent to the customer here. A double click: the second one finds the row
+// already closed and is taken to the round the first one created.
+export async function enterManualPrice(
+  tenantId: string,
+  manualRowId: string,
+  amountCents: number,
+  depositCents: number | null,
+  enteredByProfileId: string,
+): Promise<DecisionResult> {
+  if (!isQuoteApprovalEnabled()) return { outcome: "refused", message: FOUNDER_TEXTS.disabled };
+  const row = await repo.getApprovalRequest(tenantId, manualRowId);
+  if (!row || row.kind !== "manual_price_required") return { outcome: "refused", message: FOUNDER_TEXTS.notFound };
+  const ref = shortRef(row.transferRequestId);
+
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.invalidPrice };
+  }
+  if (depositCents !== null && !isValidDeposit(depositCents, amountCents)) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.invalidDeposit(ref) };
+  }
+
+  const tr = await getTransferRequest(tenantId, row.transferRequestId);
+  if (!tr) return { outcome: "refused", message: FOUNDER_TEXTS.notFound };
+  if (!(await customerAllowed(tenantId, tr.clientId))) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.notATestPhone(ref) };
+  }
+
+  const claimed = await repo.transitionApprovalRequest(tenantId, row.id, ["info"], "superseded", {
+    decidedAt: new Date(),
+  });
+  if (!claimed) {
+    const existingRound = await findOpenQuoteRound(tenantId, tr.id);
+    return existingRound
+      ? { outcome: "already", message: FOUNDER_TEXTS.manualPriceAlreadyCreated(ref), newRoundId: existingRound.id }
+      : { outcome: "refused", message: FOUNDER_TEXTS.manualPriceNoLongerNeeded(ref, tr.status) };
+  }
+
+  const moved = await enterManualPriceForTransferRequest(tenantId, tr.id, amountCents, enteredByProfileId);
+  if (!moved) {
+    const current = await getTransferRequest(tenantId, tr.id);
+    return { outcome: "refused", message: FOUNDER_TEXTS.manualPriceNoLongerNeeded(ref, current?.status ?? "non trovato") };
+  }
+
+  const round =
+    (await repo.insertApprovalRequestOnce({
+      tenantId,
+      transferRequestId: tr.id,
+      clientId: tr.clientId,
+      kind: "quote_ready",
+      round: 1,
+      status: "awaiting_decision",
+      proposedAmountCents: amountCents,
+      proposedDepositCents: depositCents,
+    })) ?? (await findOpenQuoteRound(tenantId, tr.id));
+  if (!round) {
+    return { outcome: "error", message: FOUNDER_TEXTS.error(ref, "impossibile creare il preventivo") };
+  }
+
+  return {
+    outcome: "done",
+    message: FOUNDER_TEXTS.manualPriceCreated(ref, formatAmountForCustomer(amountCents, tr.currency, "it")),
+    newRoundId: round.id,
+  };
+}
+
+async function findOpenQuoteRound(tenantId: string, transferRequestId: string): Promise<QuoteApprovalRequest | null> {
+  const rows = await repo.listApprovalRequestsByStatus(tenantId, ["awaiting_decision", "awaiting_price", "processing"]);
+  return rows.find((r) => r.transferRequestId === transferRequestId && r.kind === "quote_ready") ?? null;
 }
 
 // ── Admin panel queries ──────────────────────────────────────────────────
