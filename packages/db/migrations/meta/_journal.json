@@ -148,6 +148,13 @@
       "when": 1790265600000,
       "tag": "0028_quote_approval",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790308800000,
+      "tag": "0029_sondrio_malpensa_fixed_fare",
+      "breakpoints": true
     }
   ]
 }

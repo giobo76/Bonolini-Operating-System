@@ -1,4 +1,5 @@
 import { DEFAULT_PRICING_RATES } from "./schema";
+import { isMalpensa, isSondrioCity } from "../locations";
 import type {
   CustomerType,
   HospitalWaitingInfo,
@@ -398,6 +399,34 @@ export function calculatePrice(input: PricingInput, rates: PricingRates | null =
       return buildManualRequired(input.customerType, "distance_not_provided", hospitalWaiting, rates.minimumFareCents);
     }
     return buildKmResult(input.customerType, input.distanceKm, "como_tirano_km_italian", hospitalWaiting, rates);
+  }
+
+  // Sondrio city <-> Malpensa, both directions, italian customers only
+  // (founder decision, 2026-09-25, Business Rule
+  // pricing.fixed_fare.sondrio_malpensa_italian). Checked before the airport
+  // table below, which only looks at the destination and so never matched
+  // Malpensa -> Sondrio. Foreign customers and other Valtellina towns are
+  // deliberately not covered and fall through unchanged. No effective rule
+  // (null) = no fare: fall through too.
+  const sondrioMalpensa = rates.sondrioMalpensaItalian;
+  if (
+    sondrioMalpensa &&
+    input.customerType === "italian" &&
+    ((isSondrioCity(input.pickup) && isMalpensa(input.destination)) ||
+      (isMalpensa(input.pickup) && isSondrioCity(input.destination)))
+  ) {
+    if (input.passengers > 8) {
+      return buildManualRequired(input.customerType, "passengers_above_supported_fare_band", hospitalWaiting, rates.minimumFareCents);
+    }
+    const fareCents =
+      input.passengers <= 4 ? sondrioMalpensa.upTo4PassengersCents : sondrioMalpensa.from5To8PassengersCents;
+    return buildFixedResult(
+      input.customerType,
+      fareCents,
+      "fixed_sondrio_malpensa_italian",
+      hospitalWaiting,
+      rates.minimumFareCents,
+    );
   }
 
   const fixedCategory = findFixedFareCategory(input.destination);

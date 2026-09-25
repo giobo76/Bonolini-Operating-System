@@ -186,3 +186,59 @@ describe("calculateRoute", () => {
     expect(fetch).toBe(fetchMock);
   });
 });
+
+// Production, 2026-09-25: Malpensa -> Sondrio asked Google for a
+// zero-length Sondrio -> Sondrio leg and failed ("incomplete leg").
+describe("calculateGenericRouteRoundTrip — base Sondrio as pickup or destination", () => {
+  it("destination Sondrio: Sondrio -> pickup -> Sondrio, never a Sondrio -> Sondrio leg", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(computeRoutesResponse([{ km: 150, minutes: 130 }, { km: 150, minutes: 130 }])));
+
+    const result = await calculateGenericRouteRoundTrip("Malpensa", "Sondrio");
+
+    expect(result.status).toBe("ok");
+    expect(result.distanceKm).toBe(300);
+    expect(result.legs.map((leg) => `${leg.origin}->${leg.destination}`)).toEqual(["Sondrio->Malpensa", "Malpensa->Sondrio"]);
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
+    expect(body.origin.address).toBe("Sondrio, Italia");
+    expect(body.intermediates).toEqual([{ address: "Malpensa, Italia" }]);
+    expect(body.destination.address).toBe("Sondrio, Italia");
+  });
+
+  it("X -> Sondrio costs the same distance as Sondrio -> X (same two legs)", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(computeRoutesResponse([{ km: 150, minutes: 130 }, { km: 150, minutes: 130 }])),
+    );
+
+    const outbound = await calculateGenericRouteRoundTrip("Sondrio", "Malpensa");
+    const inbound = await calculateGenericRouteRoundTrip("Malpensa", "Sondrio centro");
+
+    expect(inbound.distanceKm).toBe(outbound.distanceKm);
+  });
+
+  it("pickup Sondrio: unchanged, pickup -> destination -> Sondrio", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(computeRoutesResponse([{ km: 60, minutes: 70 }, { km: 60, minutes: 70 }])));
+
+    const result = await calculateGenericRouteRoundTrip("Sondrio", "Livigno");
+
+    expect(result.legs.map((leg) => `${leg.origin}->${leg.destination}`)).toEqual(["Sondrio->Livigno", "Livigno->Sondrio"]);
+  });
+
+  it("neither is Sondrio: unchanged, pickup -> destination -> Sondrio", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(computeRoutesResponse([{ km: 30, minutes: 35 }, { km: 70, minutes: 80 }])),
+    );
+
+    const result = await calculateGenericRouteRoundTrip("Morbegno", "Livigno");
+
+    expect(result.legs.map((leg) => `${leg.origin}->${leg.destination}`)).toEqual(["Morbegno->Livigno", "Livigno->Sondrio"]);
+  });
+
+  it("both Sondrio: invalid input, no call to Google, never a guessed distance", async () => {
+    const result = await calculateGenericRouteRoundTrip("Sondrio", "Stazione di Sondrio");
+
+    expect(result.status).toBe("error");
+    expect(result.error?.code).toBe("invalid_input");
+    expect(result.distanceKm).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

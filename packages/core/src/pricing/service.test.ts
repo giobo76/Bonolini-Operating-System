@@ -482,3 +482,69 @@ describe("calculatePrice — rates parameter (Phase 2: Business Rules)", () => {
     expect(result.hospitalWaiting.ratePerHourCents).toBeNull();
   });
 });
+
+// Founder decision 2026-09-25 (production test, case B): Sondrio city <->
+// Malpensa, both directions, italian customers, from the Business Rule
+// pricing.fixed_fare.sondrio_malpensa_italian.
+describe("calculatePrice — Sondrio <-> Malpensa, italian customers (Business Rule)", () => {
+  const RATES: PricingRates = {
+    ...DEFAULT_PRICING_RATES,
+    sondrioMalpensaItalian: { upTo4PassengersCents: 25000, from5To8PassengersCents: 35000 },
+  };
+
+  it.each([
+    ["Sondrio", "Malpensa"],
+    ["Malpensa", "Sondrio"],
+    ["Aeroporto di Malpensa", "Sondrio centro"],
+    ["Stazione di Sondrio", "MXP"],
+  ])("%s -> %s, 1-4 passengers: 250 EUR, no distance needed", (pickup, destination) => {
+    for (const passengers of [1, 2, 3, 4]) {
+      const result = calculatePrice(input({ pickup, destination, passengers }), RATES);
+      expect(result.pricingStatus).toBe("fixed");
+      expect(result.finalAmountCents).toBe(25000);
+      expect(result.pricingBreakdown.matchedRule).toBe("fixed_sondrio_malpensa_italian");
+    }
+  });
+
+  it("5-8 passengers: 350 EUR, both directions", () => {
+    for (const passengers of [5, 6, 7, 8]) {
+      expect(calculatePrice(input({ pickup: "Malpensa", destination: "Sondrio", passengers }), RATES).finalAmountCents).toBe(35000);
+      expect(calculatePrice(input({ pickup: "Sondrio", destination: "Malpensa", passengers }), RATES).finalAmountCents).toBe(35000);
+    }
+  });
+
+  it("more than 8 passengers: manual price", () => {
+    const result = calculatePrice(input({ pickup: "Malpensa", destination: "Sondrio", passengers: 9 }), RATES);
+    expect(result.pricingStatus).toBe("manual_required");
+    expect(result.manualRequiredReason).toBe("passengers_above_supported_fare_band");
+  });
+
+  it("another Valtellina town is not covered: Morbegno -> Malpensa keeps the old airport-table behavior", () => {
+    const withRule = calculatePrice(input({ pickup: "Morbegno", destination: "Malpensa", passengers: 2 }), RATES);
+    const withoutRule = calculatePrice(input({ pickup: "Morbegno", destination: "Malpensa", passengers: 2 }));
+    expect(withRule).toEqual(withoutRule);
+    expect(withRule.pricingBreakdown.matchedRule).not.toBe("fixed_sondrio_malpensa_italian");
+  });
+
+  it("Malpensa -> another town (Tirano is not Sondrio): no Sondrio fare", () => {
+    const result = calculatePrice(input({ pickup: "Malpensa", destination: "Tirano", passengers: 2 }), RATES);
+    expect(result.pricingBreakdown.matchedRule).not.toBe("fixed_sondrio_malpensa_italian");
+  });
+
+  it("foreign customers are unchanged: same result with or without the rule", () => {
+    for (const [pickup, destination] of [
+      ["Sondrio", "Malpensa"],
+      ["Malpensa", "Sondrio"],
+    ]) {
+      const base = input({ customerType: "foreign", pickup, destination, passengers: 2, distanceKm: 300 });
+      expect(calculatePrice(base, RATES)).toEqual(calculatePrice(base));
+    }
+  });
+
+  it("without an effective rule (null) the route keeps its previous pricing", () => {
+    const sondrioToMalpensa = calculatePrice(input({ pickup: "Sondrio", destination: "Malpensa", passengers: 5 }));
+    expect(sondrioToMalpensa.pricingBreakdown.matchedRule).toBe("fixed_airport_malpensa");
+    const malpensaToSondrio = calculatePrice(input({ pickup: "Malpensa", destination: "Sondrio", passengers: 2 }));
+    expect(malpensaToSondrio.manualRequiredReason).toBe("distance_not_provided");
+  });
+});

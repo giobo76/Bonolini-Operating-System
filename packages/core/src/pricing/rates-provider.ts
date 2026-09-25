@@ -8,6 +8,7 @@ import {
   fixedFareAirportRuleContentSchema,
   foreignFixedTiranoRuleContentSchema,
   hospitalWaitingItalianRuleContentSchema,
+  sondrioMalpensaItalianRuleContentSchema,
   DEFAULT_PRICING_RATES,
   type PricingRates,
 } from "./schema";
@@ -144,7 +145,15 @@ async function resolveRuleSlot<T>(
 // normal manual_required PricingResult, same fail-soft discipline as every
 // Claude-facing call elsewhere in this codebase.
 export async function resolvePricingRates(tenantId: string): Promise<PricingRatesResolution> {
-  const [minimumFare, tollRate, distanceRate, fixedFareAirport, foreignFixedTirano, hospitalWaitingItalian] = await Promise.all([
+  const [
+    minimumFare,
+    tollRate,
+    distanceRate,
+    fixedFareAirport,
+    foreignFixedTirano,
+    hospitalWaitingItalian,
+    sondrioMalpensaItalian,
+  ] = await Promise.all([
     resolveRuleSlot(tenantId, pricingRuleKeys.minimumFare, minimumFareRuleContentSchema, {
       minimumFareCents: DEFAULT_PRICING_RATES.minimumFareCents,
     }),
@@ -163,9 +172,25 @@ export async function resolvePricingRates(tenantId: string): Promise<PricingRate
       hospitalWaitingItalianRuleContentSchema,
       DEFAULT_PRICING_RATES.hospitalWaitingItalian,
     ),
+    // Fallback is null, not an amount: without an effective version this
+    // fare does not exist and the route keeps its previous pricing.
+    resolveRuleSlot(
+      tenantId,
+      pricingRuleKeys.sondrioMalpensaItalian,
+      sondrioMalpensaItalianRuleContentSchema.nullable(),
+      null,
+    ),
   ]);
 
-  const slots = { minimumFare, tollRate, distanceRate, fixedFareAirport, foreignFixedTirano, hospitalWaitingItalian };
+  const slots = {
+    minimumFare,
+    tollRate,
+    distanceRate,
+    fixedFareAirport,
+    foreignFixedTirano,
+    hospitalWaitingItalian,
+    sondrioMalpensaItalian,
+  };
   const invalidKeys = Object.entries(slots)
     .filter(([, slot]) => slot === null)
     .map(([name]) => name);
@@ -191,6 +216,7 @@ export async function resolvePricingRates(tenantId: string): Promise<PricingRate
     fixedFareAirport: resolved.fixedFareAirport.value,
     foreignFixedTirano: resolved.foreignFixedTirano.value,
     hospitalWaitingItalian: resolved.hospitalWaitingItalian.value,
+    sondrioMalpensaItalian: resolved.sondrioMalpensaItalian.value,
   };
 
   const provenance = Object.values(resolved).map((slot) => slot.provenance);

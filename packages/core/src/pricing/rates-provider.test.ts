@@ -161,16 +161,40 @@ async function seedAllDefaultRules(tenantId: string) {
   await seedEffectiveRule(tenantId, pricingRuleKeys.hospitalWaitingItalian, DEFAULT_PRICING_RATES.hospitalWaitingItalian);
 }
 
-describe("resolvePricingRates — all six rules present and effective", () => {
-  it("resolves rates identical to DEFAULT_PRICING_RATES when every rule's effective content matches the default values, all sourced from business_rule", async () => {
+const SONDRIO_MALPENSA = { upTo4PassengersCents: 25000, from5To8PassengersCents: 35000 };
+
+describe("resolvePricingRates — all seven rules present and effective", () => {
+  it("resolves rates identical to DEFAULT_PRICING_RATES (plus the Sondrio-Malpensa fare) when every rule is effective, all sourced from business_rule", async () => {
+    await seedAllDefaultRules("tenant-1");
+    await seedEffectiveRule("tenant-1", pricingRuleKeys.sondrioMalpensaItalian, SONDRIO_MALPENSA);
+
+    const resolution = await resolvePricingRates("tenant-1");
+
+    expect(resolution.rates).toEqual({ ...DEFAULT_PRICING_RATES, sondrioMalpensaItalian: SONDRIO_MALPENSA });
+    expect(resolution.usedFallback).toBe(false);
+    expect(resolution.provenance).toHaveLength(7);
+    expect(resolution.provenance.every((p) => p.source === "business_rule")).toBe(true);
+  });
+
+  it("without the Sondrio-Malpensa rule the fare is null (no amount in code) and only that slot is a fallback", async () => {
     await seedAllDefaultRules("tenant-1");
 
     const resolution = await resolvePricingRates("tenant-1");
 
+    expect(resolution.rates?.sondrioMalpensaItalian).toBeNull();
     expect(resolution.rates).toEqual(DEFAULT_PRICING_RATES);
-    expect(resolution.usedFallback).toBe(false);
-    expect(resolution.provenance).toHaveLength(6);
-    expect(resolution.provenance.every((p) => p.source === "business_rule")).toBe(true);
+    const fallbacks = resolution.provenance.filter((p) => p.source === "fallback_default");
+    expect(fallbacks.map((p) => p.ruleKey)).toEqual([pricingRuleKeys.sondrioMalpensaItalian]);
+  });
+
+  it("an invalid Sondrio-Malpensa rule refuses all rates rather than guessing", async () => {
+    await seedAllDefaultRules("tenant-1");
+    await seedEffectiveRule("tenant-1", pricingRuleKeys.sondrioMalpensaItalian, { upTo4PassengersCents: -1 });
+
+    const resolution = await resolvePricingRates("tenant-1");
+
+    expect(resolution.rates).toBeNull();
+    expect(resolution.invalidReason).toContain("sondrioMalpensaItalian");
   });
 
   it("resolves a genuinely different price-affecting value when the effective rule content differs from the default", async () => {

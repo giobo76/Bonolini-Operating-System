@@ -24,6 +24,7 @@ Every constant here is recovered verbatim from `CChiefGrowthAI/ai/booking_bot/pr
 | Toll estimate | 0.08€/km | `pricing_engine.py:42` |
 | Minimum fare | €50 | Founder decision — not in CChiefGrowthAI |
 | Hospital (italian) | 1h free, then 40€/h | `pricing_engine.py:32, 196-200` |
+| Sondrio city ↔ Malpensa, italian | 250€ (1-4 pax), 350€ (5-8), >8 manual — both directions | Founder decision 2026-09-25 — Business Rule only, no value in code |
 
 ## Founder decisions applied in this version
 
@@ -57,6 +58,9 @@ Every tariff *value* in the table above (not the route/destination *classificati
 | `pricing.fixed_fare.airport` | `FIXED_FARE_TABLE_CENTS` |
 | `pricing.fixed_fare.foreign_tirano` | `FOREIGN_FIXED_TIRANO_FARE_CENTS` |
 | `pricing.hospital_waiting.italian` | the italian hospital-waiting free-minutes/rate |
+| `pricing.fixed_fare.sondrio_malpensa_italian` | nothing — new fare (2026-09-25), seeded by migration 0029, **no default in code**: without an effective version `sondrioMalpensaItalian` is `null` and the route keeps its previous pricing |
+
+**Sondrio city ↔ Malpensa (italian).** Checked before the airport table, in both directions, only when the customer is italian and the place is Sondrio city itself (`locations.ts::isSondrioCity` — never another Valtellina town) and Malpensa/MXP. The airport table below only looks at the *destination*, which is why Malpensa → Sondrio never got a fixed fare before. Foreign customers are deliberately unchanged: Sondrio → Malpensa still gets the airport table's Malpensa tiers; Malpensa → Sondrio is priced per km on the round trip.
 
 **`calculatePrice(input, rates)` is still pure and synchronous** — `rates` is a plain value the caller resolved beforehand, never fetched inside `calculatePrice()` itself. The second argument defaults to `DEFAULT_PRICING_RATES` (the exact same numbers every constant above used to hold), which is *why* every pre-Phase-2 test/caller that never passed a `rates` argument at all keeps computing the identical price — not "an equivalent one," the identical one, by construction.
 
