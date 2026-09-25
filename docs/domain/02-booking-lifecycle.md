@@ -2,7 +2,7 @@
 
 Owned by the `bookings` module. This refines the state machine already referenced in `packages/core/src/bookings/README.md` (`draft → confirmed → assigned → in_progress → completed → cancelled`) with the detail needed to actually implement it.
 
-> **Implemented today (2026-09-24, migration 0029):** only `pending_deposit → confirmed → completed`, plus `cancelled` from `pending_deposit` or `confirmed`.
+> **Implemented today (2026-09-24, migration 0030):** only `pending_deposit → confirmed → completed`, plus `cancelled` from `pending_deposit` or `confirmed`.
 > - Approving a quote (Approva in the admin panel, or the admin `accept`/`modifyPrice` API) creates the booking at **`pending_deposit`**. It carries the deposit requested from the customer: by default 50% of the total, rounded to the nearest 10 € with halves rounded up; the founder can override it in the panel's Modifica. The customer pays the balance to the driver on the day of service.
 > - The booking becomes **`confirmed`** only when the founder records the deposit: "Acconto ricevuto" in the admin panel (Preventivi in attesa, or the customer page). Only then is `booking.confirmed` emitted and the deal moved to `confirmed`, and the customer gets an automatic WhatsApp confirmation.
 > - A `pending_deposit` booking is not a conversion: every KPI counts only `confirmed`/`completed`. Bookings created from Google Calendar sync still start at `confirmed`.
