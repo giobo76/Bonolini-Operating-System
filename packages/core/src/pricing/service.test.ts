@@ -544,6 +544,18 @@ describe("calculatePrice — Sondrio <-> Malpensa (Business Rule)", () => {
     }
   });
 
+  it("full Sondrio addresses get the Sondrio fare; \"Via Sondrio, Milano\" does not", () => {
+    for (const address of ["Via Roma 1, Sondrio", "Piazza Garibaldi, Sondrio (SO)", "Via Roma 1, 23100 Sondrio"]) {
+      const outbound = calculatePrice(input({ pickup: address, destination: "Malpensa", passengers: 5 }), RATES);
+      const inbound = calculatePrice(input({ pickup: "Malpensa", destination: address, passengers: 5 }), RATES);
+      expect(outbound.pricingBreakdown.matchedRule).toBe("fixed_sondrio_malpensa_italian");
+      expect(inbound.pricingBreakdown.matchedRule).toBe("fixed_sondrio_malpensa_italian");
+      expect(inbound.finalAmountCents).toBe(27000);
+    }
+    const milano = calculatePrice(input({ pickup: "Malpensa", destination: "Via Sondrio, Milano", passengers: 5 }), RATES);
+    expect(milano.pricingBreakdown.matchedRule).not.toBe("fixed_sondrio_malpensa_italian");
+  });
+
   it("another Valtellina town is not covered: Morbegno -> Malpensa is priced exactly as without the rule", () => {
     const withRule = calculatePrice(input({ pickup: "Morbegno", destination: "Malpensa", passengers: 2 }), RATES);
     const withoutRule = calculatePrice(input({ pickup: "Morbegno", destination: "Malpensa", passengers: 2 }));

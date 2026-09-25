@@ -233,6 +233,25 @@ describe("calculateGenericRouteRoundTrip — base Sondrio as pickup or destinati
     expect(result.legs.map((leg) => `${leg.origin}->${leg.destination}`)).toEqual(["Morbegno->Livigno", "Livigno->Sondrio"]);
   });
 
+  it("destination a full Sondrio address: treated as the base, no Sondrio -> Sondrio leg", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(computeRoutesResponse([{ km: 150, minutes: 130 }, { km: 150, minutes: 130 }])));
+
+    const result = await calculateGenericRouteRoundTrip("Malpensa", "Via Roma 1, 23100 Sondrio");
+
+    expect(result.legs.map((leg) => `${leg.origin}->${leg.destination}`)).toEqual(["Sondrio->Malpensa", "Malpensa->Sondrio"]);
+  });
+
+  it("\"Via Sondrio, Milano\" is Milano, not the base", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(computeRoutesResponse([{ km: 5, minutes: 15 }, { km: 140, minutes: 120 }])));
+
+    const result = await calculateGenericRouteRoundTrip("Linate", "Via Sondrio, Milano");
+
+    expect(result.legs.map((leg) => `${leg.origin}->${leg.destination}`)).toEqual([
+      "Linate->Via Sondrio, Milano",
+      "Via Sondrio, Milano->Sondrio",
+    ]);
+  });
+
   it("both Sondrio: invalid input, no call to Google, never a guessed distance", async () => {
     const result = await calculateGenericRouteRoundTrip("Sondrio", "Stazione di Sondrio");
 
