@@ -75,6 +75,12 @@ any customer send that fails ─▶ email "INVIO AL CLIENTE NON RIUSCITO" (once)
 
 **Confirmation to the customer** (founder decision, 2026-09-24): sent automatically after "Acconto ricevuto" (foreign) or "Confermato dal cliente" (italian, 2026-09-26), in IT/EN with the booking's date and time. `confirmDepositReceived` / `confirmCustomerConfirmed` are shared by the panel (the list and the customer page) and the dormant WhatsApp button. It follows the same switches, 24h window and double-send protection as every other message (idempotency key `booking_confirmation:<booking id>`). If the send fails, the page says so and an alert email goes out.
 
+**Disponibilità** (founder decisions 2026-09-26): every time a PREVENTIVO PRONTO round is created or sent (first notification, Modifica, Crea preventivo, re-send), `availability-check.ts` compares the request's busy window with the BOS bookings and the Google Calendar events around it (see `availability/README.md`) and stores the result on the round (`quote_approval_requests.availability_check`, migration 0032). The email and the panel show:
+- "⚠️ SOVRAPPOSIZIONE CON: …" — one line per overlapping booking or event, with its details;
+- "Disponibilità: libera (controllate N prenotazioni e il calendario)" when nothing overlaps;
+- "Disponibilità: NON verificata (motivo)" when the check could not be completed (calendar not connected or unreadable, date/time unreadable, round created before the check existed), together with any overlap already found.
+It never blocks or refuses: Approva / Modifica / Rifiuta are unchanged. At Approva the request's busy window is copied onto the booking.
+
 **Texts:** the founder's final wording (2026-09-24), in `communications/content.ts` and tested verbatim:
 - the price lines of the quote: total, deposit to confirm the booking, balance "preferibilmente in contanti", and the line announcing the deposit payment link;
 - the confirmation message: the balance line, and "driver's name and contact the day before".

@@ -28,7 +28,7 @@ Until 2026-09-25 this module was read-only by design. The founder then asked for
 
 - Title `TRANSFER | Mario Rossi | Malpensa → Sondrio | €390` — with the price: the calendar is seen by the founder only.
 - Description: customer, phone, route, pickup date and time, passengers, children, luggage, flight/train/hotel when known, total price, deposit received, balance to collect. For an italian customer: "Acconto: nessuno (cliente italiano)" and "Da incassare: <total>".
-- Time = the whole time the founder is busy: the loop Sondrio → pickup → destination → Sondrio, from Google Maps (`maps-distance`'s `calculateBusyLoopFromBase`). The event starts when he has to leave Sondrio (pickup time minus the Sondrio → pickup leg) and lasts the whole loop, rounded outward to 5 minutes.
+- Time = the whole time the founder is busy: the booking's busy window (`availability`'s busy window, stored on the booking at Approva — the same one the overlap check used; computed on the spot for a booking that has none): the loop Sondrio → pickup → destination → Sondrio from Google Maps, starting when he has to leave Sondrio, rounded outward to 5 minutes.
 - Minimum durations per route come from the versioned Business Rule `calendar.minimum_event_duration` (category `other`; seeded by migration `0031`: Malpensa, either direction, 5 hours). New minimums for other routes are a new rule version, not code.
 - If Google Maps gives no duration: pickup time + 2 hours (never less than the route minimum) and "Durata da verificare" in the description. Same note if the minimum-duration rule is present but invalid.
 
@@ -54,6 +54,10 @@ The suggested format (`TRANSFER | Mario Rossi | Milano → Tirano | €390`) is 
 ## The real, honest limitation: a client needs a phone
 
 `clients.phone` is `NOT NULL` and unique-per-tenant (`clients_tenant_normalized_phone_idx`). If an event's description carries no extractable phone line and no existing booking already links this event to a client, this module **cannot** create a valid client — and therefore cannot create a booking. That event is counted as `eventsSkippedNoClientData`, never silently dropped, never given an invented phone number. The practical implication: a calendar event needs at least a `Phone: ...` line (and, for a genuinely new customer, a name in the pipe-delimited format) to auto-create a booking. This is a deliberate, documented constraint, not an oversight.
+
+## Reading events for the overlap check
+
+`listCalendarBusyEvents` (read-only, `events.list` with `timeMin`/`timeMax`, `singleEvents`) returns the events of the selected calendar overlapping a time range, for the overlap check in PREVENTIVO PRONTO. It skips cancelled events, events marked "Libero" (transparent) and events created by BOS. All-day events count as the whole day in Europe/Rome. No calendar selected, or Google unreachable, is reported as such — never as "no events".
 
 ## Idempotency
 

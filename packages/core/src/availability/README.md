@@ -1,14 +1,28 @@
 # availability — vehicle readiness, never a calendar itself
 
-**Status:** Core v1 — pure arithmetic and a feasibility decision. No Google Calendar, no Google Maps, no database, not wired into any workflow yet.
+**Status:** Core v1 (pure feasibility arithmetic, below) plus, since 2026-09-26, the **busy window** of a service and the **overlap check** shown in PREVENTIVO PRONTO — see "Busy window and overlap check" right below. The v1 feasibility functions are unchanged and still not wired into any workflow.
 
 **Owns:** nothing persistent — same discipline as `maps-distance`. Every export is a pure, synchronous function; same input always produces the same output, no side effects.
 
-**Exposes:** `isServiceFeasible`, `estimateVehicleFreeAt`, `calculateServiceEndAt`, `calculateVehicleReadyAt`, `determineRelocationOrigin`, plus every type/constant in `schema.ts` (`BASE_LOCATION`, `OPERATIONAL_BUFFER_MINUTES`).
+**Exposes:** `isServiceFeasible`, `estimateVehicleFreeAt`, `calculateServiceEndAt`, `calculateVehicleReadyAt`, `determineRelocationOrigin`, plus every type/constant in `schema.ts` (`BASE_LOCATION`, `OPERATIONAL_BUFFER_MINUTES`); the busy-window functions (`computeBusyWindow`, `findRouteMinimum`, `computeServiceBusyWindow`, the stored-window (de)serializers) and `findOverlaps`.
 
 **Emits / Listens to:** — (pure module, not wired into any event flow or the WhatsApp pipeline).
 
 See [ADR 0002](../../../../docs/adr/0002-modular-monolith-not-microservices.md) for the module boundary rules this and every other domain module follows.
+
+## Busy window and overlap check (founder decisions 2026-09-25/26)
+
+Before this, "Disponibilità: compatibile con gli altri servizi" was printed for every request: the only caller always passed "no previous service", so nothing was ever compared. Now:
+
+**Busy window of a service** (`busy-window.ts` pure, `service-window.ts` with I/O): the whole time the founder is busy, the loop Sondrio → pickup → destination → Sondrio from Google Maps (`maps-distance`'s `calculateBusyLoopFromBase`), starting when he leaves Sondrio, rounded outward to 5 minutes. Route minimums come from the versioned Business Rule `calendar.minimum_event_duration` (migration 0031: Malpensa, both directions, 5 hours). Without Maps: pickup time + 2 hours (never less than the route minimum), flagged "da verificare". No extra buffer: the loop already includes the return to Sondrio. The pickup time is the customer's wall clock in Europe/Rome (`dates.ts`'s `romeWallClockToUtc`), never the server's timezone. The same function feeds the Google Calendar event, so the calendar and the check always agree.
+
+**Where it is stored.** Computed for a request when its PREVENTIVO PRONTO goes out, and copied on the booking at Approva (`bookings.busy_window`, migration 0032). A booking created before that has none: it counts as pickup time + 2 hours, "da verificare".
+
+**Overlap check** (`findOverlaps`, pure; gathered by quote-approval's `availability-check.ts`): the new request's busy window is compared with
+- BOS bookings `pending_deposit`, `pending_confirmation` and `confirmed` around it (services across midnight included);
+- the events of the Google Calendar selected in the panel, read live (read-only): personal and all-day events too; events marked "Libero" and events created by BOS are skipped (the booking itself is compared). A booking imported from Calendar is compared through its event, never twice.
+
+Two windows overlap when one starts before the other ends. Back-to-back services (drop at Malpensa, next pickup at Malpensa) are flagged too (founder decision): the founder decides, BOS never blocks or refuses anything.
 
 ## Source of truth
 
@@ -76,5 +90,7 @@ No `if` on distance, on airport, on "is this a long trip" — every one of the f
 `ServiceFeasibilityResult.reason` is a closed union (`"no_previous_service" | "within_operational_margin" | "insufficient_operational_margin"`), not a string an admin (or future UI) has to parse. Every duration that went into the decision (`customerTripDurationMinutes`, `vehicleRelocationDurationMinutes`, `operationalBufferMinutes`) is reported alongside `vehicleReadyAt`/`marginMinutes`, so the *why* is always reconstructable from the result object alone.
 
 ## Not built yet (explicitly out of scope this milestone)
+
+(Since 2026-09-26 the overlap check above calls Maps, the database and Calendar through its own files; the v1 feasibility functions below stay pure.)
 
 Google Calendar (reading real events, OAuth/service-account decision), Google Maps calls (the caller's responsibility, not built here), any connection to `transfer_requests`/`bookings`/`quotes`, any database access, any tRPC router, any WhatsApp/email wiring, any admin notification, any UI. See the founder-facing availability audit for the proposed order these arrive in.
