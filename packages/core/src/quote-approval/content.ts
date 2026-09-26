@@ -1,4 +1,6 @@
 import type { TransferRequest, Client } from "@bos/db";
+import { formatRomeDayMonth, formatRomeTime } from "../dates";
+import type { AvailabilityCheck, OverlapEntry } from "./availability-check";
 import { formatAmountForCustomer, formatDateForCustomer } from "../communications";
 
 // Founder-facing texts (Italian, fixed wording) and the parsing of the
@@ -112,13 +114,59 @@ function childrenLine(tr: TransferRequest): string {
   return tr.childrenAges ? `${tr.children} (età: ${tr.childrenAges})` : `${tr.children} (età non indicata)`;
 }
 
-// The stored availability result never compared the request with other
-// bookings or with the calendar (the pipeline always passes "no previous
-// service", so it always came out "feasible"): it must not be shown as a
-// check (founder decision 2026-09-26). Until the real overlap check exists,
-// the line always says NOT verified.
-const AVAILABILITY_NOT_VERIFIED =
-  "NON verificata (il BOS non controlla ancora le sovrapposizioni con gli altri servizi e con il calendario)";
+// "Disponibilità" = the overlap check stored on the round
+// (availability-check.ts, founder decisions 2026-09-26). No check on the
+// round (created before it existed) = NOT verified, never "compatibile".
+const BOOKING_STATUS_LABELS: Record<string, string> = {
+  confirmed: "prenotazione confermata",
+  pending_deposit: "prenotazione in attesa di acconto",
+  pending_confirmation: "prenotazione in attesa di conferma",
+};
+
+function romeSpan(startIso: string, endIso: string): string {
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+  const sameDay = formatRomeDayMonth(start) === formatRomeDayMonth(end);
+  return sameDay
+    ? `${formatRomeTime(start)}–${formatRomeTime(end)}`
+    : `${formatRomeDayMonth(start)} ${formatRomeTime(start)} – ${formatRomeDayMonth(end)} ${formatRomeTime(end)}`;
+}
+
+function describeOverlap(entry: OverlapEntry): string {
+  const toVerify = entry.durationToVerify ? ", durata da verificare" : "";
+  if (entry.kind === "calendar_event") {
+    const when = entry.allDay
+      ? `${formatRomeDayMonth(new Date(entry.startAt))} tutto il giorno`
+      : `${formatRomeDayMonth(new Date(entry.startAt))} ${romeSpan(entry.startAt, entry.endAt)}`;
+    return `evento Calendar «${entry.summary ?? "senza titolo"}», ${when}`;
+  }
+  const pickupAt = entry.pickupAt ? new Date(entry.pickupAt) : null;
+  const when = pickupAt ? `${formatRomeDayMonth(pickupAt)} ore ${formatRomeTime(pickupAt)}` : "data ?";
+  const status = BOOKING_STATUS_LABELS[entry.bookingStatus ?? ""] ?? `prenotazione (${entry.bookingStatus ?? "?"})`;
+  return [
+    entry.clientName ?? "cliente",
+    `${entry.pickup ?? "?"} → ${entry.destination ?? "?"}`,
+    `${when} (occupato ${romeSpan(entry.startAt, entry.endAt)}${toVerify})`,
+    `${status}${entry.ref ? ` ${entry.ref}` : ""}`,
+  ].join(", ");
+}
+
+export function availabilityLines(check: AvailabilityCheck | null): string[] {
+  if (!check) return ["Disponibilità: NON verificata (controllo non eseguito per questo preventivo)"];
+  const lines: string[] = [];
+  if (check.candidate) {
+    const toVerify = check.candidate.durationToVerify ? " (durata da verificare)" : "";
+    lines.push(`Tempo occupato per questo servizio: ${romeSpan(check.candidate.startAt, check.candidate.endAt)}${toVerify}`);
+  }
+  for (const entry of check.overlaps) lines.push(`⚠️ SOVRAPPOSIZIONE CON: ${describeOverlap(entry)}`);
+  if (check.notVerifiedReasons.length > 0) {
+    lines.push(`Disponibilità: NON verificata (${check.notVerifiedReasons.join("; ")})`);
+  } else if (check.overlaps.length === 0) {
+    const n = check.bookingsChecked;
+    lines.push(`Disponibilità: libera (controllat${n === 1 ? "a 1 prenotazione" : `e ${n} prenotazioni`} e il calendario)`);
+  }
+  return lines;
+}
 
 function pricingLabel(tr: TransferRequest): string {
   if (tr.pricingStatus === "fixed") return "tariffa fissa";
@@ -154,6 +202,7 @@ export function buildQuoteReadyText(input: {
   depositCents: number | null;
   depositIsCustom: boolean;
   customerMessageBody: string;
+  availabilityCheck: AvailabilityCheck | null;
 }): QuoteReadyText {
   const { tr, client, proposedAmountCents } = input;
   const total = proposedAmountCents ?? tr.calculatedAmountCents ?? 0;
@@ -184,7 +233,7 @@ export function buildQuoteReadyText(input: {
       : `Acconto: ${formatEuro(input.depositCents, tr.currency)}${
           input.depositIsCustom ? " (scelto da te)" : " (50%, arrotondato)"
         } — saldo all'autista ${formatEuro(total - input.depositCents, tr.currency)}`,
-    `Disponibilità: ${AVAILABILITY_NOT_VERIFIED}`,
+    ...availabilityLines(input.availabilityCheck),
   ].join("\n");
 
   return {

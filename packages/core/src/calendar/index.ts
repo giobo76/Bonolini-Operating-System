@@ -6,6 +6,12 @@ export {
   syncCalendarEvents,
 } from "./service";
 export {
+  listCalendarBusyEvents,
+  toCalendarBusyEvent,
+  type CalendarBusyEvent,
+  type CalendarBusyEventsResult,
+} from "./busy-events";
+export {
   createCalendarEventForBooking,
   markCalendarEventCancelledForBooking,
   type CreateBookingEventOutcome,
@@ -16,8 +22,6 @@ export {
   isRecognizableService,
   bosEventIdForBooking,
   isBosEventId,
-  MINIMUM_EVENT_DURATION_RULE_KEY,
-  minimumEventDurationRuleContentSchema,
 } from "./schema";
 export type {
   AvailableCalendar,

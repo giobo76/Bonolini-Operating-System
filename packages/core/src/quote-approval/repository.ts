@@ -199,6 +199,16 @@ export async function claimNotification(tenantId: string, id: string): Promise<b
   return rows.length > 0;
 }
 
+export async function setAvailabilityCheck(tenantId: string, id: string, check: unknown): Promise<QuoteApprovalRequest | null> {
+  const db = getDb();
+  const [row] = await db
+    .update(quoteApprovalRequests)
+    .set({ availabilityCheck: check, updatedAt: new Date() })
+    .where(and(eq(quoteApprovalRequests.tenantId, tenantId), eq(quoteApprovalRequests.id, id)))
+    .returning();
+  return row ?? null;
+}
+
 export async function recordNotificationOutcome(
   tenantId: string,
   id: string,

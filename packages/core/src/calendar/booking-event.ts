@@ -2,23 +2,15 @@ import { getCalendarClient } from "../marketing";
 import { getClient } from "../clients";
 import { getBooking, attachCalendarEventToBooking } from "../bookings";
 import { getTransferRequest } from "../transfer-requests";
-import { calculateBusyLoopFromBase, type BusyLoopResult } from "../maps-distance";
-import { getBusinessRuleByKey } from "../business-rules";
+import { computeServiceBusyWindow, fromStoredBusyWindow } from "../availability";
 import { log, captureException } from "../observability";
 import { getCalendarConnectionRow } from "./service";
-import {
-  bosEventIdForBooking,
-  MINIMUM_EVENT_DURATION_RULE_KEY,
-  minimumEventDurationRuleContentSchema,
-  type MinimumEventDurationRuleContent,
-} from "./schema";
+import { bosEventIdForBooking } from "./schema";
 import {
   buildBookingEventDescription,
   buildBookingEventTitle,
   cancelledTitle,
   CANCELLED_COLOR_ID,
-  computeBusyWindow,
-  findRouteMinimum,
 } from "./booking-event-content";
 
 // The one write path to Google Calendar (founder decisions 2026-09-25):
@@ -55,41 +47,6 @@ function httpStatus(error: unknown): number | null {
   return Number.isFinite(status) ? Number(status) : null;
 }
 
-type MinimumRuleResolution = { rule: MinimumEventDurationRuleContent | null; invalid: boolean };
-
-// Missing rule or no effective version: no minimum. Present but unreadable
-// (invalid content, several effective versions): no minimum either, and the
-// event says "Durata da verificare" — never a silently guessed minimum.
-async function resolveMinimumRule(tenantId: string): Promise<MinimumRuleResolution> {
-  const rule = await getBusinessRuleByKey(tenantId, MINIMUM_EVENT_DURATION_RULE_KEY);
-  if (!rule) return { rule: null, invalid: false };
-  const effective = rule.versions.filter((version) => version.status === "effective");
-  if (effective.length === 0) return { rule: null, invalid: false };
-  if (effective.length > 1) {
-    captureException(new Error(`${MINIMUM_EVENT_DURATION_RULE_KEY}: ${effective.length} effective versions`), "calendar.booking_event.minimum_rule_invalid", {
-      tenantId,
-      ruleId: rule.id,
-    });
-    return { rule: null, invalid: true };
-  }
-  const parsed = minimumEventDurationRuleContentSchema.safeParse(effective[0]!.content);
-  if (!parsed.success) {
-    captureException(new Error(`${MINIMUM_EVENT_DURATION_RULE_KEY}: invalid content`), "calendar.booking_event.minimum_rule_invalid", {
-      tenantId,
-      ruleId: rule.id,
-      versionId: effective[0]!.id,
-      zodError: parsed.error.message,
-    });
-    return { rule: null, invalid: true };
-  }
-  return { rule: parsed.data, invalid: false };
-}
-
-function loopLabel(loop: BusyLoopResult): string | null {
-  if (loop.status !== "ok" || loop.legs.length === 0) return null;
-  return [loop.legs[0]!.origin, ...loop.legs.map((leg) => leg.destination)].join(" → ");
-}
-
 export async function createCalendarEventForBooking(tenantId: string, bookingId: string): Promise<CreateBookingEventOutcome> {
   const booking = await getBooking(tenantId, bookingId);
   if (!booking) return "skipped_not_found";
@@ -118,16 +75,11 @@ export async function createCalendarEventForBooking(tenantId: string, bookingId:
   const pickup = booking.pickup ?? tr?.pickup ?? null;
   const destination = booking.destination ?? tr?.destination ?? null;
 
-  const loop: BusyLoopResult | null = pickup && destination ? await calculateBusyLoopFromBase(pickup, destination) : null;
-  const loopOk = loop !== null && loop.status === "ok";
-  const minimumRule = await resolveMinimumRule(tenantId);
-  const window = computeBusyWindow({
-    pickupAt: booking.scheduledAt,
-    loopMinutes: loopOk ? loop.durationMinutes : null,
-    minutesBeforePickup: loopOk ? loop.minutesBeforePickup : null,
-    minimum: findRouteMinimum(minimumRule.rule, pickup, destination),
-    minimumRuleInvalid: minimumRule.invalid,
-  });
+  // The window the overlap check used, stored at Approva; computed here
+  // only for a booking that has none.
+  const window =
+    fromStoredBusyWindow(booking.busyWindow) ??
+    (await computeServiceBusyWindow(tenantId, { pickup, destination, pickupAt: booking.scheduledAt }));
 
   const clientName = client?.fullName ?? "Cliente";
   const route = { pickup: pickup ?? "?", destination: destination ?? "?" };
@@ -152,10 +104,10 @@ export async function createCalendarEventForBooking(tenantId: string, bookingId:
       totalCents: booking.finalAmountCents,
       depositCents: booking.depositAmountCents,
       currency: booking.currency,
-      loopLabel: loop ? loopLabel(loop) : null,
-      loopMinutes: loopOk ? loop.durationMinutes : null,
+      loopLabel: window.loopLabel,
+      loopMinutes: window.loopMinutes,
       window,
-      mapsUnavailable: !loopOk,
+      mapsUnavailable: window.mapsUnavailable,
     }),
     location: pickup ?? undefined,
     start: { dateTime: window.startAt.toISOString(), timeZone: EVENT_TIMEZONE },

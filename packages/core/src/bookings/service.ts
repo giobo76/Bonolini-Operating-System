@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { getDb, bookings, assertOne, type Booking } from "@bos/db";
 import { inngest, emitDomainEvent } from "@bos/jobs";
 import { advanceDealStatus } from "../deals";
@@ -359,6 +359,38 @@ export async function getBookingByCalendarEventId(
     .from(bookings)
     .where(and(eq(bookings.tenantId, tenantId), eq(bookings.calendarEventId, calendarEventId)));
   return row ?? null;
+}
+
+// Bookings that keep the founder busy (waiting for a deposit, waiting for
+// the customer's confirmation, or confirmed) with a pickup time in
+// [from, to] — for the overlap check (founder decision 2026-09-26).
+export async function listActiveBookingsBetween(tenantId: string, from: Date, to: Date): Promise<Booking[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.tenantId, tenantId),
+        inArray(bookings.status, ["pending_deposit", "pending_confirmation", "confirmed"]),
+        gte(bookings.scheduledAt, from),
+        lte(bookings.scheduledAt, to),
+      ),
+    )
+    .orderBy(bookings.scheduledAt);
+}
+
+// Stores the busy window the overlap check computed (availability's
+// StoredBusyWindow), only when the booking has none yet: a retried Approva
+// never overwrites it.
+export async function setBookingBusyWindow(tenantId: string, bookingId: string, busyWindow: unknown): Promise<boolean> {
+  const db = getDb();
+  const rows = await db
+    .update(bookings)
+    .set({ busyWindow, updatedAt: new Date() })
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.id, bookingId), isNull(bookings.busyWindow)))
+    .returning({ id: bookings.id });
+  return rows.length > 0;
 }
 
 // Links a booking to the Google Calendar event BOS created for it. Only

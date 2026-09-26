@@ -1,86 +1,13 @@
 import { formatAmountForCustomer, formatDateForCustomer } from "../communications";
-import { mentionsPlace } from "../locations";
-import type { MinimumEventDurationRuleContent } from "./schema";
+import type { BusyWindow } from "../availability";
 
 // Pure functions only — no Google, no database. What the booking event
-// looks like and how long it lasts (founder decisions 2026-09-25).
+// looks like (founder decisions 2026-09-25). How long it lasts is the
+// booking's busy window, from the availability module.
 
-export const FALLBACK_EVENT_DURATION_MINUTES = 120;
 export const CANCELLED_TITLE_PREFIX = "ANNULLATO – ";
 // Google Calendar event colour 8, "Graphite": the grey of a cancelled booking.
 export const CANCELLED_COLOR_ID = "8";
-
-const ROUND_TO_MINUTES = 5;
-const MINUTE_MS = 60_000;
-
-export interface AppliedMinimum {
-  label: string;
-  minutes: number;
-}
-
-export function findRouteMinimum(
-  rule: MinimumEventDurationRuleContent | null,
-  pickup: string | null,
-  destination: string | null,
-): AppliedMinimum | null {
-  let best: AppliedMinimum | null = null;
-  for (const entry of rule?.minimums ?? []) {
-    const matches = entry.placeKeywords.some(
-      (keyword) => mentionsPlace(pickup, keyword) || mentionsPlace(destination, keyword),
-    );
-    if (matches && (!best || entry.minimumMinutes > best.minutes)) {
-      best = { label: entry.label, minutes: entry.minimumMinutes };
-    }
-  }
-  return best;
-}
-
-export interface BusyWindowInput {
-  pickupAt: Date;
-  // From maps-distance's calculateBusyLoopFromBase; both null when Google
-  // Maps gave no duration.
-  loopMinutes: number | null;
-  minutesBeforePickup: number | null;
-  minimum: AppliedMinimum | null;
-  // The minimum-duration rule exists but could not be read (invalid
-  // content): the event still gets a duration, flagged to be checked.
-  minimumRuleInvalid: boolean;
-}
-
-export interface BusyWindow {
-  startAt: Date;
-  endAt: Date;
-  durationToVerify: boolean;
-  minimumApplied: AppliedMinimum | null;
-}
-
-// The founder is busy from when he leaves Sondrio (pickup time minus the
-// empty Sondrio -> pickup leg) until he is back. Rounded outward to 5
-// minutes, so the event never looks shorter than the real busy time.
-export function computeBusyWindow(input: BusyWindowInput): BusyWindow {
-  const fromMaps = input.loopMinutes !== null && input.minutesBeforePickup !== null;
-  const rawStart = fromMaps
-    ? new Date(input.pickupAt.getTime() - input.minutesBeforePickup! * MINUTE_MS)
-    : input.pickupAt;
-  let durationMinutes = fromMaps ? input.loopMinutes! : FALLBACK_EVENT_DURATION_MINUTES;
-
-  let minimumApplied: AppliedMinimum | null = null;
-  if (input.minimum && input.minimum.minutes > durationMinutes) {
-    durationMinutes = input.minimum.minutes;
-    minimumApplied = input.minimum;
-  }
-
-  const step = ROUND_TO_MINUTES * MINUTE_MS;
-  const startAt = new Date(Math.floor(rawStart.getTime() / step) * step);
-  const endAt = new Date(Math.ceil((rawStart.getTime() + durationMinutes * MINUTE_MS) / step) * step);
-
-  return {
-    startAt,
-    endAt,
-    durationToVerify: !fromMaps || input.minimumRuleInvalid,
-    minimumApplied,
-  };
-}
 
 export interface BookingEventContentInput {
   transferRequestRef: string;

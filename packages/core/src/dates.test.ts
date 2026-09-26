@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toValidDate } from "./dates";
+import { formatRomeDayMonth, formatRomeTime, romeWallClockToUtc, toValidDate } from "./dates";
 
 describe("toValidDate", () => {
   it("reads timestamptz exactly as postgres-js returns it through raw SQL", () => {
@@ -23,5 +23,22 @@ describe("toValidDate", () => {
     expect(toValidDate("not a timestamp")).toBeNull();
     expect(toValidDate(new Date("nope"))).toBeNull();
     expect(toValidDate(1727172930000)).toBeNull();
+  });
+});
+
+describe("Europe/Rome wall clock", () => {
+  it("reads the customer time in Rome: CEST in summer, CET in winter", () => {
+    expect(romeWallClockToUtc("2026-10-03", "14:30")?.toISOString()).toBe("2026-10-03T12:30:00.000Z");
+    expect(romeWallClockToUtc("2026-12-03", "14:30")?.toISOString()).toBe("2026-12-03T13:30:00.000Z");
+  });
+
+  it("never invents a time", () => {
+    expect(romeWallClockToUtc("2026-13-03", "14:30")).toBeNull();
+    expect(romeWallClockToUtc("2026-10-03", "domani")).toBeNull();
+  });
+
+  it("formats in Rome", () => {
+    expect(formatRomeTime(new Date("2026-10-03T12:30:00.000Z"))).toBe("14:30");
+    expect(formatRomeDayMonth(new Date("2026-10-03T22:30:00.000Z"))).toBe("04/10");
   });
 });

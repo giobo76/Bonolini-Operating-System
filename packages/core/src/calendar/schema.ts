@@ -234,20 +234,3 @@ export function bosEventIdForBooking(bookingId: string): string {
 export function isBosEventId(eventId: string | null | undefined): boolean {
   return typeof eventId === "string" && BOS_EVENT_ID_PATTERN.test(eventId);
 }
-
-// Versioned Business Rule (category "other"): minimum busy time per route,
-// e.g. Malpensa in either direction = 5 hours. A route matches when the
-// pickup or the destination mentions one of its placeKeywords as a whole
-// word; the largest matching minimum wins.
-export const MINIMUM_EVENT_DURATION_RULE_KEY = "calendar.minimum_event_duration";
-
-export const minimumEventDurationRuleContentSchema = z.object({
-  minimums: z.array(
-    z.object({
-      label: z.string().trim().min(1),
-      placeKeywords: z.array(z.string().trim().min(1)).min(1),
-      minimumMinutes: z.number().int().positive(),
-    }),
-  ),
-});
-export type MinimumEventDurationRuleContent = z.infer<typeof minimumEventDurationRuleContentSchema>;

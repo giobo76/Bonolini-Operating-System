@@ -84,7 +84,7 @@ vi.mock("../business-rules", () => ({
 }));
 
 const { createCalendarEventForBooking, markCalendarEventCancelledForBooking } = await import("./booking-event");
-const { minimumEventDurationRuleContentSchema } = await import("./schema");
+const { minimumEventDurationRuleContentSchema } = await import("../availability");
 
 const BOOKING_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const EVENT_ID = "bos0f8fad5bd9cb469fa16570867728950e";
@@ -189,6 +189,31 @@ describe("createCalendarEventForBooking", () => {
     expect(description).toContain("Acconto ricevuto: 200,00 €");
     expect(description).toContain("Saldo da incassare: 190,00 €");
     expect(description).toContain("Volo: AZ123");
+  });
+
+  it("uses the busy window stored at Approva (the one the overlap check showed), without asking Google Maps again", async () => {
+    state.bookings.set(
+      BOOKING_ID,
+      booking({
+        busyWindow: {
+          startAt: "2026-10-03T10:00:00.000Z",
+          endAt: "2026-10-03T15:00:00.000Z",
+          durationToVerify: false,
+          minimumApplied: null,
+          loopLabel: "Sondrio → Malpensa → Sondrio",
+          loopMinutes: 300,
+          mapsUnavailable: false,
+          minimumRuleInvalid: false,
+        },
+      }),
+    );
+
+    await createCalendarEventForBooking("tenant-1", BOOKING_ID);
+
+    expect(mapsMock.calculateBusyLoopFromBase).not.toHaveBeenCalled();
+    expect(inserted().requestBody.start.dateTime).toBe("2026-10-03T10:00:00.000Z");
+    expect(inserted().requestBody.end.dateTime).toBe("2026-10-03T15:00:00.000Z");
+    expect(inserted().requestBody.description).toContain("Tempo occupato: Sondrio → Malpensa → Sondrio, circa 5 h (Google Maps)");
   });
 
   it("Malpensa: the Business Rule minimum of 5 hours applies to a shorter loop", async () => {

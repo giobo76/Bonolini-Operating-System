@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, pgEnum, jsonb } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
 import { clients } from "./clients";
 import { quotes } from "./quotes";
@@ -76,6 +76,11 @@ export const bookings = pgTable("bookings", {
   // path into this table at all, this is just schema-level safety
   // consistent with transferRequestId's convention above).
   calendarEventId: text("calendar_event_id").unique(),
+  // The founder's busy window for this service (availability's
+  // StoredBusyWindow: Sondrio loop + route minimums), copied from the
+  // PREVENTIVO PRONTO overlap check at Approva (migration 0032). Null for
+  // bookings created before, or from Google Calendar.
+  busyWindow: jsonb("busy_window"),
   status: bookingStatusEnum("status").notNull().default("confirmed"),
   currency: text("currency").notNull().default("EUR"),
   depositAmountCents: integer("deposit_amount_cents"),

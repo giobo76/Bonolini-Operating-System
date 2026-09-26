@@ -24,6 +24,11 @@ const { state } = vi.hoisted(() => ({
     bookings: [] as Array<Record<string, unknown>>,
     confirmations: new Map<string, { id: string; status: string; error: string | null; content: unknown }>(),
     confirmationSendResult: "executed" as "executed" | "execution_failed",
+    // What runAvailabilityCheck returns in these tests (its own logic is
+    // tested in availability-check.test.ts).
+    availabilityCheck: null as unknown,
+    availabilityChecks: 0,
+    busyWindows: [] as Array<{ bookingId: string; window: unknown }>,
   },
 }));
 
@@ -45,6 +50,24 @@ function createBookingFor(transferRequestId: string, finalAmountCents: number, d
     currency: "EUR",
   });
 }
+
+const FREE_CHECK = {
+  checkedAt: "2026-09-26T10:00:00.000Z",
+  candidate: {
+    startAt: "2026-10-03T10:20:00.000Z",
+    endAt: "2026-10-03T15:30:00.000Z",
+    durationToVerify: false,
+    minimumApplied: { label: "Malpensa", minutes: 300 },
+    loopLabel: "Sondrio → Malpensa → Sondrio",
+    loopMinutes: 270,
+    mapsUnavailable: false,
+    minimumRuleInvalid: false,
+  },
+  overlaps: [],
+  bookingsChecked: 0,
+  calendarChecked: true,
+  notVerifiedReasons: [],
+};
 
 function uuid(n: number): string {
   return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -123,11 +146,29 @@ vi.mock("./repository", () => ({
     row.notificationStatus = "sending";
     return true;
   },
+  setAvailabilityCheck: async (_t: string, id: string, check: unknown) => {
+    const row = state.rows.find((r) => r.id === id);
+    if (!row) return null;
+    Object.assign(row, { availabilityCheck: check });
+    return row;
+  },
   recordNotificationOutcome: async (_t: string, id: string, outcome: { status: string; channel: string | null }) => {
     const row = state.rows.find((r) => r.id === id);
     if (row) Object.assign(row, { notificationStatus: outcome.status, notificationChannel: outcome.channel });
   },
 }));
+
+vi.mock("./availability-check", async () => {
+  const actual = await vi.importActual<typeof import("./availability-check")>("./availability-check");
+  return {
+    ...actual,
+    runAvailabilityCheck: async () => {
+      state.availabilityChecks++;
+      if (state.availabilityCheck === "throw") throw new Error("boom");
+      return state.availabilityCheck;
+    },
+  };
+});
 
 vi.mock("./founder-channel", () => ({
   sendToFounder: async (_t: string, message: { parts: string[]; buttons?: Array<{ id: string; title: string }> }) => {
@@ -194,6 +235,10 @@ vi.mock("../bookings", () => ({
   listPendingConfirmationBookings: async () => state.bookings.filter((b) => b.status === "pending_confirmation"),
   confirmBookingDeposit: (...args: [string, string]) => confirmBookingDeposit(...args),
   confirmBookingByCustomer: (...args: [string, string]) => confirmBookingByCustomer(...args),
+  setBookingBusyWindow: async (_t: string, bookingId: string, window: unknown) => {
+    state.busyWindows.push({ bookingId, window });
+    return true;
+  },
 }));
 
 vi.mock("../clients", () => ({
@@ -375,6 +420,9 @@ beforeEach(() => {
   state.bookings = [];
   state.confirmations = new Map();
   state.confirmationSendResult = "executed";
+  state.availabilityCheck = FREE_CHECK;
+  state.availabilityChecks = 0;
+  state.busyWindows = [];
   confirmBookingDeposit.mockClear();
   confirmBookingByCustomer.mockClear();
   process.env.QUOTE_APPROVAL_ENABLED = "true";
@@ -1347,5 +1395,73 @@ describe("italian customer: no deposit", () => {
 
     expect(state.bookings[0]!.status).toBe("confirmed");
     expect(confirmationsSent()).toHaveLength(1);
+  });
+});
+
+// Founder decisions 2026-09-26: the overlap check is shown, stored on the
+// round, never blocks, and its busy window goes on the booking at Approva.
+describe("Disponibilità (overlap check)", () => {
+  const STAFF = "profile-staff";
+  const OVERLAP = {
+    kind: "booking",
+    startAt: "2026-10-03T09:00:00.000Z",
+    endAt: "2026-10-03T13:00:00.000Z",
+    durationToVerify: false,
+    clientName: "Anna Bianchi",
+    pickup: "Sondrio",
+    destination: "Linate",
+    pickupAt: "2026-10-03T09:00:00.000Z",
+    bookingStatus: "confirmed",
+    ref: "#abcdef",
+  };
+
+  function openRound() {
+    return state.rows.find((r) => r.status === "awaiting_decision")!;
+  }
+
+  it("PREVENTIVO PRONTO shows the overlap; the panel shows the same text; nothing is blocked", async () => {
+    state.availabilityCheck = { ...FREE_CHECK, overlaps: [OVERLAP], bookingsChecked: 1 };
+    await notifyQuoteReady(transferRequest());
+
+    const email = state.founderOutbox[0]!.parts.join("\n");
+    expect(email).toContain("⚠️ SOVRAPPOSIZIONE CON: Anna Bianchi, Sondrio → Linate, 03/10 ore 11:00");
+    expect(email).not.toMatch(/compatibile/i);
+    const panel = await getRoundForPanel("tenant-1", openRound().id);
+    expect(panel!.view.founderDetails).toContain("⚠️ SOVRAPPOSIZIONE CON: Anna Bianchi");
+    expect(panel!.view.overlapCount).toBe(1);
+
+    const result = await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    expect(result.outcome).toBe("done");
+  });
+
+  it("nothing overlaps: 'libera'", async () => {
+    await notifyQuoteReady(transferRequest());
+    expect(state.founderOutbox[0]!.parts.join("\n")).toContain("Disponibilità: libera (controllate 0 prenotazioni e il calendario)");
+  });
+
+  it("a failing check never stops the quote: NOT verified with the error", async () => {
+    state.availabilityCheck = "throw";
+    await notifyQuoteReady(transferRequest());
+    const text = state.founderOutbox[0]!.parts.join("\n");
+    expect(text).toContain("PREVENTIVO PRONTO");
+    expect(text).toContain("Disponibilità: NON verificata (errore nel controllo: boom)");
+  });
+
+  it("Approva copies the checked busy window onto the booking", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    expect(state.busyWindows).toEqual([{ bookingId: state.bookings[0]!.id, window: FREE_CHECK.candidate }]);
+  });
+
+  it("Modifica from the panel checks the new round too", async () => {
+    await notifyQuoteReady(transferRequest());
+    expect(state.availabilityChecks).toBe(1);
+    state.availabilityCheck = { ...FREE_CHECK, overlaps: [OVERLAP], bookingsChecked: 1 };
+
+    const revised = await reviseQuoteRound("tenant-1", openRound().id, 28000, null, { notify: false });
+
+    expect(state.availabilityChecks).toBe(2);
+    const panel = await getRoundForPanel("tenant-1", revised.newRoundId!);
+    expect(panel!.view.overlapCount).toBe(1);
   });
 });

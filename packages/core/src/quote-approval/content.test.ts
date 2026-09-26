@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Client, TransferRequest } from "@bos/db";
+import type { AvailabilityCheck } from "./availability-check";
 import {
   buildQuoteReadyText,
   decodeButtonId,
@@ -75,48 +76,155 @@ describe("deposit button id", () => {
   });
 });
 
-// Founder decision 2026-09-26: the stored availability result never
-// compared the request with other bookings or the calendar, so it must
-// never read "compatibile" — until the real overlap check exists.
+// Founder decisions 2026-09-26: "Disponibilità" is the overlap check stored
+// on the round — never "compatibile" without a real comparison.
 describe("PREVENTIVO PRONTO — Disponibilità", () => {
   const client = { fullName: "Mario Rossi", phone: "393331234567" } as Client;
-  const trWith = (availabilityBreakdown: unknown) =>
-    ({
-      id: ID,
-      pickup: "Malpensa",
-      destination: "Sondrio",
-      requestedDate: "2026-10-03",
-      requestedTime: "14:30",
-      passengers: 2,
-      children: 0,
-      childrenAges: null,
-      luggage: null,
-      flightNumber: null,
-      trainNumber: null,
-      hotel: null,
-      pricingStatus: "fixed",
-      calculatedAmountCents: 25000,
-      currency: "EUR",
-      availabilityBreakdown,
-    }) as unknown as TransferRequest;
+  const tr = {
+    id: ID,
+    pickup: "Malpensa",
+    destination: "Sondrio",
+    requestedDate: "2026-10-03",
+    requestedTime: "14:30",
+    passengers: 2,
+    children: 0,
+    childrenAges: null,
+    luggage: null,
+    flightNumber: null,
+    trainNumber: null,
+    hotel: null,
+    pricingStatus: "fixed",
+    calculatedAmountCents: 25000,
+    currency: "EUR",
+    // The old stored result: ignored, whatever it says.
+    availabilityBreakdown: { status: "verified", feasibility: { feasible: true } },
+  } as unknown as TransferRequest;
 
-  it.each([
-    ["feasible", { status: "verified", feasibility: { feasible: true } }],
-    ["not feasible", { status: "verified", feasibility: { feasible: false } }],
-    ["route not calculated", { status: "not_verified" }],
-    ["missing", null],
-  ])("always NOT verified (%s), never 'compatibile'", (_label, breakdown) => {
-    const { details } = buildQuoteReadyText({
-      tr: trWith(breakdown),
+  const candidate = {
+    // 12:20-17:30 in Rome
+    startAt: "2026-10-03T10:20:00.000Z",
+    endAt: "2026-10-03T15:30:00.000Z",
+    durationToVerify: false,
+    minimumApplied: null,
+    loopLabel: "Sondrio → Malpensa → Sondrio",
+    loopMinutes: 310,
+    mapsUnavailable: false,
+    minimumRuleInvalid: false,
+  };
+
+  function details(availabilityCheck: AvailabilityCheck | null) {
+    return buildQuoteReadyText({
+      tr,
       client,
       proposedAmountCents: null,
       depositCents: 12500,
       depositIsCustom: false,
       customerMessageBody: "…",
+      availabilityCheck,
+    }).details;
+  }
+
+  it("no check on the round: NOT verified, never 'compatibile'", () => {
+    const text = details(null);
+    expect(text).toContain("Disponibilità: NON verificata (controllo non eseguito per questo preventivo)");
+    expect(text).not.toMatch(/compatibile/i);
+  });
+
+  it("nothing overlaps: free, with what was checked, and the busy time of this service", () => {
+    const text = details({
+      checkedAt: "2026-09-26T10:00:00.000Z",
+      candidate,
+      overlaps: [],
+      bookingsChecked: 3,
+      calendarChecked: true,
+      notVerifiedReasons: [],
     });
-    expect(details).toContain(
-      "Disponibilità: NON verificata (il BOS non controlla ancora le sovrapposizioni con gli altri servizi e con il calendario)",
+    expect(text).toContain("Tempo occupato per questo servizio: 12:20–17:30");
+    expect(text).toContain("Disponibilità: libera (controllate 3 prenotazioni e il calendario)");
+  });
+
+  it("overlaps: one line per booking or calendar event, with its details", () => {
+    const text = details({
+      checkedAt: "2026-09-26T10:00:00.000Z",
+      candidate,
+      overlaps: [
+        {
+          kind: "booking",
+          startAt: "2026-10-03T09:00:00.000Z",
+          endAt: "2026-10-03T13:00:00.000Z",
+          durationToVerify: false,
+          clientName: "Anna Bianchi",
+          pickup: "Sondrio",
+          destination: "Linate",
+          pickupAt: "2026-10-03T09:00:00.000Z",
+          bookingStatus: "confirmed",
+          ref: "#abcdef",
+        },
+        {
+          kind: "calendar_event",
+          startAt: "2026-10-03T13:00:00.000Z",
+          endAt: "2026-10-03T14:00:00.000Z",
+          durationToVerify: false,
+          summary: "Dentista",
+          allDay: false,
+        },
+      ],
+      bookingsChecked: 2,
+      calendarChecked: true,
+      notVerifiedReasons: [],
+    });
+    expect(text).toContain(
+      "⚠️ SOVRAPPOSIZIONE CON: Anna Bianchi, Sondrio → Linate, 03/10 ore 11:00 (occupato 11:00–15:00), prenotazione confermata #abcdef",
     );
-    expect(details).not.toMatch(/compatibile/i);
+    expect(text).toContain("⚠️ SOVRAPPOSIZIONE CON: evento Calendar «Dentista», 03/10 15:00–16:00");
+    expect(text).not.toContain("Disponibilità: libera");
+  });
+
+  it("incomplete check: NOT verified with the reason, and the overlaps found anyway", () => {
+    const text = details({
+      checkedAt: "2026-09-26T10:00:00.000Z",
+      candidate: { ...candidate, durationToVerify: true },
+      overlaps: [
+        {
+          kind: "booking",
+          startAt: "2026-10-03T12:00:00.000Z",
+          endAt: "2026-10-03T14:00:00.000Z",
+          durationToVerify: true,
+          clientName: "Anna Bianchi",
+          pickup: "Tirano",
+          destination: "Bormio",
+          pickupAt: "2026-10-03T12:00:00.000Z",
+          bookingStatus: "pending_confirmation",
+          ref: "#abcdef",
+        },
+      ],
+      bookingsChecked: 1,
+      calendarChecked: false,
+      notVerifiedReasons: ["Google Calendar non collegato nel pannello"],
+    });
+    expect(text).toContain("Tempo occupato per questo servizio: 12:20–17:30 (durata da verificare)");
+    expect(text).toContain("(occupato 14:00–16:00, durata da verificare), prenotazione in attesa di conferma #abcdef");
+    expect(text).toContain("Disponibilità: NON verificata (Google Calendar non collegato nel pannello)");
+  });
+
+  it("an all-day event", () => {
+    const text = details({
+      checkedAt: "2026-09-26T10:00:00.000Z",
+      candidate,
+      overlaps: [
+        {
+          kind: "calendar_event",
+          startAt: "2026-10-02T22:00:00.000Z",
+          endAt: "2026-10-03T22:00:00.000Z",
+          durationToVerify: false,
+          summary: "Ferie",
+          allDay: true,
+        },
+      ],
+      bookingsChecked: 0,
+      calendarChecked: true,
+      notVerifiedReasons: [],
+    });
+    expect(text).toContain("⚠️ SOVRAPPOSIZIONE CON: evento Calendar «Ferie», 03/10 tutto il giorno");
   });
 });

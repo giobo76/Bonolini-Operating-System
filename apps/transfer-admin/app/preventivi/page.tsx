@@ -93,6 +93,13 @@ export default async function PendingQuotesPage({
                 {formatDate(tr.requestedDate, tr.requestedTime)} · {tr.passengers ?? "?"} pax · {ref}
                 {round.proposedAmountCents !== null ? " · prezzo modificato" : ""}
               </div>
+              {view.overlapCount > 0 ? (
+                <div className="text-sm font-medium text-red-700 dark:text-red-400">
+                  ⚠️ SOVRAPPOSIZIONE con {view.overlapCount === 1 ? "un altro servizio" : `${view.overlapCount} servizi`}: apri per i dettagli
+                </div>
+              ) : !view.availabilityVerified ? (
+                <div className="text-sm text-amber-700 dark:text-amber-400">Disponibilità NON verificata</div>
+              ) : null}
             </Link>
           ))
         )}

@@ -10,6 +10,8 @@ export {
   listPendingConfirmationBookings,
   confirmBookingDeposit,
   attachCalendarEventToBooking,
+  listActiveBookingsBetween,
+  setBookingBusyWindow,
   confirmBookingByCustomer,
 } from "./service";
 export type { ConfirmBookingDepositResult } from "./service";

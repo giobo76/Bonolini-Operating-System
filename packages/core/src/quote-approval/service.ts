@@ -14,6 +14,7 @@ import {
   listPendingConfirmationBookings,
   confirmBookingDeposit,
   confirmBookingByCustomer,
+  setBookingBusyWindow,
   type ConfirmBookingDepositResult,
 } from "../bookings";
 import { computeDefaultDepositCents, customerPaysDeposit, isValidDeposit } from "../pricing";
@@ -35,6 +36,7 @@ import { getLastInboundWhatsappPhoneE164, normalizePhone } from "../whatsapp";
 import { log, captureException } from "../observability";
 import * as repo from "./repository";
 import { sendToFounder, type FounderButton } from "./founder-channel";
+import { parseAvailabilityCheck, runAvailabilityCheck } from "./availability-check";
 import { adminLink, isCustomerPhoneAllowed, isQuoteApprovalEnabled } from "./config";
 import {
   APPROVAL_BUTTONS,
@@ -219,6 +221,31 @@ async function ensureFounderNotified(
   await deliverNotification(tenantId, row, tr);
 }
 
+// Runs the overlap check for a PREVENTIVO PRONTO round and stores it on the
+// round, so the email and the panel show the same result. A failure never
+// stops the quote: the round then says "NON verificata (errore …)".
+async function refreshAvailabilityCheck(
+  tenantId: string,
+  row: QuoteApprovalRequest,
+  tr: TransferRequest,
+): Promise<QuoteApprovalRequest> {
+  let check;
+  try {
+    check = await runAvailabilityCheck(tenantId, tr);
+  } catch (error) {
+    captureException(error, "quote_approval.availability_check_failed", { roundId: row.id });
+    check = {
+      checkedAt: new Date().toISOString(),
+      candidate: null,
+      overlaps: [],
+      bookingsChecked: 0,
+      calendarChecked: false,
+      notVerifiedReasons: [`errore nel controllo: ${error instanceof Error ? error.message : String(error)}`],
+    };
+  }
+  return (await repo.setAvailabilityCheck(tenantId, row.id, check)) ?? { ...row, availabilityCheck: check };
+}
+
 async function deliverNotification(tenantId: string, row: QuoteApprovalRequest, tr: TransferRequest): Promise<void> {
   const client = await getClient(tenantId, tr.clientId);
   if (!client) {
@@ -238,6 +265,8 @@ async function deliverNotification(tenantId: string, row: QuoteApprovalRequest, 
       emailSubject: `PREZZO DA INSERIRE ${shortRef(tr.id)}`,
     });
   } else {
+    // Every PREVENTIVO PRONTO that goes out carries a fresh check.
+    row = await refreshAvailabilityCheck(tenantId, row, tr);
     const view = buildRoundView(row, tr, client);
     if (!view) {
       await repo.recordNotificationOutcome(tenantId, row.id, {
@@ -303,6 +332,9 @@ export interface RoundView {
   founderDetails: string;
   customerPreview: string;
   customerPreviewWithTitle: string;
+  // Overlaps found by the round's availability check (0 when none or not checked).
+  overlapCount: number;
+  availabilityVerified: boolean;
 }
 
 function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: Client): RoundView | null {
@@ -310,6 +342,7 @@ function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: 
   if (amountCents === null) return null;
   const depositCents = depositForRound(row, amountCents, client);
   const preview = buildCustomerQuoteContent(tr, amountCents, depositCents, "");
+  const availability = parseAvailabilityCheck(row.availabilityCheck);
   const text = buildQuoteReadyText({
     tr,
     client,
@@ -317,6 +350,7 @@ function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: 
     depositCents,
     depositIsCustom: row.proposedDepositCents !== null,
     customerMessageBody: preview.body,
+    availabilityCheck: availability,
   });
   return {
     amountCents,
@@ -326,6 +360,8 @@ function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: 
     founderDetails: text.details,
     customerPreview: preview.body,
     customerPreviewWithTitle: text.customerPreview,
+    overlapCount: availability?.overlaps.length ?? 0,
+    availabilityVerified: availability !== null && availability.notVerifiedReasons.length === 0,
   };
 }
 
@@ -519,6 +555,8 @@ export async function approveQuoteRound(
       throw new Error("prenotazione non creata");
     }
     booking = created;
+    const candidate = parseAvailabilityCheck(row.availabilityCheck)?.candidate;
+    if (candidate) await setBookingBusyWindow(tenantId, booking.id, candidate);
     const prepared = await prepareTransferQuoteOfferCommunication({
       tenantId,
       clientId: approved.clientId,
@@ -650,9 +688,12 @@ export async function reviseQuoteRound(
   }
 
   // From the panel the founder is looking at the new round already: no
-  // email for it (its notification stays 'pending', never claimed).
+  // email for it (its notification stays 'pending', never claimed), but it
+  // gets its own overlap check.
   if (options.notify && (await repo.claimNotification(tenantId, next.id))) {
     await deliverNotification(tenantId, next, tr);
+  } else if (!options.notify) {
+    await refreshAvailabilityCheck(tenantId, next, tr);
   }
 
   return {
@@ -868,6 +909,7 @@ export async function enterManualPrice(
   if (!round) {
     return { outcome: "error", message: FOUNDER_TEXTS.error(ref, "impossibile creare il preventivo") };
   }
+  await refreshAvailabilityCheck(tenantId, round, moved);
 
   return {
     outcome: "done",

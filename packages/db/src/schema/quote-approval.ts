@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { tenants } from "./tenants";
 import { clients } from "./clients";
 import { transferRequests } from "./transfer-requests";
@@ -52,6 +52,9 @@ export const quoteApprovalRequests = pgTable("quote_approval_requests", {
   proposedAmountCents: integer("proposed_amount_cents"),
   // null = the default deposit (50% of the price, nearest 10 €) applies.
   proposedDepositCents: integer("proposed_deposit_cents"),
+  // Overlap check shown in this round's "Disponibilità" (quote-approval's
+  // availability-check.ts, migration 0032). Null = not checked.
+  availabilityCheck: jsonb("availability_check"),
   notificationStatus: text("notification_status").notNull().default("pending"),
   notificationChannel: text("notification_channel"),
   notificationError: text("notification_error"),

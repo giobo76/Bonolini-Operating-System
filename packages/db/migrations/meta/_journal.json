@@ -169,6 +169,13 @@
       "when": 1790481600000,
       "tag": "0031_calendar_minimum_event_duration",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1790568000000,
+      "tag": "0032_availability_check",
+      "breakpoints": true
     }
   ]
 }
