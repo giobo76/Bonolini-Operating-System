@@ -97,14 +97,13 @@ function childrenLine(tr: TransferRequest): string {
   return tr.childrenAges ? `${tr.children} (età: ${tr.childrenAges})` : `${tr.children} (età non indicata)`;
 }
 
-function availabilityLine(breakdown: unknown): string {
-  if (!breakdown || typeof breakdown !== "object") return "non verificata";
-  const value = breakdown as { status?: unknown; feasibility?: { feasible?: unknown } | null };
-  if (value.status !== "verified") return "non verificata (percorso non calcolato)";
-  if (value.feasibility?.feasible === true) return "compatibile con gli altri servizi";
-  if (value.feasibility?.feasible === false) return "ATTENZIONE: margine operativo insufficiente";
-  return "non verificata";
-}
+// The stored availability result never compared the request with other
+// bookings or with the calendar (the pipeline always passes "no previous
+// service", so it always came out "feasible"): it must not be shown as a
+// check (founder decision 2026-09-26). Until the real overlap check exists,
+// the line always says NOT verified.
+const AVAILABILITY_NOT_VERIFIED =
+  "NON verificata (il BOS non controlla ancora le sovrapposizioni con gli altri servizi e con il calendario)";
 
 function pricingLabel(tr: TransferRequest): string {
   if (tr.pricingStatus === "fixed") return "tariffa fissa";
@@ -167,7 +166,7 @@ export function buildQuoteReadyText(input: {
     `Acconto: ${formatEuro(input.depositCents, tr.currency)}${
       input.depositIsCustom ? " (scelto da te)" : " (50%, arrotondato)"
     } — saldo all'autista ${formatEuro(total - input.depositCents, tr.currency)}`,
-    `Disponibilità: ${availabilityLine(tr.availabilityBreakdown)}`,
+    `Disponibilità: ${AVAILABILITY_NOT_VERIFIED}`,
   ].join("\n");
 
   return {
