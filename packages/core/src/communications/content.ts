@@ -269,6 +269,24 @@ const DEPOSIT_LINES: Record<
   },
 };
 
+// Italian customers (+39) never pay a deposit (founder decision 2026-09-26):
+// the quote keeps the pre-deposit wording, the confirmation says how to pay.
+const NO_DEPOSIT_LINES: Record<
+  CustomerLanguage,
+  { price: (v: string) => string; confirmed: string; payment: string }
+> = {
+  it: {
+    price: (v) => `Prezzo: ${v} per l'intero veicolo`,
+    confirmed: "Le confermiamo la prenotazione con Bonolini Transfer.",
+    payment: "Pagamento all'autista il giorno del servizio, in contanti o con carta.",
+  },
+  en: {
+    price: (v) => `Price: ${v} for the entire vehicle`,
+    confirmed: "Your booking with Bonolini Transfer is confirmed.",
+    payment: "Payment to the driver on the day of service, in cash or by card.",
+  },
+};
+
 interface TripDetails {
   language: CustomerLanguage;
   pickup: string;
@@ -309,20 +327,24 @@ function tripLines(input: TripDetails): string[] {
 export interface TransferQuoteOfferInput extends TripDetails {
   to: string;
   amountCents: number;
-  depositCents: number;
+  // null: italian customer, no deposit lines at all.
+  depositCents: number | null;
   currency: string;
 }
 
 export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): CommunicationContent {
   const lang = input.language;
   const money = (cents: number) => formatAmountForCustomer(cents, input.currency, lang);
-  const priceLines = [
-    DEPOSIT_LINES[lang].total(money(input.amountCents)),
-    DEPOSIT_LINES[lang].deposit(money(input.depositCents)),
-    DEPOSIT_LINES[lang].balance(money(input.amountCents - input.depositCents)),
-    "",
-    DEPOSIT_LINES[lang].paymentLink,
-  ];
+  const priceLines =
+    input.depositCents === null
+      ? [NO_DEPOSIT_LINES[lang].price(money(input.amountCents))]
+      : [
+          DEPOSIT_LINES[lang].total(money(input.amountCents)),
+          DEPOSIT_LINES[lang].deposit(money(input.depositCents)),
+          DEPOSIT_LINES[lang].balance(money(input.amountCents - input.depositCents)),
+          "",
+          DEPOSIT_LINES[lang].paymentLink,
+        ];
 
   const lines =
     lang === "it"
@@ -347,18 +369,23 @@ export function buildTransferQuoteOfferContent(input: TransferQuoteOfferInput): 
           SIGNATURE,
         ];
 
-  return { to: input.to, templateName: `transfer_quote_offer_${lang}_v4`, body: lines.join("\n") };
+  const templateName =
+    input.depositCents === null ? `transfer_quote_offer_no_deposit_${lang}_v1` : `transfer_quote_offer_${lang}_v4`;
+  return { to: input.to, templateName, body: lines.join("\n") };
 }
 
 export interface BookingConfirmationInput extends TripDetails {
   to: string;
-  balanceCents: number;
+  totalCents: number;
+  // null: italian customer (no deposit), confirmed by "Confermato dal cliente".
+  depositCents: number | null;
   currency: string;
 }
 
 export function buildBookingConfirmationContent(input: BookingConfirmationInput): CommunicationContent {
   const lang = input.language;
-  const balance = formatAmountForCustomer(input.balanceCents, input.currency, lang);
+  if (input.depositCents === null) return buildNoDepositConfirmation(input, lang);
+  const balance = formatAmountForCustomer(input.totalCents - input.depositCents, input.currency, lang);
   const lines =
     lang === "it"
       ? [
@@ -385,4 +412,21 @@ export function buildBookingConfirmationContent(input: BookingConfirmationInput)
         ];
 
   return { to: input.to, templateName: `booking_confirmation_${lang}_v2`, body: lines.join("\n") };
+}
+
+function buildNoDepositConfirmation(input: BookingConfirmationInput, lang: CustomerLanguage): CommunicationContent {
+  const price = NO_DEPOSIT_LINES[lang].price(formatAmountForCustomer(input.totalCents, input.currency, lang));
+  const lines = [
+    lang === "it" ? "Buongiorno," : "Hello,",
+    NO_DEPOSIT_LINES[lang].confirmed,
+    "",
+    ...tripLines(input),
+    price,
+    "",
+    DEPOSIT_LINES[lang].driverDetails,
+    NO_DEPOSIT_LINES[lang].payment,
+    lang === "it" ? "Per qualsiasi domanda, risponda pure a questo messaggio." : "For any question, simply reply to this message.",
+    SIGNATURE,
+  ];
+  return { to: input.to, templateName: `booking_confirmation_no_deposit_${lang}_v1`, body: lines.join("\n") };
 }

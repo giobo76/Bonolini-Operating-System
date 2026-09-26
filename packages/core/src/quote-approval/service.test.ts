@@ -17,6 +17,9 @@ const { state } = vi.hoisted(() => ({
     customerSends: 0,
     adminProfile: true,
     customerPhone: "+393331234567",
+    // The client's own phone decides the deposit (founder decision
+    // 2026-09-26): foreign by default in these tests, +39 in the italian ones.
+    clientPhone: "4915112345678",
     sendResult: "executed" as "executed" | "execution_failed",
     bookings: [] as Array<Record<string, unknown>>,
     confirmations: new Map<string, { id: string; status: string; error: string | null; content: unknown }>(),
@@ -27,7 +30,7 @@ const { state } = vi.hoisted(() => ({
 // A booking per approved transfer_request, created by the accept/modify
 // mocks below exactly like transfer-requests does: pending_deposit with the
 // deposit it was given.
-function createBookingFor(transferRequestId: string, finalAmountCents: number, depositAmountCents: number) {
+function createBookingFor(transferRequestId: string, finalAmountCents: number, depositAmountCents: number | undefined) {
   if (state.bookings.some((b) => b.transferRequestId === transferRequestId)) return;
   state.bookings.push({
     id: `00000000-0000-4000-9000-${String(state.bookings.length + 1).padStart(12, "0")}`,
@@ -35,9 +38,9 @@ function createBookingFor(transferRequestId: string, finalAmountCents: number, d
     clientId: "client-1",
     dealId: "deal-1",
     transferRequestId,
-    status: "pending_deposit",
+    status: depositAmountCents === undefined ? "pending_confirmation" : "pending_deposit",
     finalAmountCents,
-    depositAmountCents,
+    depositAmountCents: depositAmountCents ?? null,
     depositPaidAt: null,
     currency: "EUR",
   });
@@ -176,16 +179,25 @@ const confirmBookingDeposit = vi.fn(async (_t: string, id: string) => {
   Object.assign(booking, { status: "confirmed", depositPaidAt: new Date() });
   return { booking, changed: true };
 });
+const confirmBookingByCustomer = vi.fn(async (_t: string, id: string) => {
+  const booking = state.bookings.find((b) => b.id === id);
+  if (!booking) return null;
+  if (booking.status !== "pending_confirmation") return { booking, changed: false };
+  Object.assign(booking, { status: "confirmed" });
+  return { booking, changed: true };
+});
 vi.mock("../bookings", () => ({
   getBooking: async (_t: string, id: string) => state.bookings.find((b) => b.id === id) ?? null,
   getBookingByTransferRequestId: async (_t: string, trId: string) =>
     state.bookings.find((b) => b.transferRequestId === trId) ?? null,
   listPendingDepositBookings: async () => state.bookings.filter((b) => b.status === "pending_deposit"),
+  listPendingConfirmationBookings: async () => state.bookings.filter((b) => b.status === "pending_confirmation"),
   confirmBookingDeposit: (...args: [string, string]) => confirmBookingDeposit(...args),
+  confirmBookingByCustomer: (...args: [string, string]) => confirmBookingByCustomer(...args),
 }));
 
 vi.mock("../clients", () => ({
-  getClient: async () => ({ id: "client-1", fullName: "Mario Rossi", phone: "393331234567" }),
+  getClient: async () => ({ id: "client-1", fullName: "Mario Rossi", phone: state.clientPhone }),
 }));
 
 vi.mock("../whatsapp", () => ({
@@ -263,6 +275,7 @@ const {
   listPendingForPanel,
   getRoundForPanel,
   confirmDepositReceived,
+  confirmCustomerConfirmed,
   enterManualPrice,
 } = await import("./service");
 
@@ -357,11 +370,13 @@ beforeEach(() => {
   state.customerSends = 0;
   state.adminProfile = true;
   state.customerPhone = "+393331234567";
+  state.clientPhone = "4915112345678";
   state.sendResult = "executed";
   state.bookings = [];
   state.confirmations = new Map();
   state.confirmationSendResult = "executed";
   confirmBookingDeposit.mockClear();
+  confirmBookingByCustomer.mockClear();
   process.env.QUOTE_APPROVAL_ENABLED = "true";
   delete process.env.QUOTE_APPROVAL_TEST_PHONES;
   process.env.FOUNDER_PROFILE_ID = "profile-founder";
@@ -1182,5 +1197,155 @@ describe("prezzo inserito a mano", () => {
     const result = await enterManualPrice("tenant-1", manualRow.id, 28000, 30000, STAFF);
     expect(result.outcome).toBe("refused");
     expect(manualRow.status).toBe("info");
+  });
+});
+
+// Founder decision 2026-09-26: italian customers (+39) never pay a deposit.
+// Quote without deposit lines, booking waiting for "Confermato dal cliente",
+// then the confirmation without deposit lines.
+describe("italian customer: no deposit", () => {
+  const STAFF = "profile-staff";
+
+  beforeEach(() => {
+    state.clientPhone = "393331234567";
+  });
+
+  function openRound() {
+    return state.rows.find((r) => r.status === "awaiting_decision")!;
+  }
+  function confirmationsSent() {
+    return [...state.confirmations.values()];
+  }
+
+  it("PREVENTIVO PRONTO: no deposit, the customer text has the price for the whole vehicle only", async () => {
+    await notifyQuoteReady(transferRequest({ calculatedAmountCents: 39000 }));
+    const text = state.founderOutbox[0]!.parts.join("\n");
+    expect(text).toContain("Acconto: nessuno (cliente italiano)");
+    expect(text).toContain("Prezzo: 390,00 € per l'intero veicolo");
+    expect(text).not.toMatch(/Acconto per confermare|Saldo all'autista/);
+  });
+
+  it("Approva: no deposit passed, booking waiting for confirmation, IN ATTESA DI CONFERMA with its button", async () => {
+    await notifyQuoteReady(transferRequest());
+    const result = await approveQuoteRound("tenant-1", openRound().id, STAFF);
+
+    expect(result.outcome).toBe("done");
+    expect(result.message).toContain('premi "Confermato dal cliente"');
+    expect(acceptTransferRequest).toHaveBeenLastCalledWith("tenant-1", expect.any(String), STAFF, undefined);
+    expect(state.bookings[0]).toMatchObject({ status: "pending_confirmation", depositAmountCents: null });
+    const offer = [...state.communications.values()][0]!.content as { body: string };
+    expect(offer.body).toContain("Prezzo: 300,00 € per l'intero veicolo");
+    expect(offer.body).not.toMatch(/acconto|saldo/i);
+    const notice = state.founderOutbox[state.founderOutbox.length - 1]!;
+    expect(notice.parts.join("")).toContain("IN ATTESA DI CONFERMA");
+    expect(notice.buttons?.[0]?.title).toBe("CONFERMATO");
+  });
+
+  it("Modifica with a deposit is refused; with the price only it opens the new round", async () => {
+    await notifyQuoteReady(transferRequest());
+    const refused = await reviseQuoteRound("tenant-1", openRound().id, 28000, 10000, { notify: false });
+    expect(refused.outcome).toBe("refused");
+    expect(refused.message).toContain("cliente italiano, nessun acconto");
+    expect(state.rows).toHaveLength(1);
+
+    const revised = await reviseQuoteRound("tenant-1", openRound().id, 28000, null, { notify: false });
+    expect(revised.outcome).toBe("done");
+    await approveQuoteRound("tenant-1", revised.newRoundId!, STAFF);
+    expect(modifyPriceForTransferRequest).toHaveBeenLastCalledWith(
+      "tenant-1",
+      expect.any(String),
+      STAFF,
+      28000,
+      expect.any(String),
+      undefined,
+    );
+  });
+
+  it("Crea preventivo with a deposit is refused for an italian customer", async () => {
+    const tr = transferRequest({
+      status: "ready_for_pricing",
+      pricingStatus: "manual_required",
+      calculatedAmountCents: null,
+      pricingBreakdown: { manualRequiredReason: "distance_not_provided" },
+    });
+    state.transferRequests.set(tr.id, tr);
+    await handleCustomerMessageOutcome({
+      tenantId: "tenant-1",
+      clientId: "client-1",
+      inboundMessageRowId: "msg-1",
+      fromPhone: "393331234567",
+      extracted: {},
+      transferRequest: tr,
+    });
+    const manualRow = state.rows.find((r) => r.kind === "manual_price_required")!;
+
+    const result = await enterManualPrice("tenant-1", manualRow.id, 28000, 10000, STAFF);
+
+    expect(result.outcome).toBe("refused");
+    expect(result.message).toContain("cliente italiano");
+    expect(manualRow.status).toBe("info");
+    expect((await listPendingForPanel("tenant-1")).manualPrices[0]!.paysDeposit).toBe(false);
+  });
+
+  it("Confermato dal cliente confirms once, even on a double click, and sends the confirmation without deposit lines", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const bookingId = state.bookings[0]!.id as string;
+
+    const first = await confirmCustomerConfirmed("tenant-1", bookingId);
+    const second = await confirmCustomerConfirmed("tenant-1", bookingId);
+
+    expect(first.outcome).toBe("done");
+    expect(first.message).toContain("prenotazione CONFERMATA");
+    expect(second.outcome).toBe("already");
+    expect(state.bookings[0]!.status).toBe("confirmed");
+    expect(confirmationsSent()).toHaveLength(1);
+    const confirmation = confirmationsSent()[0]!.content as { body: string };
+    expect(confirmation.body).toContain("Le confermiamo la prenotazione con Bonolini Transfer.");
+    expect(confirmation.body).toContain("Prezzo: 300,00 € per l'intero veicolo");
+    expect(confirmation.body).toContain("Pagamento all'autista il giorno del servizio, in contanti o con carta.");
+    expect(confirmation.body).not.toMatch(/acconto|saldo/i);
+    expect(confirmBookingDeposit).not.toHaveBeenCalled();
+  });
+
+  it("the two buttons never cross: no Acconto ricevuto on an italian booking, no Confermato on a foreign one", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const italianBooking = state.bookings[0]!.id as string;
+    expect((await confirmDepositReceived("tenant-1", italianBooking)).outcome).toBe("refused");
+    expect(state.bookings[0]!.status).toBe("pending_confirmation");
+
+    state.bookings = [];
+    state.rows = [];
+    state.communications = new Map();
+    state.clientPhone = "4915112345678";
+    await notifyQuoteReady(transferRequest({ id: "a1b2c3d4-0000-4000-8000-000000000002" }));
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const foreignBooking = state.bookings[0]!.id as string;
+    expect((await confirmCustomerConfirmed("tenant-1", foreignBooking)).outcome).toBe("refused");
+    expect(state.bookings[0]!.status).toBe("pending_deposit");
+    expect(confirmationsSent()).toHaveLength(0);
+  });
+
+  it("the panel lists bookings waiting for the customer's confirmation", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+
+    const pending = await listPendingForPanel("tenant-1");
+
+    expect(pending.pendingConfirmations).toHaveLength(1);
+    expect(pending.pendingConfirmations[0]!.totalLabel).toBe("300,00 €");
+    expect(pending.pendingDeposits).toHaveLength(0);
+  });
+
+  it("WhatsApp button CONFERMATO confirms the booking like the panel", async () => {
+    await notifyQuoteReady(transferRequest());
+    await approveQuoteRound("tenant-1", openRound().id, STAFF);
+    const notice = state.founderOutbox[state.founderOutbox.length - 1]!;
+
+    await founderTap(notice.buttons![0]!.id);
+
+    expect(state.bookings[0]!.status).toBe("confirmed");
+    expect(confirmationsSent()).toHaveLength(1);
   });
 });

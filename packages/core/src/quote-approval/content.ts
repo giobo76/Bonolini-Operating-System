@@ -74,6 +74,21 @@ export function decodeDepositButtonId(buttonId: string): string | null {
 
 export const DEPOSIT_BUTTON_TITLE = "ACCONTO RICEVUTO";
 
+// "bk:<booking id>:customer_confirmed" — italian customers (no deposit):
+// the founder records that the customer confirmed.
+export function encodeCustomerConfirmedButtonId(bookingId: string): string {
+  return `bk:${bookingId}:customer_confirmed`;
+}
+
+export function decodeCustomerConfirmedButtonId(buttonId: string): string | null {
+  const [prefix, id, action, ...rest] = buttonId.split(":");
+  if (prefix !== "bk" || action !== "customer_confirmed" || !id || rest.length > 0) return null;
+  return UUID_PATTERN.test(id) ? id : null;
+}
+
+// WhatsApp reply buttons allow at most 20 characters.
+export const CUSTOMER_CONFIRMED_BUTTON_TITLE = "CONFERMATO";
+
 export function isTypedCommand(text: string): boolean {
   return /^\s*(approva|modifica|rifiuta)\b/i.test(text);
 }
@@ -97,14 +112,13 @@ function childrenLine(tr: TransferRequest): string {
   return tr.childrenAges ? `${tr.children} (età: ${tr.childrenAges})` : `${tr.children} (età non indicata)`;
 }
 
-function availabilityLine(breakdown: unknown): string {
-  if (!breakdown || typeof breakdown !== "object") return "non verificata";
-  const value = breakdown as { status?: unknown; feasibility?: { feasible?: unknown } | null };
-  if (value.status !== "verified") return "non verificata (percorso non calcolato)";
-  if (value.feasibility?.feasible === true) return "compatibile con gli altri servizi";
-  if (value.feasibility?.feasible === false) return "ATTENZIONE: margine operativo insufficiente";
-  return "non verificata";
-}
+// The stored availability result never compared the request with other
+// bookings or with the calendar (the pipeline always passes "no previous
+// service", so it always came out "feasible"): it must not be shown as a
+// check (founder decision 2026-09-26). Until the real overlap check exists,
+// the line always says NOT verified.
+const AVAILABILITY_NOT_VERIFIED =
+  "NON verificata (il BOS non controlla ancora le sovrapposizioni con gli altri servizi e con il calendario)";
 
 function pricingLabel(tr: TransferRequest): string {
   if (tr.pricingStatus === "fixed") return "tariffa fissa";
@@ -136,7 +150,8 @@ export function buildQuoteReadyText(input: {
   tr: TransferRequest;
   client: Client;
   proposedAmountCents: number | null;
-  depositCents: number;
+  // null: italian customer, never a deposit.
+  depositCents: number | null;
   depositIsCustom: boolean;
   customerMessageBody: string;
 }): QuoteReadyText {
@@ -164,10 +179,12 @@ export function buildQuoteReadyText(input: {
     "",
     ...tripLines(tr, client),
     priceLine,
-    `Acconto: ${formatEuro(input.depositCents, tr.currency)}${
-      input.depositIsCustom ? " (scelto da te)" : " (50%, arrotondato)"
-    } — saldo all'autista ${formatEuro(total - input.depositCents, tr.currency)}`,
-    `Disponibilità: ${availabilityLine(tr.availabilityBreakdown)}`,
+    input.depositCents === null
+      ? "Acconto: nessuno (cliente italiano) — dopo l'approvazione la prenotazione aspetta la conferma del cliente"
+      : `Acconto: ${formatEuro(input.depositCents, tr.currency)}${
+          input.depositIsCustom ? " (scelto da te)" : " (50%, arrotondato)"
+        } — saldo all'autista ${formatEuro(total - input.depositCents, tr.currency)}`,
+    `Disponibilità: ${AVAILABILITY_NOT_VERIFIED}`,
   ].join("\n");
 
   return {
@@ -244,6 +261,28 @@ export function buildDepositPendingText(input: {
   ].join("\n");
 }
 
+// Email after approving an italian customer's quote (no deposit): the
+// booking waits for the customer's yes, recorded with "Confermato dal cliente".
+export function buildConfirmationPendingText(input: {
+  tr: TransferRequest;
+  client: Client;
+  totalCents: number;
+  currency: string;
+}): string {
+  const { tr, client } = input;
+  return [
+    "IN ATTESA DI CONFERMA",
+    `Rif. ${shortRef(tr.id)}`,
+    "",
+    `Cliente: ${client.fullName} (${displayPhone(client.phone)})`,
+    `Tratta: ${tr.pickup ?? "?"} → ${tr.destination ?? "?"}`,
+    `Data: ${tr.requestedDate ? formatDateForCustomer(tr.requestedDate) : "?"} ore ${tr.requestedTime ?? "?"}`,
+    `Totale: ${formatEuro(input.totalCents, input.currency)} (cliente italiano: nessun acconto, paga all'autista)`,
+    "",
+    "Il preventivo è partito. Quando il cliente conferma premi \"Confermato dal cliente\": la prenotazione diventa confermata e il cliente riceve la conferma automatica.",
+  ].join("\n");
+}
+
 export const FOUNDER_TEXTS = {
   askPrice: (ref: string) =>
     `MODIFICA ${ref}: scrivi il nuovo prezzo in euro (es. 280 — acconto calcolato al 50%) oppure prezzo e acconto (es. 280 100).`,
@@ -258,6 +297,22 @@ Prenotazione in attesa di acconto (${deposit}): quando lo ricevi premi "Acconto 
     `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}
 Contatta il cliente a mano. Prenotazione in attesa di acconto (${deposit}): quando lo ricevi premi "Acconto ricevuto".`,
   approvedSendInProgress: (ref: string) => `${ref} approvato: invio al cliente già in corso.`,
+  askPriceNoDeposit: (ref: string) =>
+    `MODIFICA ${ref}: scrivi il nuovo prezzo in euro (es. 280). Cliente italiano: nessun acconto.`,
+  noDepositForItalian: (ref: string) =>
+    `${ref}: cliente italiano, nessun acconto (decisione del titolare). Scrivi solo il prezzo, es. 280.`,
+  approvedSentNoDeposit: (ref: string) =>
+    `✅ ${ref} approvato. Preventivo inviato al cliente su WhatsApp (la conferma di consegna arriva a parte).
+Cliente italiano, nessun acconto: quando il cliente conferma premi "Confermato dal cliente".`,
+  approvedSendFailedNoDeposit: (ref: string, error: string) =>
+    `⚠️ ${ref} approvato, ma il WhatsApp al cliente NON è partito: ${error}
+Contatta il cliente a mano. Quando il cliente conferma premi "Confermato dal cliente".`,
+  confirmationPending: (ref: string, total: string) =>
+    `IN ATTESA DI CONFERMA ${ref}: ${total}, cliente italiano. Quando il cliente conferma premi "Confermato dal cliente".`,
+  customerConfirmedSent: (ref: string) =>
+    `✅ ${ref}: conferma del cliente registrata, prenotazione CONFERMATA. Conferma consegnata a WhatsApp per l'invio al cliente.`,
+  customerConfirmedSendFailed: (ref: string, error: string) =>
+    `⚠️ ${ref}: prenotazione CONFERMATA, ma il WhatsApp di conferma al cliente NON è partito: ${error}\nAvvisa il cliente a mano.`,
   depositPending: (ref: string, deposit: string) =>
     `IN ATTESA DI ACCONTO ${ref}: ${deposit}. Quando lo ricevi premi "Acconto ricevuto".`,
   depositConfirmedSent: (ref: string) =>
@@ -287,7 +342,8 @@ Contatta il cliente a mano. Prenotazione in attesa di acconto (${deposit}): quan
   unknownButton: "Pulsante non riconosciuto. Scrivi un messaggio qualsiasi per ricevere di nuovo i preventivi in attesa.",
   notFound: "Preventivo non trovato.",
   useButtons: "I comandi valgono solo tramite i pulsanti sotto ogni PREVENTIVO PRONTO. Te li rimando qui sotto.",
-  nothingPending: "Nessun preventivo in attesa di approvazione e nessuna prenotazione in attesa di acconto.",
+  nothingPending:
+    "Nessun preventivo in attesa di approvazione e nessuna prenotazione in attesa di acconto o di conferma.",
   configError: (what: string) => `Configurazione mancante: ${what}. Nessuna azione eseguita.`,
   disabled: "Flusso preventivi disattivato (QUOTE_APPROVAL_ENABLED). Nessuna azione eseguita.",
   invalidPrice: "Prezzo non valido: scrivi un importo in euro maggiore di zero, es. 280 oppure 280,50.",
@@ -303,5 +359,5 @@ Contatta il cliente a mano. Prenotazione in attesa di acconto (${deposit}): quan
   openQuoteLink: "Apri il preventivo nel pannello",
   openPendingLink: "Apri i preventivi in attesa",
   emailFooter:
-    "Per usare i pulsanti (APPROVA / MODIFICA / RIFIUTA, ACCONTO RICEVUTO) scrivi un messaggio qualsiasi al numero WhatsApp aziendale: ti rimando tutto ciò che è in attesa.",
+    "Per usare i pulsanti (APPROVA / MODIFICA / RIFIUTA, ACCONTO RICEVUTO, CONFERMATO) scrivi un messaggio qualsiasi al numero WhatsApp aziendale: ti rimando tutto ciò che è in attesa.",
 } as const;

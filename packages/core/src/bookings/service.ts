@@ -140,15 +140,16 @@ export async function ensureBookingForApprovedTransferRequest(
       ${tenantId}, ${input.clientId}, ${input.transferRequestId}, ${input.dealId ?? null}, ${input.pickup}, ${input.destination},
       ${input.pickupAddress}, ${input.destinationAddress}, ${input.customerTripDurationMinutes},
       ${input.scheduledAt.toISOString()}, ${input.finalAmountCents}, ${input.currency},
-      ${"pending_deposit"}, ${input.depositAmountCents}
+      ${input.depositAmountCents === null ? "pending_confirmation" : "pending_deposit"}, ${input.depositAmountCents}
     )
     on conflict (transfer_request_id) do nothing
     returning *
   `);
 
   if (insertedRows.length > 0) {
-    // No booking.confirmed here any more: an approved quote is not a
-    // booking until the deposit arrives — see confirmBookingDeposit.
+    // No booking.confirmed here: an approved quote is not a booking until
+    // the deposit arrives or the customer confirms — see
+    // confirmBookingDeposit / confirmBookingByCustomer.
     return assertOne(insertedRows, "ensureBookingForApprovedTransferRequest");
   }
 
@@ -187,6 +188,15 @@ export async function listPendingDepositBookings(tenantId: string): Promise<Book
     .orderBy(bookings.createdAt);
 }
 
+export async function listPendingConfirmationBookings(tenantId: string): Promise<Booking[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(bookings)
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.status, "pending_confirmation")))
+    .orderBy(bookings.createdAt);
+}
+
 export interface ConfirmBookingDepositResult {
   booking: Booking;
   // false when the booking was not waiting for a deposit (already
@@ -221,6 +231,31 @@ export async function confirmBookingDeposit(
     return current ? { booking: current, changed: false } : null;
   }
 
+  return afterConfirmation(tenantId, row);
+}
+
+// pending_confirmation -> confirmed: the italian customer (never a deposit)
+// said yes, recorded by the founder's "Confermato dal cliente". Same
+// conditional UPDATE and effects as confirmBookingDeposit.
+export async function confirmBookingByCustomer(
+  tenantId: string,
+  id: string,
+): Promise<ConfirmBookingDepositResult | null> {
+  const db = getDb();
+  const [row] = await db
+    .update(bookings)
+    .set({ status: "confirmed", updatedAt: new Date() })
+    .where(and(eq(bookings.tenantId, tenantId), eq(bookings.id, id), eq(bookings.status, "pending_confirmation")))
+    .returning();
+
+  if (!row) {
+    const current = await getBooking(tenantId, id);
+    return current ? { booking: current, changed: false } : null;
+  }
+  return afterConfirmation(tenantId, row);
+}
+
+async function afterConfirmation(tenantId: string, row: Booking): Promise<ConfirmBookingDepositResult> {
   if (row.dealId) {
     await advanceDealStatus(tenantId, row.dealId, "confirmed");
   }

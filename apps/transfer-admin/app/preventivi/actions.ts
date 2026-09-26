@@ -76,6 +76,21 @@ export async function confirmDepositAction(formData: FormData) {
   redirect(`${back}?${params.toString()}`);
 }
 
+// "Confermato dal cliente" (italian customers, no deposit): confirms the
+// booking and sends the customer the automatic confirmation.
+export async function confirmCustomerAction(formData: FormData) {
+  const bookingId = String(formData.get("bookingId"));
+  const back = safeBackPath(formData.get("back"));
+
+  const caller = await createServerCaller();
+  const result = await caller.quoteApproval.confirmCustomer({ bookingId });
+
+  revalidatePath("/preventivi");
+  revalidatePath(back);
+  const params = new URLSearchParams({ esito: result.message, tipo: result.outcome });
+  redirect(`${back}?${params.toString()}`);
+}
+
 // "Prezzo da inserire" -> Crea preventivo: opens the new PREVENTIVO PRONTO
 // page (Approva / Modifica / Rifiuta); on refusal back to the list.
 export async function enterManualPriceAction(formData: FormData) {

@@ -104,7 +104,9 @@ export default async function QuoteRoundPage({
           <form action={approveAction}>
             <input type="hidden" name="id" value={round.id} />
             <SubmitButton pendingLabel="Invio in corso…">
-              Approva e invia al cliente (acconto {view.depositLabel})
+              {view.depositLabel !== null
+                ? `Approva e invia al cliente (acconto ${view.depositLabel})`
+                : "Approva e invia al cliente (cliente italiano, nessun acconto)"}
             </SubmitButton>
           </form>
 
@@ -121,19 +123,25 @@ export default async function QuoteRoundPage({
               placeholder={(view.amountCents / 100).toFixed(2).replace(".", ",")}
               className="rounded-lg border px-3 py-3 text-base"
             />
-            <label htmlFor="acconto" className="text-sm font-medium">
-              Acconto (€, facoltativo)
-            </label>
-            <input
-              id="acconto"
-              name="acconto"
-              inputMode="decimal"
-              placeholder={`vuoto = 50% arrotondato (ora ${view.depositLabel})`}
-              className="rounded-lg border px-3 py-3 text-base"
-            />
+            {view.depositLabel !== null ? (
+              <>
+                <label htmlFor="acconto" className="text-sm font-medium">
+                  Acconto (€, facoltativo)
+                </label>
+                <input
+                  id="acconto"
+                  name="acconto"
+                  inputMode="decimal"
+                  placeholder={`vuoto = 50% arrotondato (ora ${view.depositLabel})`}
+                  className="rounded-lg border px-3 py-3 text-base"
+                />
+              </>
+            ) : null}
             <p className="text-xs text-neutral-500 dark:text-neutral-400">
-              Crea un nuovo preventivo con il nuovo prezzo e acconto; poi lo controlli e lo approvi. Al cliente non
-              parte nulla finché non premi Approva.
+              {view.depositLabel !== null
+                ? "Crea un nuovo preventivo con il nuovo prezzo e acconto; poi lo controlli e lo approvi."
+                : "Cliente italiano: nessun acconto. Crea un nuovo preventivo con il nuovo prezzo; poi lo controlli e lo approvi."}{" "}
+              Al cliente non parte nulla finché non premi Approva.
             </p>
             <SubmitButton variant="secondary" pendingLabel="Salvataggio…">
               Modifica

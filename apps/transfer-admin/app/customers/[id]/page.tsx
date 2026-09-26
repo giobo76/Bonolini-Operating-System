@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { createServerCaller } from "@bos/core";
 import { PermissionDenied } from "../permission-denied";
 import { archiveCustomerAction, restoreCustomerAction } from "../actions";
-import { confirmDepositAction } from "../../preventivi/actions";
+import { confirmCustomerAction, confirmDepositAction } from "../../preventivi/actions";
 import {
   createBookingAction,
   createQuoteAction,
@@ -314,6 +314,30 @@ export default async function CustomerDetailPage({
                       </form>
                       <span className="self-end text-xs text-neutral-500 dark:text-neutral-400">
                         (conferma la prenotazione e manda al cliente la conferma automatica su WhatsApp)
+                      </span>
+                      <form action={updateBookingAction}>
+                        <input type="hidden" name="clientId" value={id} />
+                        <input type="hidden" name="id" value={booking.id} />
+                        <input type="hidden" name="status" value="cancelled" />
+                        <button type="submit" className="text-xs text-red-600 underline">
+                          Cancel
+                        </button>
+                      </form>
+                    </>
+                  ) : null}
+
+                  {booking.status === "pending_confirmation" ? (
+                    <>
+                      <form action={confirmCustomerAction} className="flex items-end gap-1">
+                        <input type="hidden" name="bookingId" value={booking.id} />
+                        <input type="hidden" name="back" value={`/customers/${id}`} />
+                        <button type="submit" className="text-xs underline">
+                          Confermato dal cliente
+                        </button>
+                      </form>
+                      <span className="self-end text-xs text-neutral-500 dark:text-neutral-400">
+                        (cliente italiano, nessun acconto: conferma la prenotazione e manda al cliente la conferma
+                        automatica su WhatsApp)
                       </span>
                       <form action={updateBookingAction}>
                         <input type="hidden" name="clientId" value={id} />

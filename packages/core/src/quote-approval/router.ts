@@ -4,6 +4,7 @@ import { router, staffProcedure } from "../trpc";
 import {
   approveQuoteRound,
   confirmDepositReceived,
+  confirmCustomerConfirmed,
   enterManualPrice,
   getRoundForPanel,
   listPendingForPanel,
@@ -74,4 +75,10 @@ export const quoteApprovalRouter = router({
     .mutation(({ ctx, input }) =>
       confirmDepositReceived(ctx.session.profile.tenantId, input.bookingId, input.receivedAmountCents),
     ),
+
+  // "Confermato dal cliente" (italian customers, no deposit): confirms the
+  // booking and sends the customer the automatic confirmation.
+  confirmCustomer: staffProcedure
+    .input(z.object({ bookingId: z.string().uuid() }))
+    .mutation(({ ctx, input }) => confirmCustomerConfirmed(ctx.session.profile.tenantId, input.bookingId)),
 });

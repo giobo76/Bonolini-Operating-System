@@ -1363,6 +1363,12 @@ describe("Availability does not block pricing, and the two Maps calls stay indep
 describe("Admin decision — accept / reject / modifyPrice", () => {
   const ADMIN_ID = "admin-profile-1";
 
+  // Founder decision 2026-09-26: only foreign customers pay a deposit. The
+  // deposit tests below use a foreign customer; the italian case has its own.
+  beforeEach(() => {
+    fakeState.clients.push({ id: "client-1", tenantId: "tenant-1", phone: "+4915112345678" });
+  });
+
   function seedPendingApproval(overrides: Partial<Record<string, unknown>> = {}) {
     fakeState.requests.push({
       id: "request-1",
@@ -1607,6 +1613,24 @@ describe("Admin decision — accept / reject / modifyPrice", () => {
       expect(onlyBooking().depositAmountCents).toBe(5000);
     });
 
+    it("N1d: italian customer (+39): booking waiting for the customer's confirmation, never a deposit", async () => {
+      fakeState.clients = [{ id: "client-1", tenantId: "tenant-1", phone: "+393331234567" }];
+      seedPendingApproval();
+
+      await acceptTransferRequest("tenant-1", "request-1", ADMIN_ID);
+
+      expect(onlyBooking().status).toBe("pending_confirmation");
+      expect(onlyBooking().depositAmountCents).toBeNull();
+    });
+
+    it("N1e: italian customer: a deposit passed by any caller is refused, no booking", async () => {
+      fakeState.clients = [{ id: "client-1", tenantId: "tenant-1", phone: "+393331234567" }];
+      seedPendingApproval();
+
+      await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID, 5000)).rejects.toThrow("cliente italiano");
+      expect(fakeState.bookings).toHaveLength(0);
+    });
+
     it("N1c: a deposit larger than the price is refused", async () => {
       seedPendingApproval();
       await expect(acceptTransferRequest("tenant-1", "request-1", ADMIN_ID, 30000)).rejects.toThrow("invalid deposit");
@@ -1763,6 +1787,12 @@ describe("listPendingApprovalTransferRequests", () => {
 // file, so these only assert emitDomainEvent was called with the right
 // event name/payload, never a real network call.
 describe("transfer_request.confirmed domain event", () => {
+
+  // Founder decision 2026-09-26: only foreign customers pay a deposit. The
+  // deposit tests below use a foreign customer; the italian case has its own.
+  beforeEach(() => {
+    fakeState.clients.push({ id: "client-1", tenantId: "tenant-1", phone: "+4915112345678" });
+  });
   function seedPendingApprovalForEventTest(overrides: Partial<Record<string, unknown>> = {}) {
     fakeState.requests.push({
       id: "request-1",
@@ -1850,6 +1880,12 @@ describe("transfer_request.confirmed domain event", () => {
 
 // "Prezzo da inserire" -> Crea preventivo (founder decision, 2026-09-25).
 describe("enterManualPriceForTransferRequest + approval of a manual price", () => {
+
+  // Founder decision 2026-09-26: only foreign customers pay a deposit. The
+  // deposit tests below use a foreign customer; the italian case has its own.
+  beforeEach(() => {
+    fakeState.clients.push({ id: "client-1", tenantId: "tenant-1", phone: "+4915112345678" });
+  });
   function seedManualRequired(overrides: Partial<Record<string, unknown>> = {}) {
     fakeState.requests.push({
       id: "request-1",

@@ -15,6 +15,10 @@ export const bookingStatusEnum = pgEnum("booking_status", [
   // Approved quote waiting for the customer's deposit (migration 0030). Not
   // a conversion: every KPI counts only confirmed/completed.
   "pending_deposit",
+  // Approved quote for an italian customer (+39), who never pays a deposit:
+  // waits for the founder's "Confermato dal cliente" (migration 0030, founder
+  // decision 2026-09-26). Not a conversion either.
+  "pending_confirmation",
   "confirmed",
   "completed",
   "cancelled",

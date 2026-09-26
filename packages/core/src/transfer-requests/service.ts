@@ -7,6 +7,7 @@ import {
   determineCustomerType,
   isComoTiranoRoute,
   isValidDeposit,
+  customerPaysDeposit,
   resolvePricingRates,
   type CustomerType,
 } from "../pricing";
@@ -1114,13 +1115,24 @@ async function ensureBookingForApprovedTransferRequestOrThrow(
     );
   }
 
-  // Ignored on the idempotent retry path: an existing booking keeps the
-  // deposit it was created with (ON CONFLICT DO NOTHING).
-  const deposit = depositAmountCents ?? computeDefaultDepositCents(approved.finalAmountCents);
-  if (!isValidDeposit(deposit, approved.finalAmountCents)) {
-    throw new Error(
-      `invalid deposit ${deposit} for transfer_request ${approved.id} (total ${approved.finalAmountCents})`,
-    );
+  // Only foreign customers pay a deposit (founder decision 2026-09-26),
+  // enforced here so every approval path follows it. Ignored on the
+  // idempotent retry path: an existing booking keeps what it was created
+  // with (ON CONFLICT DO NOTHING).
+  const client = await getClient(tenantId, approved.clientId);
+  if (!client) {
+    throw new Error(`booking creation failed: client ${approved.clientId} not found`);
+  }
+  let deposit: number | null = null;
+  if (customerPaysDeposit(client.phone)) {
+    deposit = depositAmountCents ?? computeDefaultDepositCents(approved.finalAmountCents);
+    if (!isValidDeposit(deposit, approved.finalAmountCents)) {
+      throw new Error(
+        `invalid deposit ${deposit} for transfer_request ${approved.id} (total ${approved.finalAmountCents})`,
+      );
+    }
+  } else if (depositAmountCents !== undefined) {
+    throw new Error(`cliente italiano: nessun acconto (transfer_request ${approved.id})`);
   }
 
   const customerTripDurationMinutes = await resolveCustomerTripDurationMinutesForBooking(approved);
@@ -1235,9 +1247,10 @@ function assertCalculatedAmount(existing: TransferRequest, caller: string): numb
 // non-pending_admin_approval status is still a real error, not a silent
 // no-op.
 //
-// depositAmountCents: the deposit the customer is asked for; defaults to
-// computeDefaultDepositCents(final price). The booking is created at
-// 'pending_deposit'.
+// depositAmountCents: the deposit a foreign customer is asked for; defaults
+// to computeDefaultDepositCents(final price), booking at 'pending_deposit'.
+// Italian customers never pay one (passing it is an error): booking at
+// 'pending_confirmation'.
 export async function acceptTransferRequest(
   tenantId: string,
   id: string,

@@ -1,3 +1,12 @@
+import { determineCustomerType } from "./service";
+
+// Only foreign customers pay a deposit (founder decision 2026-09-26): phone
+// not starting with +39, the same rule as the fares. Italian customers
+// never do, not even case by case.
+export function customerPaysDeposit(phone: string): boolean {
+  return determineCustomerType(phone) === "foreign";
+}
+
 // Default deposit (founder decision, 2026-09-24): 50% of the total, rounded
 // to the nearest 10 €, halves rounded up (390 € -> 200 €, 285 € -> 140 €).
 // Integer cents throughout — no floating point on money.

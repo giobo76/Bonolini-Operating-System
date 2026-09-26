@@ -45,31 +45,40 @@ customer WhatsApp ─▶ transfer-requests (merge, availability, pricing)
    ├─ pending_admin_approval ──▶ email "PREVENTIVO PRONTO" (data, exact customer text, link to /preventivi/<id>)
    └─ ready_for_pricing + manual_required ─▶ email "PREZZO DA INSERIRE" (link to /preventivi)
 
-panel Approva  ─▶ acceptTransferRequest (or modifyPrice for a modified round), with the round's deposit,
-                  approver = logged-in profile
+panel Approva  ─▶ acceptTransferRequest (or modifyPrice for a modified round), approver = logged-in profile
+               foreign customer (phone not +39), with the round's deposit:
                ─▶ booking created at pending_deposit (deal stays "quoted")
-               ─▶ communications: prepare → submit → approve → execute ─▶ quote to the customer
-                  (total, deposit to confirm the booking, balance to the driver on the day)
+               ─▶ quote to the customer (total, deposit to confirm the booking, balance to the driver)
                ─▶ email "IN ATTESA DI ACCONTO" (link to the customer page with the booking)
-panel Modifica ─▶ price (+ optional deposit; empty = 50% rule): this round superseded, new round
-                  (no email, the page opens it)
+               italian customer (+39), never a deposit:
+               ─▶ booking created at pending_confirmation (deal stays "quoted")
+               ─▶ quote to the customer ("Prezzo: … per l'intero veicolo", no deposit lines)
+               ─▶ email "IN ATTESA DI CONFERMA" (link to the customer page with the booking)
+               (communications: prepare → submit → approve → execute, in both cases)
+panel Modifica ─▶ price (+ optional deposit for foreign customers only; empty = 50% rule): this round
+                  superseded, new round (no email, the page opens it)
 panel Rifiuta  ─▶ rejectTransferRequest, nothing sent to the customer
 panel Crea preventivo (Prezzo da inserire) ─▶ request to pending_admin_approval at the typed price
                (and deposit: empty = 50% rule)
                ─▶ new PREVENTIVO PRONTO round (Approva / Modifica / Rifiuta), nothing sent
-panel "Acconto ricevuto" (Preventivi in attesa, or the customer page)
+panel "Acconto ricevuto" (foreign; Preventivi in attesa, or the customer page)
                ─▶ bookings.confirmBookingDeposit: pending_deposit → confirmed, deal confirmed
                ─▶ communications.sendBookingConfirmation ─▶ confirmation to the customer (automatic)
+panel "Confermato dal cliente" (italian; Preventivi in attesa, or the customer page)
+               ─▶ bookings.confirmBookingByCustomer: pending_confirmation → confirmed, deal confirmed
+               ─▶ communications.sendBookingConfirmation ─▶ confirmation without deposit lines (automatic)
+both confirmations emit booking.confirmed (→ the Google Calendar event)
 any customer send that fails ─▶ email "INVIO AL CLIENTE NON RIUSCITO" (once)
 ```
 
-**Deposit rule** (`pricing/deposit.ts`): 50% of the total, rounded to the nearest 10 €, halves up (390 € → 200 €). It is never zero and never more than the total. The founder can override it per quote in Modifica. BOS never generates a payment link: the founder sends the SumUp link.
+**Deposit rule** (`pricing/deposit.ts`): only foreign customers pay a deposit (founder decision 2026-09-26): phone not starting with +39, the same rule pricing uses (`determineCustomerType`, `customerPaysDeposit`). Italian customers never do, not even case by case: Modifica / Crea preventivo with a deposit for an Italian customer is refused, and `transfer-requests` refuses to create an Italian booking with a deposit whatever the caller. For foreign customers: 50% of the total, rounded to the nearest 10 €, halves up (390 € → 200 €), never zero and never more than the total; the founder can override it per quote in Modifica. BOS never generates a payment link: the founder sends the SumUp link.
 
-**Confirmation to the customer** (founder decision, 2026-09-24): sent automatically after "Acconto ricevuto", in IT/EN with the booking's date and time. `confirmDepositReceived` is shared by the panel (the list and the customer page) and the dormant WhatsApp button. It follows the same switches, 24h window and double-send protection as every other message (idempotency key `booking_confirmation:<booking id>`). If the send fails, the page says so and an alert email goes out.
+**Confirmation to the customer** (founder decision, 2026-09-24): sent automatically after "Acconto ricevuto" (foreign) or "Confermato dal cliente" (italian, 2026-09-26), in IT/EN with the booking's date and time. `confirmDepositReceived` / `confirmCustomerConfirmed` are shared by the panel (the list and the customer page) and the dormant WhatsApp button. It follows the same switches, 24h window and double-send protection as every other message (idempotency key `booking_confirmation:<booking id>`). If the send fails, the page says so and an alert email goes out.
 
 **Texts:** the founder's final wording (2026-09-24), in `communications/content.ts` and tested verbatim:
 - the price lines of the quote: total, deposit to confirm the booking, balance "preferibilmente in contanti", and the line announcing the deposit payment link;
 - the confirmation message: the balance line, and "driver's name and contact the day before".
+- italian customers (2026-09-26): the quote is the pre-deposit wording ("Prezzo: … per l'intero veicolo"); the confirmation says "Le confermiamo la prenotazione con Bonolini Transfer.", the price, "Pagamento all'autista il giorno del servizio, in contanti o con carta." and the driver line — no deposit lines anywhere.
 
 The quote reaches the customer **only** from Approva, whether from the panel or a dormant WhatsApp button. That is the only code path that calls `approveCommunication` for a `quote_offer`.
 
@@ -107,6 +116,6 @@ It applies to the customer: WhatsApp free-form messages only reach someone who w
 
 ## Known limits
 
-- **No deposit deadline.** A booking stays `pending_deposit` until the founder confirms or cancels it; nothing expires automatically.
+- **No deposit or confirmation deadline.** A booking stays `pending_deposit` / `pending_confirmation` until the founder confirms or cancels it; nothing expires automatically.
 - **Late messages don't update a pending request.** A customer message with children or luggage that arrives after `pending_admin_approval` is not merged into it: that is the existing matching rule for a live offer.
 - **Speed.** Everything runs inline in the webhook or the panel request.
