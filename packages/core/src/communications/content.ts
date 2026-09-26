@@ -52,11 +52,12 @@ export function toCustomerLanguage(language: string | null | undefined): Custome
 
 const SIGNATURE = "Bonolini Transfer – Private Transfers";
 
-// The founder's vehicle, as stated by the founder. Not a database field:
+// Vehicle line for customers: deliberately no make or model (founder
+// decision 2026-09-25). Not a database field:
 // BOS has no vehicle model anywhere, and availability assumes one vehicle.
 const VEHICLE: Record<CustomerLanguage, string> = {
-  it: "Mercedes V-Class con autista privato",
-  en: "Mercedes V-Class with private driver",
+  it: "minivan premium con autista privato",
+  en: "premium minivan with private driver",
 };
 
 export type BlockingMissingField = "pickup" | "destination" | "passengers" | "date" | "time" | "flight_number";

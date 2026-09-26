@@ -3,6 +3,7 @@ import { z } from "zod";
 import { router, staffProcedure } from "../trpc";
 import {
   approveQuoteRound,
+  enterManualPrice,
   getRoundForPanel,
   listPendingForPanel,
   rejectQuoteRound,
@@ -30,6 +31,14 @@ export const quoteApprovalRouter = router({
   reject: staffProcedure
     .input(roundIdSchema)
     .mutation(({ ctx, input }) => rejectQuoteRound(ctx.session.profile.tenantId, input.id)),
+
+  // "Prezzo da inserire" -> Crea preventivo. Opens a PREVENTIVO PRONTO
+  // round at the typed price; nothing is sent to the customer.
+  enterManualPrice: staffProcedure
+    .input(roundIdSchema.extend({ amountCents: z.number().int().positive() }))
+    .mutation(({ ctx, input }) =>
+      enterManualPrice(ctx.session.profile.tenantId, input.id, input.amountCents, ctx.session.profile.id),
+    ),
 
   revise: staffProcedure
     .input(roundIdSchema.extend({ amountCents: z.number().int().positive() }))

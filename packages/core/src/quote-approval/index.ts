@@ -4,6 +4,7 @@ export {
   approveQuoteRound,
   rejectQuoteRound,
   reviseQuoteRound,
+  enterManualPrice,
   listPendingForPanel,
   getRoundForPanel,
 } from "./service";

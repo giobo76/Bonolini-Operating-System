@@ -45,3 +45,22 @@ export async function reviseAction(formData: FormData) {
   const result = await caller.quoteApproval.revise({ id, amountCents });
   backTo(result.newRoundId ?? id, result);
 }
+
+// "Prezzo da inserire" -> Crea preventivo: opens the new PREVENTIVO PRONTO
+// page (Approva / Modifica / Rifiuta); on refusal back to the list.
+export async function enterManualPriceAction(formData: FormData) {
+  const id = String(formData.get("id"));
+  const amountCents = parseEuros(formData.get("prezzo"));
+  const back = (result: Pick<DecisionResult, "outcome" | "message">): never => {
+    revalidatePath("/preventivi");
+    const params = new URLSearchParams({ esito: result.message, tipo: result.outcome });
+    redirect(`/preventivi?${params.toString()}`);
+  };
+  if (amountCents === null) {
+    return back({ outcome: "refused", message: "Prezzo non valido: scrivi un importo in euro maggiore di zero, es. 280 oppure 280,50." });
+  }
+  const caller = await createServerCaller();
+  const result = await caller.quoteApproval.enterManualPrice({ id, amountCents });
+  if (result.newRoundId) backTo(result.newRoundId, result);
+  back(result);
+}
