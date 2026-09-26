@@ -5,6 +5,7 @@ export {
   rejectQuoteRound,
   reviseQuoteRound,
   confirmDepositReceived,
+  confirmCustomerConfirmed,
   enterManualPrice,
   listPendingForPanel,
   getRoundForPanel,
@@ -19,6 +20,7 @@ export type {
   PanelRoundDetail,
   PanelManualPrice,
   PanelPendingDeposit,
+  PanelPendingConfirmation,
   RoundView,
 } from "./service";
 export { quoteApprovalRouter } from "./router";

@@ -278,7 +278,7 @@ describe("booking confirmation", () => {
   };
 
   it("Italian: the founder's text verbatim", () => {
-    const { body, to } = buildBookingConfirmationContent({ ...trip, language: "it", balanceCents: 19000 });
+    const { body, to } = buildBookingConfirmationContent({ ...trip, language: "it", totalCents: 39000, depositCents: 20000 });
     expect(to).toBe("+393331234567");
     expect(body).toBe(
       [
@@ -306,7 +306,8 @@ describe("booking confirmation", () => {
       childrenAges: "4 and 7",
       luggage: "4 large suitcases",
       language: "en",
-      balanceCents: 19000,
+      totalCents: 39000,
+      depositCents: 20000,
     });
     expect(body).toBe(
       [
@@ -330,9 +331,125 @@ describe("booking confirmation", () => {
 
   it("uses the real balance of each booking and never a link, the word taxi or the vehicle model", () => {
     for (const language of ["it", "en"] as const) {
-      const { body } = buildBookingConfirmationContent({ ...trip, language, balanceCents: 18000 });
+      const { body } = buildBookingConfirmationContent({ ...trip, language, totalCents: 28000, depositCents: 10000 });
       expect(body).toMatch(language === "it" ? /180,00 € \(preferibilmente in contanti\)/ : /€180\.00 \(preferably in cash\)/);
       expect(body).not.toMatch(/taxi|https?:|mercedes|v-class|classe v/i);
+    }
+  });
+});
+
+// Founder decision 2026-09-26: italian customers (+39) never pay a
+// deposit. Quote = the pre-deposit wording; confirmation with the payment
+// line the founder dictated.
+describe("no deposit (italian customers)", () => {
+  const trip = {
+    to: FULL_QUOTE.to,
+    pickup: FULL_QUOTE.pickup,
+    destination: FULL_QUOTE.destination,
+    requestedDate: FULL_QUOTE.requestedDate,
+    requestedTime: FULL_QUOTE.requestedTime,
+    passengers: FULL_QUOTE.passengers,
+    children: FULL_QUOTE.children,
+    childrenAges: FULL_QUOTE.childrenAges,
+    luggage: FULL_QUOTE.luggage,
+    flightNumber: FULL_QUOTE.flightNumber,
+    currency: FULL_QUOTE.currency,
+  };
+
+  it("quote, Italian: price for the whole vehicle, no deposit lines", () => {
+    const { body } = buildTransferQuoteOfferContent({ ...FULL_QUOTE, amountCents: 39000, depositCents: null, language: "it" });
+    expect(body).toBe(
+      [
+        "Buongiorno,",
+        "grazie per aver scelto Bonolini Transfer. Ecco il Suo preventivo:",
+        "",
+        "Tratta: Malpensa → Sondrio",
+        "Data: 3 ottobre 2026, ore 14:30",
+        "Passeggeri: 2 adulti + 2 bambini (4 e 7 anni)",
+        "Bagagli: 4 valigie grandi",
+        "Volo: AZ123",
+        "Veicolo: minivan premium con autista privato",
+        "Prezzo: 390,00 € per l'intero veicolo",
+        "",
+        "Per confermare il servizio o per qualsiasi domanda, risponda pure a questo messaggio.",
+        "Bonolini Transfer – Private Transfers",
+      ].join("\n"),
+    );
+  });
+
+  it("quote, English: same, no deposit lines", () => {
+    const { body } = buildTransferQuoteOfferContent({
+      ...FULL_QUOTE,
+      childrenAges: "4 and 7",
+      luggage: "4 large suitcases",
+      amountCents: 39000,
+      depositCents: null,
+      language: "en",
+    });
+    expect(body).toContain("Price: €390.00 for the entire vehicle\n\nTo confirm the service or for any question, simply reply to this message.");
+    expect(body).not.toMatch(/deposit|balance/i);
+  });
+
+  it("confirmation, Italian: the founder's text verbatim", () => {
+    const { body } = buildBookingConfirmationContent({ ...trip, language: "it", totalCents: 39000, depositCents: null });
+    expect(body).toBe(
+      [
+        "Buongiorno,",
+        "Le confermiamo la prenotazione con Bonolini Transfer.",
+        "",
+        "Tratta: Malpensa → Sondrio",
+        "Data: 3 ottobre 2026, ore 14:30",
+        "Passeggeri: 2 adulti + 2 bambini (4 e 7 anni)",
+        "Bagagli: 4 valigie grandi",
+        "Volo: AZ123",
+        "Veicolo: minivan premium con autista privato",
+        "Prezzo: 390,00 € per l'intero veicolo",
+        "",
+        "Il giorno prima del servizio Le invieremo nome e contatto dell'autista.",
+        "Pagamento all'autista il giorno del servizio, in contanti o con carta.",
+        "Per qualsiasi domanda, risponda pure a questo messaggio.",
+        "Bonolini Transfer – Private Transfers",
+      ].join("\n"),
+    );
+  });
+
+  it("confirmation, English: the founder's text verbatim", () => {
+    const { body } = buildBookingConfirmationContent({
+      ...trip,
+      childrenAges: "4 and 7",
+      luggage: "4 large suitcases",
+      language: "en",
+      totalCents: 39000,
+      depositCents: null,
+    });
+    expect(body).toBe(
+      [
+        "Hello,",
+        "Your booking with Bonolini Transfer is confirmed.",
+        "",
+        "Route: Malpensa → Sondrio",
+        "Date: 3 October 2026 at 14:30",
+        "Passengers: 2 adults + 2 children (ages 4 and 7)",
+        "Luggage: 4 large suitcases",
+        "Flight: AZ123",
+        "Vehicle: premium minivan with private driver",
+        "Price: €390.00 for the entire vehicle",
+        "",
+        "The day before your transfer we will send you the driver's name and contact details.",
+        "Payment to the driver on the day of service, in cash or by card.",
+        "For any question, simply reply to this message.",
+        "Bonolini Transfer – Private Transfers",
+      ].join("\n"),
+    );
+  });
+
+  it("never mentions a deposit, a link, taxi or the vehicle model", () => {
+    for (const language of ["it", "en"] as const) {
+      const quote = buildTransferQuoteOfferContent({ ...FULL_QUOTE, amountCents: 39000, depositCents: null, language }).body;
+      const confirmation = buildBookingConfirmationContent({ ...trip, language, totalCents: 39000, depositCents: null }).body;
+      for (const body of [quote, confirmation]) {
+        expect(body).not.toMatch(/acconto|saldo|deposit|balance|https?:|taxi|mercedes|v-class|classe v/i);
+      }
     }
   });
 });

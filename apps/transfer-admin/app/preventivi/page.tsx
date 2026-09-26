@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { TRPCError } from "@trpc/server";
 import { createServerCaller } from "@bos/core";
-import { confirmDepositAction, enterManualPriceAction } from "./actions";
+import { confirmCustomerAction, confirmDepositAction, enterManualPriceAction } from "./actions";
 import { SubmitButton } from "./submit-button";
 
 function NoAccess() {
@@ -133,12 +133,45 @@ export default async function PendingQuotesPage({
 
       <section className="flex flex-col gap-3">
         <h2 className="text-sm font-medium text-neutral-500 dark:text-neutral-400">
+          In attesa di conferma ({pending.pendingConfirmations.length})
+        </h2>
+        {pending.pendingConfirmations.length === 0 ? (
+          <p className="text-sm text-neutral-400">Nessuna prenotazione in attesa di conferma del cliente.</p>
+        ) : (
+          pending.pendingConfirmations.map(({ booking, transferRequest: tr, client, totalLabel, ref }) => (
+            <div key={booking.id} className="flex flex-col gap-2 rounded-lg border p-4">
+              <div className="flex items-center justify-between">
+                <Link href={`/customers/${client.id}`} className="font-medium underline">
+                  {client.fullName}
+                </Link>
+                <span className="text-sm text-neutral-500 dark:text-neutral-400">{ref}</span>
+              </div>
+              <div className="text-sm">
+                {tr.pickup} → {tr.destination} · {formatDate(tr.requestedDate, tr.requestedTime)}
+              </div>
+              <div className="text-sm">
+                Totale {totalLabel} · cliente italiano, nessun acconto
+              </div>
+              <form action={confirmCustomerAction} className="flex flex-col gap-2">
+                <input type="hidden" name="bookingId" value={booking.id} />
+                <input type="hidden" name="back" value="/preventivi" />
+                <SubmitButton pendingLabel="Conferma in corso…">
+                  Confermato dal cliente — conferma e avvisa il cliente
+                </SubmitButton>
+              </form>
+            </div>
+          ))
+        )}
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <h2 className="text-sm font-medium text-neutral-500 dark:text-neutral-400">
           Prezzo da inserire ({pending.manualPrices.length})
         </h2>
         {pending.manualPrices.length === 0 ? (
           <p className="text-sm text-neutral-400">Nessuna richiesta senza prezzo.</p>
         ) : (
-          pending.manualPrices.map(({ round, text }) => (
+          pending.manualPrices.map(({ round, text, paysDeposit }) => (
             <div key={round.id} className="flex flex-col gap-3 rounded-lg border p-4">
               <pre className="whitespace-pre-wrap font-sans text-sm">{text}</pre>
               <form action={enterManualPriceAction} className="flex flex-col gap-2">
@@ -154,18 +187,24 @@ export default async function PendingQuotesPage({
                   placeholder="es. 280"
                   className="rounded-lg border px-3 py-3 text-base"
                 />
-                <label htmlFor={`acconto-${round.id}`} className="text-sm font-medium">
-                  Acconto (€, facoltativo)
-                </label>
-                <input
-                  id={`acconto-${round.id}`}
-                  name="acconto"
-                  inputMode="decimal"
-                  placeholder="vuoto = 50% arrotondato"
-                  className="rounded-lg border px-3 py-3 text-base"
-                />
+                {paysDeposit ? (
+                  <>
+                    <label htmlFor={`acconto-${round.id}`} className="text-sm font-medium">
+                      Acconto (€, facoltativo)
+                    </label>
+                    <input
+                      id={`acconto-${round.id}`}
+                      name="acconto"
+                      inputMode="decimal"
+                      placeholder="vuoto = 50% arrotondato"
+                      className="rounded-lg border px-3 py-3 text-base"
+                    />
+                  </>
+                ) : null}
                 <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                  Crea il PREVENTIVO PRONTO con questo prezzo e acconto: poi lo controlli e scegli Approva, Modifica o Rifiuta.
+                  {paysDeposit
+                    ? "Crea il PREVENTIVO PRONTO con questo prezzo e acconto: poi lo controlli e scegli Approva, Modifica o Rifiuta."
+                    : "Cliente italiano: nessun acconto. Crea il PREVENTIVO PRONTO con questo prezzo: poi lo controlli e scegli Approva, Modifica o Rifiuta."}{" "}
                   Al cliente non parte nulla finché non premi Approva.
                 </p>
                 <SubmitButton pendingLabel="Creazione in corso…">Crea preventivo</SubmitButton>

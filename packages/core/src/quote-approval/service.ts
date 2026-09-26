@@ -11,9 +11,12 @@ import {
   getBooking,
   getBookingByTransferRequestId,
   listPendingDepositBookings,
+  listPendingConfirmationBookings,
   confirmBookingDeposit,
+  confirmBookingByCustomer,
+  type ConfirmBookingDepositResult,
 } from "../bookings";
-import { computeDefaultDepositCents, isValidDeposit } from "../pricing";
+import { computeDefaultDepositCents, customerPaysDeposit, isValidDeposit } from "../pricing";
 import {
   sendMissingInfoRequest,
   sendBookingConfirmation,
@@ -35,15 +38,19 @@ import { sendToFounder, type FounderButton } from "./founder-channel";
 import { adminLink, isCustomerPhoneAllowed, isQuoteApprovalEnabled } from "./config";
 import {
   APPROVAL_BUTTONS,
+  CUSTOMER_CONFIRMED_BUTTON_TITLE,
   DEPOSIT_BUTTON_TITLE,
   FOUNDER_TEXTS,
+  buildConfirmationPendingText,
   buildCustomerSendFailureText,
   buildDepositPendingText,
   buildManualPriceText,
   buildQuoteReadyText,
   decodeButtonId,
+  decodeCustomerConfirmedButtonId,
   decodeDepositButtonId,
   encodeButtonId,
+  encodeCustomerConfirmedButtonId,
   encodeDepositButtonId,
   isTypedCommand,
   parseFounderPriceAndDeposit,
@@ -256,8 +263,10 @@ async function deliverNotification(tenantId: string, row: QuoteApprovalRequest, 
 }
 
 // The deposit a round proposes: the founder's own (Modifica with an
-// acconto) or the default 50% rule on that round's price.
-function depositForRound(row: QuoteApprovalRequest, amountCents: number): number {
+// acconto) or the default 50% rule on that round's price. null for an
+// italian customer (+39), who never pays one (founder decision 2026-09-26).
+function depositForRound(row: QuoteApprovalRequest, amountCents: number, client: Client): number | null {
+  if (!customerPaysDeposit(client.phone)) return null;
   return row.proposedDepositCents ?? computeDefaultDepositCents(amountCents);
 }
 
@@ -279,7 +288,7 @@ function tripDetails(tr: TransferRequest) {
   };
 }
 
-function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, depositCents: number, to: string) {
+function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, depositCents: number | null, to: string) {
   return buildTransferQuoteOfferContent({ ...tripDetails(tr), to, amountCents, depositCents, currency: tr.currency });
 }
 
@@ -288,8 +297,9 @@ function buildCustomerQuoteContent(tr: TransferRequest, amountCents: number, dep
 export interface RoundView {
   amountCents: number;
   amountLabel: string;
-  depositCents: number;
-  depositLabel: string;
+  // null: italian customer, no deposit.
+  depositCents: number | null;
+  depositLabel: string | null;
   founderDetails: string;
   customerPreview: string;
   customerPreviewWithTitle: string;
@@ -298,7 +308,7 @@ export interface RoundView {
 function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: Client): RoundView | null {
   const amountCents = row.proposedAmountCents ?? tr.calculatedAmountCents;
   if (amountCents === null) return null;
-  const depositCents = depositForRound(row, amountCents);
+  const depositCents = depositForRound(row, amountCents, client);
   const preview = buildCustomerQuoteContent(tr, amountCents, depositCents, "");
   const text = buildQuoteReadyText({
     tr,
@@ -312,7 +322,7 @@ function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: 
     amountCents,
     amountLabel: formatAmountForCustomer(amountCents, tr.currency, "it"),
     depositCents,
-    depositLabel: formatAmountForCustomer(depositCents, tr.currency, "it"),
+    depositLabel: depositCents === null ? null : formatAmountForCustomer(depositCents, tr.currency, "it"),
     founderDetails: text.details,
     customerPreview: preview.body,
     customerPreviewWithTitle: text.customerPreview,
@@ -321,6 +331,25 @@ function buildRoundView(row: QuoteApprovalRequest, tr: TransferRequest, client: 
 
 function depositButtons(bookingId: string): FounderButton[] {
   return [{ id: encodeDepositButtonId(bookingId), title: DEPOSIT_BUTTON_TITLE }];
+}
+
+function customerConfirmedButtons(bookingId: string): FounderButton[] {
+  return [{ id: encodeCustomerConfirmedButtonId(bookingId), title: CUSTOMER_CONFIRMED_BUTTON_TITLE }];
+}
+
+async function notifyConfirmationPending(tenantId: string, tr: TransferRequest, booking: Booking): Promise<void> {
+  try {
+    const client = await getClient(tenantId, tr.clientId);
+    if (!client || booking.finalAmountCents === null) return;
+    await sendToFounder(tenantId, {
+      parts: [buildConfirmationPendingText({ tr, client, totalCents: booking.finalAmountCents, currency: booking.currency })],
+      buttons: customerConfirmedButtons(booking.id),
+      link: linkTo(`/customers/${booking.clientId}`, FOUNDER_TEXTS.openBookingLink),
+      emailSubject: `IN ATTESA DI CONFERMA ${shortRef(tr.id)}`,
+    });
+  } catch (error) {
+    captureException(error, "quote_approval.confirmation_pending_notification_failed", { bookingId: booking.id });
+  }
 }
 
 async function notifyDepositPending(tenantId: string, tr: TransferRequest, booking: Booking): Promise<void> {
@@ -427,7 +456,12 @@ export async function approveQuoteRound(
     await releaseClaim(tenantId, row, "no price");
     return { outcome: "error", message: FOUNDER_TEXTS.error(ref, "nessun prezzo sul preventivo") };
   }
-  const expectedDeposit = depositForRound(row, expectedAmount);
+  const client = await getClient(tenantId, tr.clientId);
+  if (!client) {
+    await releaseClaim(tenantId, row, "client not found");
+    return { outcome: "error", message: FOUNDER_TEXTS.error(ref, "cliente non trovato") };
+  }
+  const expectedDeposit = depositForRound(row, expectedAmount, client);
   if (tr.status === "approved") {
     // Approved elsewhere (or a retry): never send the customer a price or
     // deposit the founder didn't see here.
@@ -461,7 +495,7 @@ export async function approveQuoteRound(
     if (tr.status === "approved") {
       // A retry after a failure further down: ACCEPT is the documented
       // idempotent way to reconcile an already-approved request.
-      approved = await acceptTransferRequest(tenantId, tr.id, approverProfileId, expectedDeposit);
+      approved = await acceptTransferRequest(tenantId, tr.id, approverProfileId, expectedDeposit ?? undefined);
     } else if (row.proposedAmountCents !== null) {
       approved = await modifyPriceForTransferRequest(
         tenantId,
@@ -469,18 +503,19 @@ export async function approveQuoteRound(
         approverProfileId,
         row.proposedAmountCents,
         tr.calculatedAmountCents === null ? "Prezzo inserito a mano dal titolare" : "Prezzo modificato dal titolare",
-        expectedDeposit,
+        expectedDeposit ?? undefined,
       );
     } else {
-      approved = await acceptTransferRequest(tenantId, tr.id, approverProfileId, expectedDeposit);
+      approved = await acceptTransferRequest(tenantId, tr.id, approverProfileId, expectedDeposit ?? undefined);
     }
 
     if (approved.finalAmountCents === null) {
       throw new Error("approved transfer_request has no final_amount_cents");
     }
-    // The booking is the record of the deposit actually requested.
+    // The booking is the record of the deposit actually requested (none
+    // for an italian customer).
     const created = await getBookingByTransferRequestId(tenantId, approved.id);
-    if (!created || created.depositAmountCents === null) {
+    if (!created) {
       throw new Error("prenotazione non creata");
     }
     booking = created;
@@ -509,16 +544,24 @@ export async function approveQuoteRound(
     decisionError: communication.status === "execution_failed" ? communication.error : null,
   });
   await alertIfCustomerSendFailed(tenantId, approved, sent, "il preventivo");
-  await notifyDepositPending(tenantId, approved, booking);
+  const noDeposit = booking.depositAmountCents === null;
+  if (noDeposit) await notifyConfirmationPending(tenantId, approved, booking);
+  else await notifyDepositPending(tenantId, approved, booking);
 
   const deposit = formatAmountForCustomer(booking.depositAmountCents ?? 0, booking.currency, "it");
   if (communication.status === "executed" || communication.status === "verified") {
-    return { outcome: "done", message: FOUNDER_TEXTS.approvedSent(ref, deposit) };
-  }
-  if (communication.status === "execution_failed") {
     return {
       outcome: "done",
-      message: FOUNDER_TEXTS.approvedSendFailed(ref, communication.error ?? "errore sconosciuto", deposit),
+      message: noDeposit ? FOUNDER_TEXTS.approvedSentNoDeposit(ref) : FOUNDER_TEXTS.approvedSent(ref, deposit),
+    };
+  }
+  if (communication.status === "execution_failed") {
+    const error = communication.error ?? "errore sconosciuto";
+    return {
+      outcome: "done",
+      message: noDeposit
+        ? FOUNDER_TEXTS.approvedSendFailedNoDeposit(ref, error)
+        : FOUNDER_TEXTS.approvedSendFailed(ref, error, deposit),
     };
   }
   return { outcome: "done", message: FOUNDER_TEXTS.approvedSendInProgress(ref) };
@@ -577,6 +620,9 @@ export async function reviseQuoteRound(
   if (!tr || tr.status !== "pending_admin_approval") {
     await repo.transitionApprovalRequest(tenantId, row.id, ["awaiting_decision", "awaiting_price"], "superseded");
     return { outcome: "refused", message: FOUNDER_TEXTS.noLongerPending(ref, tr?.status ?? "non trovato") };
+  }
+  if (depositCents !== null && !(await clientPaysDeposit(tenantId, tr.clientId))) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.noDepositForItalian(ref) };
   }
 
   const superseded = await repo.transitionApprovalRequest(
@@ -660,7 +706,8 @@ export async function confirmDepositReceived(
       content: buildBookingConfirmationContent({
         ...tripDetails(tr),
         to,
-        balanceCents: booking.finalAmountCents - booking.depositAmountCents,
+        totalCents: booking.finalAmountCents,
+        depositCents: booking.depositAmountCents,
         currency: booking.currency,
       }),
     });
@@ -682,6 +729,75 @@ export async function confirmDepositReceived(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     captureException(error, "quote_approval.deposit_received_failed", { bookingId });
+    return { outcome: "error", message: FOUNDER_TEXTS.error(ref, message) };
+  }
+}
+
+// Confermato dal cliente (italian customers, no deposit — founder decision
+// 2026-09-26): pending_confirmation -> confirmed, then the automatic
+// confirmation without deposit lines. Same double-click protection as
+// confirmDepositReceived: conditional transition + the confirmation's own
+// idempotency key.
+export async function confirmCustomerConfirmed(tenantId: string, bookingId: string): Promise<DecisionResult> {
+  if (!isQuoteApprovalEnabled()) return { outcome: "refused", message: FOUNDER_TEXTS.disabled };
+  const existing = await getBooking(tenantId, bookingId);
+  if (!existing || !existing.transferRequestId) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.bookingNotFound };
+  }
+  const ref = shortRef(existing.transferRequestId);
+
+  const to = await getLastInboundWhatsappPhoneE164(tenantId, existing.clientId);
+  if (!to || !isCustomerPhoneAllowed(to)) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.notATestPhone(ref) };
+  }
+
+  let result: ConfirmBookingDepositResult | null;
+  try {
+    result = await confirmBookingByCustomer(tenantId, bookingId);
+    if (!result) return { outcome: "refused", message: FOUNDER_TEXTS.bookingNotFound };
+    const booking = result.booking;
+    // Also refuses a foreign customer's booking (pending_deposit): that one
+    // is confirmed only by "Acconto ricevuto".
+    if (booking.status !== "confirmed" || booking.depositAmountCents !== null) {
+      return { outcome: "refused", message: FOUNDER_TEXTS.bookingNotConfirmable(ref, booking.status) };
+    }
+
+    const tr = await getTransferRequest(tenantId, existing.transferRequestId);
+    if (!tr || booking.finalAmountCents === null) {
+      throw new Error("dati della prenotazione incompleti per la conferma al cliente");
+    }
+    const sent = await sendBookingConfirmation({
+      tenantId,
+      clientId: booking.clientId,
+      dealId: booking.dealId,
+      transferRequestId: booking.transferRequestId,
+      bookingId: booking.id,
+      content: buildBookingConfirmationContent({
+        ...tripDetails(tr),
+        to,
+        totalCents: booking.finalAmountCents,
+        depositCents: null,
+        currency: booking.currency,
+      }),
+    });
+    await alertIfCustomerSendFailed(tenantId, tr, sent, "la conferma della prenotazione");
+
+    const communication = sent.communication;
+    const outcome: DecisionOutcome = result.changed ? "done" : "already";
+    const prefix = result.changed ? "" : `${FOUNDER_TEXTS.depositAlreadyConfirmed(ref)}\n`;
+    if (communication.status === "executed" || communication.status === "verified") {
+      return { outcome, message: prefix + FOUNDER_TEXTS.customerConfirmedSent(ref) };
+    }
+    if (communication.status === "execution_failed") {
+      return {
+        outcome,
+        message: prefix + FOUNDER_TEXTS.customerConfirmedSendFailed(ref, communication.error ?? "errore sconosciuto"),
+      };
+    }
+    return { outcome, message: prefix + FOUNDER_TEXTS.depositConfirmedSendInProgress(ref) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    captureException(error, "quote_approval.customer_confirmed_failed", { bookingId });
     return { outcome: "error", message: FOUNDER_TEXTS.error(ref, message) };
   }
 }
@@ -717,6 +833,9 @@ export async function enterManualPrice(
   if (!tr) return { outcome: "refused", message: FOUNDER_TEXTS.notFound };
   if (!(await customerAllowed(tenantId, tr.clientId))) {
     return { outcome: "refused", message: FOUNDER_TEXTS.notATestPhone(ref) };
+  }
+  if (depositCents !== null && !(await clientPaysDeposit(tenantId, tr.clientId))) {
+    return { outcome: "refused", message: FOUNDER_TEXTS.noDepositForItalian(ref) };
   }
 
   const claimed = await repo.transitionApprovalRequest(tenantId, row.id, ["info"], "superseded", {
@@ -778,6 +897,8 @@ export interface PanelManualPrice {
   client: Client;
   text: string;
   ref: string;
+  // false for an italian customer: no deposit field.
+  paysDeposit: boolean;
 }
 
 export interface PanelPendingDeposit {
@@ -789,11 +910,20 @@ export interface PanelPendingDeposit {
   ref: string;
 }
 
+export interface PanelPendingConfirmation {
+  booking: Booking;
+  transferRequest: TransferRequest;
+  client: Client;
+  totalLabel: string;
+  ref: string;
+}
+
 export interface PanelPending {
   enabled: boolean;
   quotes: PanelRound[];
   manualPrices: PanelManualPrice[];
   pendingDeposits: PanelPendingDeposit[];
+  pendingConfirmations: PanelPendingConfirmation[];
 }
 
 async function customerAllowed(tenantId: string, clientId: string): Promise<boolean> {
@@ -801,8 +931,15 @@ async function customerAllowed(tenantId: string, clientId: string): Promise<bool
   return phone !== null && isCustomerPhoneAllowed(phone);
 }
 
+async function clientPaysDeposit(tenantId: string, clientId: string): Promise<boolean> {
+  const client = await getClient(tenantId, clientId);
+  return client !== null && client !== undefined && customerPaysDeposit(client.phone);
+}
+
 export async function listPendingForPanel(tenantId: string): Promise<PanelPending> {
-  if (!isQuoteApprovalEnabled()) return { enabled: false, quotes: [], manualPrices: [], pendingDeposits: [] };
+  if (!isQuoteApprovalEnabled()) {
+    return { enabled: false, quotes: [], manualPrices: [], pendingDeposits: [], pendingConfirmations: [] };
+  }
 
   const quotes: PanelRound[] = [];
   const rows = await repo.listApprovalRequestsByStatus(tenantId, ["awaiting_decision", "awaiting_price", "processing"]);
@@ -825,7 +962,14 @@ export async function listPendingForPanel(tenantId: string): Promise<PanelPendin
     if (!(await customerAllowed(tenantId, tr.clientId))) continue;
     const client = await getClient(tenantId, tr.clientId);
     if (!client) continue;
-    manualPrices.push({ round: row, transferRequest: tr, client, text: buildManualPriceText(tr, client), ref: shortRef(tr.id) });
+    manualPrices.push({
+      round: row,
+      transferRequest: tr,
+      client,
+      text: buildManualPriceText(tr, client),
+      ref: shortRef(tr.id),
+      paysDeposit: customerPaysDeposit(client.phone),
+    });
   }
 
   const pendingDeposits: PanelPendingDeposit[] = [];
@@ -845,7 +989,23 @@ export async function listPendingForPanel(tenantId: string): Promise<PanelPendin
     });
   }
 
-  return { enabled: true, quotes, manualPrices, pendingDeposits };
+  const pendingConfirmations: PanelPendingConfirmation[] = [];
+  for (const booking of await listPendingConfirmationBookings(tenantId)) {
+    if (!booking.transferRequestId) continue;
+    if (!(await customerAllowed(tenantId, booking.clientId))) continue;
+    const tr = await getTransferRequest(tenantId, booking.transferRequestId);
+    const client = await getClient(tenantId, booking.clientId);
+    if (!tr || !client) continue;
+    pendingConfirmations.push({
+      booking,
+      transferRequest: tr,
+      client,
+      totalLabel: formatAmountForCustomer(booking.finalAmountCents ?? 0, booking.currency, "it"),
+      ref: shortRef(tr.id),
+    });
+  }
+
+  return { enabled: true, quotes, manualPrices, pendingDeposits, pendingConfirmations };
 }
 
 export interface PanelRoundDetail extends PanelRound {
@@ -910,6 +1070,11 @@ export async function handleFounderMessage(message: FounderInboundMessage): Prom
       await reply(tenantId, (await confirmDepositReceived(tenantId, depositBookingId)).message);
       return;
     }
+    const confirmedBookingId = decodeCustomerConfirmedButtonId(message.buttonId);
+    if (confirmedBookingId) {
+      await reply(tenantId, (await confirmCustomerConfirmed(tenantId, confirmedBookingId)).message);
+      return;
+    }
     const decoded = decodeButtonId(message.buttonId);
     if (!decoded) {
       await reply(tenantId, FOUNDER_TEXTS.unknownButton);
@@ -972,6 +1137,19 @@ async function resendPending(tenantId: string): Promise<void> {
     sent++;
   }
 
+  // Italian customers' bookings waiting for the customer's yes.
+  for (const booking of await listPendingConfirmationBookings(tenantId)) {
+    if (!booking.transferRequestId) continue;
+    if (!(await customerAllowed(tenantId, booking.clientId))) continue;
+    const total = formatAmountForCustomer(booking.finalAmountCents ?? 0, booking.currency, "it");
+    await reply(
+      tenantId,
+      FOUNDER_TEXTS.confirmationPending(shortRef(booking.transferRequestId), total),
+      customerConfirmedButtons(booking.id),
+    );
+    sent++;
+  }
+
   if (sent === 0) {
     await reply(tenantId, FOUNDER_TEXTS.nothingPending);
   }
@@ -1006,8 +1184,11 @@ async function handleModifyButton(tenantId: string, approvalRequestId: string): 
     return;
   }
   const ref = shortRef(row.transferRequestId);
+  const askPrice = (await clientPaysDeposit(tenantId, row.clientId))
+    ? FOUNDER_TEXTS.askPrice(ref)
+    : FOUNDER_TEXTS.askPriceNoDeposit(ref);
   if (row.status === "awaiting_price") {
-    await reply(tenantId, FOUNDER_TEXTS.askPrice(ref));
+    await reply(tenantId, askPrice);
     return;
   }
   if (row.status !== "awaiting_decision") {
@@ -1026,5 +1207,5 @@ async function handleModifyButton(tenantId: string, approvalRequestId: string): 
     await reply(tenantId, settledResult((await repo.getApprovalRequest(tenantId, row.id)) ?? row).message);
     return;
   }
-  await reply(tenantId, FOUNDER_TEXTS.askPrice(ref));
+  await reply(tenantId, askPrice);
 }

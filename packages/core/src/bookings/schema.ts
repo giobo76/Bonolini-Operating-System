@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const bookingStatusSchema = z.enum(["pending_deposit", "confirmed", "completed", "cancelled"]);
+export const bookingStatusSchema = z.enum(["pending_deposit", "pending_confirmation", "confirmed", "completed", "cancelled"]);
 
 export const createBookingSchema = z.object({
   clientId: z.string().uuid(),
@@ -16,9 +16,9 @@ export const createBookingSchema = z.object({
 // invoiced, paid) is simpler than one procedure per milestone.
 export const updateBookingSchema = z.object({
   id: z.string().uuid(),
-  // Never 'pending_deposit', and pending_deposit -> confirmed only through
-  // confirmBookingDeposit (which also advances the deal and emits
-  // booking.confirmed).
+  // Never 'pending_deposit' / 'pending_confirmation', and those become
+  // confirmed only through confirmBookingDeposit / confirmBookingByCustomer
+  // (which also advance the deal and emit booking.confirmed).
   status: z.enum(["confirmed", "completed", "cancelled"]).optional(),
   depositAmountCents: z.number().int().nonnegative().optional(),
   depositPaidAt: z.coerce.date().optional(),
@@ -70,9 +70,11 @@ export const ensureBookingSnapshotSchema = z.object({
   scheduledAt: z.date(),
   finalAmountCents: z.number().int().nonnegative(),
   currency: z.string().min(1),
-  // The deposit the customer is asked for. The booking starts at
-  // 'pending_deposit' and is confirmed only by confirmBookingDeposit.
-  depositAmountCents: z.number().int().positive(),
+  // The deposit a foreign customer is asked for: the booking starts at
+  // 'pending_deposit' and is confirmed only by confirmBookingDeposit. null
+  // for an italian customer (never a deposit): it starts at
+  // 'pending_confirmation' and is confirmed only by confirmBookingByCustomer.
+  depositAmountCents: z.number().int().positive().nullable(),
 });
 
 export type EnsureBookingSnapshotInput = z.infer<typeof ensureBookingSnapshotSchema>;

@@ -95,7 +95,9 @@ vi.mock("@bos/db", () => {
             target !== undefined &&
             (conditionValues.includes("pending_deposit")
               ? target.status === "pending_deposit"
-              : target.status !== "cancelled");
+              : conditionValues.includes("pending_confirmation")
+                ? target.status === "pending_confirmation"
+                : target.status !== "cancelled");
           if (applies) Object.assign(target, values);
           const result = applies ? [target] : [];
           return { returning: async () => result };
@@ -180,7 +182,7 @@ vi.mock("@bos/db", () => {
         number,
         string,
         string,
-        number,
+        number | null,
       ];
 
       const conflict = fakeState.bookings.some((b) => b.transferRequestId === transferRequestId);
@@ -236,6 +238,7 @@ const {
   cancelBookingByCalendarEventId,
   updateBooking,
   confirmBookingDeposit,
+  confirmBookingByCustomer,
 } = await import("./service");
 
 function inputFor(overrides: Partial<EnsureBookingSnapshotInput> = {}): EnsureBookingSnapshotInput {
@@ -417,6 +420,57 @@ describe("cancelBookingByCalendarEventId", () => {
   it("returns null when no booking exists for the given calendarEventId", async () => {
     const result = await cancelBookingByCalendarEventId("tenant-1", "does-not-exist");
     expect(result).toBeNull();
+  });
+});
+
+// Founder decision 2026-09-26: italian customers never pay a deposit.
+describe("italian customer: pending_confirmation", () => {
+  beforeEach(() => advanceDealStatus.mockClear());
+
+  it("a booking without deposit starts at pending_confirmation", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor({ depositAmountCents: null }));
+    expect(booking.status).toBe("pending_confirmation");
+    expect(booking.depositAmountCents).toBeNull();
+  });
+
+  it("confirmBookingByCustomer: pending_confirmation -> confirmed, deal confirmed, booking.confirmed once", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest(
+      "tenant-1",
+      inputFor({ dealId: "deal-1", depositAmountCents: null }),
+    );
+    jobsMock.emitDomainEvent.mockClear();
+
+    const first = await confirmBookingByCustomer("tenant-1", booking.id);
+    const second = await confirmBookingByCustomer("tenant-1", booking.id);
+
+    expect(first?.changed).toBe(true);
+    expect(first?.booking.status).toBe("confirmed");
+    expect(first?.booking.depositPaidAt).toBeNull();
+    expect(second?.changed).toBe(false);
+    expect(advanceDealStatus).toHaveBeenCalledTimes(1);
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledTimes(1);
+    expect(jobsMock.emitDomainEvent).toHaveBeenCalledWith(jobsMock.inngest, "booking.confirmed", {
+      tenantId: "tenant-1",
+      bookingId: booking.id,
+    });
+  });
+
+  it("never confirms a foreign customer's booking waiting for its deposit", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor());
+
+    const result = await confirmBookingByCustomer("tenant-1", booking.id);
+
+    expect(result?.changed).toBe(false);
+    expect(result?.booking.status).toBe("pending_deposit");
+  });
+
+  it("confirmBookingDeposit never confirms an italian booking", async () => {
+    const booking = await ensureBookingForApprovedTransferRequest("tenant-1", inputFor({ depositAmountCents: null }));
+
+    const result = await confirmBookingDeposit("tenant-1", booking.id);
+
+    expect(result?.changed).toBe(false);
+    expect(result?.booking.status).toBe("pending_confirmation");
   });
 });
 
