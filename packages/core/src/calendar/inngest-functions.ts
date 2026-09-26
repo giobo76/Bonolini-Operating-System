@@ -44,7 +44,8 @@ export const calendarSync = inngest.createFunction(
   },
 );
 
-// Founder decision 2026-09-25: a booking confirmed after the deposit gets
+// Founder decisions 2026-09-25/26: a booking confirmed (after the deposit,
+// or after "Confermato dal cliente" for an italian customer) gets
 // its event in the founder's calendar. A failure (Google permission not
 // granted yet, network) throws, so Inngest retries; the booking stays
 // confirmed either way. Idempotent: the event id is derived from the

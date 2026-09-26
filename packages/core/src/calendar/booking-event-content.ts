@@ -163,7 +163,10 @@ export function buildBookingEventDescription(input: BookingEventContentInput): s
     lines.push(`Acconto ricevuto: ${amount(input.depositCents, input.currency)}`);
     lines.push(`Saldo da incassare: ${amount(input.totalCents - input.depositCents, input.currency)}`);
   } else {
-    lines.push("Acconto: non registrato");
+    // Italian customer (+39): never a deposit, pays the driver the whole
+    // amount (founder decision 2026-09-26).
+    lines.push("Acconto: nessuno (cliente italiano)");
+    lines.push(`Da incassare: ${amount(input.totalCents, input.currency)}`);
   }
 
   lines.push("");

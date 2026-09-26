@@ -1,6 +1,6 @@
 # calendar — Google Calendar as a real-conversion source, never a second source of truth
 
-**Status:** Core v1 — Calendar sync (Calendar → bookings, the Real Conversion System) plus, since 2026-09-25, one narrow write path: an event for each booking confirmed after the deposit (BOS → Calendar), marked "ANNULLATO" when the booking is cancelled in BOS. Nothing else in BOS writes to Google Calendar; no event is ever deleted.
+**Status:** Core v1 — Calendar sync (Calendar → bookings, the Real Conversion System) plus, since 2026-09-25, one narrow write path: an event for each booking confirmed after the deposit or after "Confermato dal cliente" (BOS → Calendar), marked "ANNULLATO" when the booking is cancelled in BOS. Nothing else in BOS writes to Google Calendar; no event is ever deleted.
 
 **Owns:** the `calendar_connections` table — one row per tenant, which Google Calendar was explicitly selected as "the Bonolini Transfer services calendar," plus this module's own sync bookkeeping (`syncToken`, `lastSyncedAt`, `lastSyncStatus`, `lastSyncError`).
 
@@ -22,12 +22,12 @@ Until 2026-09-25 this module was read-only by design. The founder then asked for
 
 **Calls.** `events.insert()` when a booking is confirmed, `events.get()` + `events.patch()` when it is cancelled in BOS. Never `events.delete()`, never any other event.
 
-**Which bookings.** Only bookings confirmed after the deposit (`confirmBookingDeposit` → `booking.confirmed`) that come from a transfer request. A booking that already has a `calendar_event_id` (it came from Calendar in the first place) is skipped: its event already exists.
+**Which bookings.** Only bookings that come from a transfer request, when they become confirmed: after the deposit for a foreign customer (`confirmBookingDeposit`), after "Confermato dal cliente" for an italian one (`confirmBookingByCustomer`, no deposit — founder decision 2026-09-26). Both emit `booking.confirmed`. A booking that already has a `calendar_event_id` (it came from Calendar in the first place) is skipped: its event already exists.
 
 **The event** (founder decisions 2026-09-25):
 
 - Title `TRANSFER | Mario Rossi | Malpensa → Sondrio | €390` — with the price: the calendar is seen by the founder only.
-- Description: customer, phone, route, pickup date and time, passengers, children, luggage, flight/train/hotel when known, total price, deposit received, balance to collect.
+- Description: customer, phone, route, pickup date and time, passengers, children, luggage, flight/train/hotel when known, total price, deposit received, balance to collect. For an italian customer: "Acconto: nessuno (cliente italiano)" and "Da incassare: <total>".
 - Time = the whole time the founder is busy: the loop Sondrio → pickup → destination → Sondrio, from Google Maps (`maps-distance`'s `calculateBusyLoopFromBase`). The event starts when he has to leave Sondrio (pickup time minus the Sondrio → pickup leg) and lasts the whole loop, rounded outward to 5 minutes.
 - Minimum durations per route come from the versioned Business Rule `calendar.minimum_event_duration` (category `other`; seeded by migration `0031`: Malpensa, either direction, 5 hours). New minimums for other routes are a new rule version, not code.
 - If Google Maps gives no duration: pickup time + 2 hours (never less than the route minimum) and "Durata da verificare" in the description. Same note if the minimum-duration rule is present but invalid.

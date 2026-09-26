@@ -231,6 +231,13 @@ describe("buildBookingEventDescription", () => {
     expect(description).not.toContain("Tempo occupato:");
   });
 
+  it("italian customer (no deposit): the whole amount to collect", () => {
+    const description = buildBookingEventDescription(contentInput({ depositCents: null }));
+    expect(description).toContain("Prezzo totale: 390,00 €\nAcconto: nessuno (cliente italiano)\nDa incassare: 390,00 €");
+    expect(description).not.toContain("Acconto ricevuto");
+    expect(description).not.toContain("Saldo");
+  });
+
   it("train and hotel only when known", () => {
     const description = buildBookingEventDescription(contentInput({ trainNumber: "RV 2811", hotel: "Hotel Europa" }));
     expect(description).toContain("Treno: RV 2811");

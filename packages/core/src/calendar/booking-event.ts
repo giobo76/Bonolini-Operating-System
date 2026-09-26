@@ -22,7 +22,8 @@ import {
 } from "./booking-event-content";
 
 // The one write path to Google Calendar (founder decisions 2026-09-25):
-// events.insert when a booking is confirmed after the deposit,
+// events.insert when a booking is confirmed (after the deposit, or after
+// "Confermato dal cliente" for an italian customer),
 // events.get + events.patch ("ANNULLATO", grey) when it is cancelled in BOS.
 // Never events.delete, never an event BOS did not create. See README.md.
 

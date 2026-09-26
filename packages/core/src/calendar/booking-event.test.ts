@@ -168,6 +168,15 @@ describe("createCalendarEventForBooking", () => {
     expect(state.attachCalls).toEqual([["tenant-1", BOOKING_ID, EVENT_ID]]);
   });
 
+  it("italian customer confirmed without deposit (\"Confermato dal cliente\"): the event is created too", async () => {
+    state.bookings.set(BOOKING_ID, booking({ depositAmountCents: null }));
+
+    expect(await createCalendarEventForBooking("tenant-1", BOOKING_ID)).toBe("created");
+    const description = inserted().requestBody.description;
+    expect(description).toContain("Acconto: nessuno (cliente italiano)");
+    expect(description).toContain("Da incassare: 390,00 €");
+  });
+
   it("lasts the whole busy loop from Sondrio (Google Maps), starting when the founder leaves", async () => {
     await createCalendarEventForBooking("tenant-1", BOOKING_ID);
 
